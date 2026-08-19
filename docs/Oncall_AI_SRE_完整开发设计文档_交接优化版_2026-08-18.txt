@@ -1,0 +1,1131 @@
+
+ONCALL
+AI SRE 平台完整开发设计文档
+Architecture / Modules / Data / Agent / RAG / Monitoring / Feishu / Web / Delivery
+Development Baseline v1.0 / Local Handoff v1.0.0-rc1
+技术基线日期：2026-08-18
+状态：架构与主要源码已落地；RC1 等待目标 Windows 环境、真实外部依赖与 API 的最终联调验收
+设计原则：稳定优先、模块边界清晰、业务事实持久化、Agent 可替换、知识索引可重建、监测检测确定性、AI 负责调查与解释。
+
+目录
+1. 文档目的与产品定义
+2. 范围、非目标与设计原则
+3. 系统总体架构
+4. 运行拓扑与进程模型
+5. 代码模块与目录
+6. 核心领域模型
+7. Project 与监控配置
+8. Monitoring Engine
+9. 监测 Integration 与 32 个基线信号
+10. Detector、Alert 与 Incident 生命周期
+11. OncallAgent / LangGraph
+12. Agent Tool System
+13. Memory 与 Context 管理
+14. RAG / Knowledge Service
+15. Feishu Gateway
+16. Web 前端
+17. API 设计
+18. 数据库设计
+19. 后台任务与可靠性
+20. 流式响应协议
+21. 安全设计
+22. 可观测与审计
+23. 错误处理/幂等/重试
+24. 部署、启动、备份与恢复
+25. 测试与 Agent Evaluation
+26. 开发规范
+27. 分阶段实施计划
+28. V1 验收标准
+29. V2+ 路线图
+附录 A. 关键接口示例
+附录 B. 默认规则与参数
+附录 C. 参考资料
+30. 当前代码实现状态与 CodeX 本地交接
+附录 D. Release Gate 与本地测试矩阵
+
+1. 文档目的与产品定义
+本文档是 Oncall AI SRE 从 0 到 1 开发的正式基线。后续需求、代码结构、接口设计和测试应以本文件为默认依据；变更核心架构必须新增 ADR，而不是在实现中隐式改变。
+产品定义：Oncall 是一个持续监测本机多个服务项目、识别 Incident，并由统一 AI Agent 基于实时工具证据和运维知识库完成调查、解释、给出可执行处置方案与恢复验证，同时支持 Web/飞书持续追问的 AI SRE 平台。
+核心能力
+用户价值
+完整 RAG
+上传运维文档后，从 Docling 解析、清洗、结构化 Chunk、Hybrid Retrieval 到引用回答形成闭环。
+运维对话
+用户通过 Web/飞书咨询 SOP 或让 Agent 查询实时状态。
+主动监测
+系统无需用户提问即可周期采集、规则检测异常。
+自主调查
+发生 Incident 后，Agent 调多个只读 Tool 收集 Evidence、结合 RAG 判断根因。
+完整故障报告
+主动发送症状、证据、根因置信度、操作步骤、风险、验证步骤。
+持续追问
+Incident 报告同时是会话入口；用户继续追问时恢复 Incident Context。
+持久多会话
+像 ChatGPT 一样多会话；服务/电脑重启后历史仍在并可继续。
+2. 范围、非目标与设计原则
+2.1 V1 范围
+单管理员用户；数据库预留 user_id，但不实现组织、多租户、RBAC。
+本机多项目：Oncall 与被监控项目运行在同一 Windows 主机；支持进程、日志、Docker、PostgreSQL、HTTP 服务。
+Agent 只读调查，不执行重启/杀进程/写 SQL 等有副作用操作。
+Web 与飞书均可对话；飞书可主动接收 Incident 报告并在同一消息线程继续追问。
+知识库支持 PDF/DOCX/PPTX/HTML/Markdown/TXT 等 Docling 可解析格式，具体 allowlist 以部署测试为准。
+2.2 V1 非目标
+远程 Linux/Windows Agent
+企业多租户/SSO/RBAC
+自动修复与无人审批动作
+Prometheus/Grafana 强依赖
+大规模日志全文存储平台
+Kubernetes 自动发现
+2.3 不可违反的设计原则
+1. 检测是确定性代码，调查才使用 LLM。
+2. 业务事实存 PostgreSQL；LangGraph checkpoint 不是业务数据库。
+3. Milvus 是索引，不是知识原始事实源。
+4. Agent 不拥有跨 project 任意切换权限；范围由运行时注入。
+5. V1 无 destructive tools；未来动作必须 risk classification + explicit approval。
+6. 所有 Agent 结论尽可能引用 Evidence；未知时明确“不确定”，禁止编造监控事实。
+7. 所有重要异步工作必须 durable、幂等、可重试。
+3. 系统总体架构
+[Web Vue]                 [Feishu Bot]    |                          |    +------ Channel/Gateway ---+                 |             FastAPI                 |       Application Services   +------+------+------+------+   |      |      |      |      |Project Chat Incident Knowledge Notification   |      |      |      |      |   |      +--- OncallAgent ----+   |             LangGraph   |          /    |      \   |        RAG  Tools   Context   |         |      |       |   |      Milvus  Integrations |   |                 |         |   +----------- PostgreSQL ----+                     ^                     |             Monitoring Engine       Scheduler -&gt; Collect -&gt; Detect                     |                Incident Manager
+图 1  系统逻辑架构
+层
+职责
+禁止事项
+Presentation / Channels
+Web、飞书消息接入和展示
+不得写业务规则或直接访问数据库
+Application
+用例编排、事务边界、服务接口
+不得依赖具体 UI
+Domain
+Project/Incident/Evidence/Diagnosis 等业务模型与规则
+不得依赖 FastAPI/LangGraph/Milvus SDK
+Agent
+推理图、Prompt、Tool policy、Context builder
+不得成为业务事实存储
+Infrastructure
+DB、LLM、Milvus、文件、Feishu、OS/Docker/DB/HTTP adapter
+不得反向定义领域语义
+4. 运行拓扑与进程模型
+代码是一个仓库和一个逻辑应用，但运行时拆成多个进程，隔离交互请求、主动监测、Agent 长任务和 Docling CPU 密集任务。
+进程
+职责
+并发/可靠性
+oncall-api
+REST API、Web 静态资源、聊天流、Feishu WS listener（V1 单实例）
+V1 1 worker，避免重复 Feishu 长连接；后续拆 gateway
+monitor-worker
+APScheduler、周期采集、Detector、Incident 状态更新
+单 leader；监控 run 有数据库租约/幂等
+agent-worker
+领取 incident_investigate 等 jobs，运行 LangGraph
+可扩展多个 worker；jobs SKIP LOCKED
+rag-worker
+Docling parse、chunk、embedding、Milvus indexing
+与 API 隔离；可重试/可取消
+进程通信：V1 不使用 Redis。所有跨进程命令通过 PostgreSQL durable jobs/outbox 传递，实时 Web 流由 API 直接运行交互 Agent；主动 Incident 调查由 agent-worker 执行。
+5. 代码模块与目录
+oncall/  pyproject.toml  uv.lock  compose.yaml  .env.example  backend/    src/oncall/      bootstrap/              # config, dependency wiring      domain/        projects/        conversations/        incidents/        monitoring/        knowledge/      application/        services/        ports/        dto/      agent/        graph.py        state.py        nodes/        context/        prompts/        schemas/      rag/        ingestion/        cleaning/        chunking/        retrieval/        indexing/      monitoring/        scheduler.py        collector.py        detector.py        incident_manager.py        snapshots.py      integrations/        host/        process/        logs/        docker/        postgres/        service/      tools/        registry.py        policies.py        executor.py      channels/        feishu/      infrastructure/        db/        llm/        vector/        storage/        jobs/        secrets/      api/        app.py        routers/        schemas/        dependencies.py      workers/        monitor_worker.py        agent_worker.py        rag_worker.py    alembic/    tests/{unit,integration,e2e,evals}/  web/    src/      api/ components/ layouts/ pages/ stores/ router/ types/  data/knowledge/  scripts/
+6. 核心领域模型
+实体
+关键字段
+职责
+Project
+id, user_id, name, enabled, timezone
+一个被监控项目，聚合所有目标配置
+Conversation
+id, user_id, project_id?, incident_id?, title, type, updated_at
+跨 Web/Feishu 的逻辑会话
+Message
+id, conversation_id, role, content, channel, status
+永久聊天消息事实
+SystemSnapshot
+project_id, observed_at, signals, collector_status
+一次周期采集的压缩事实
+AlertEvent
+rule_id, resource_key, state_before/after, values
+规则状态变化事件
+Incident
+id, fingerprint, project_id, status, severity, first/last_seen
+一次持续故障生命周期
+Evidence
+incident_id, type, source_tool, observed_at, summary, raw_ref
+调查的可引用事实
+Diagnosis
+incident_id, root_cause, confidence, remediation, verification
+结构化最终调查结论
+ToolRun
+run_id, tool_name, params_hash, result_summary, latency, status
+工具执行审计
+KnowledgeDocument
+doc_id, scope, active_version, status
+知识文档事实入口
+7. Project 与监控配置
+Project 是所有监测与 Tool 的权限边界。用户通过 Web 添加项目，不在业务代码中写死 AutoGEO。
+配置块
+主要字段
+示例
+基本
+name, enabled, poll_interval_seconds
+AutoGEO / 300
+Process Target
+name/executable, cmdline_contains[], cwd?, port?
+python.exe + Auto_GEO-main
+Log Source
+path, encoding, multiline_pattern?, level_regex
+D:\GEO\...\app.log
+Docker Target
+container_name/id
+autogeo-postgres
+Database Profile
+host, port, db, user, encrypted_secret_ref, sslmode
+PostgreSQL read-only
+Service Endpoint
+url, method, timeout_ms, expected_status
+http://127.0.0.1:8000/health
+Rules
+metric_key, op, threshold, hit_count, recovery_threshold
+host.cpu.percent &gt; 85 x2
+Notification
+feishu target, severity filter
+private chat / group
+Process 匹配：不能仅按 python.exe 匹配，否则会把同机其他 Python 项目算入 AutoGEO。至少组合 executable/name + cmdline substring + working directory，必要时再绑定监听端口。
+8. Monitoring Engine
+APScheduler tick   -&gt; load enabled Projects   -&gt; collect enabled Integrations (parallel with timeout)   -&gt; normalize into SystemSnapshot   -&gt; persist compact metric samples / collector health   -&gt; Detector.evaluate(snapshot, rule_state)   -&gt; AlertEvents   -&gt; IncidentManager.apply(events)       -&gt; no incident: finish       -&gt; new FIRING: create Incident + Conversation + investigation job       -&gt; existing FIRING: update last_seen; usually no Agent rerun       -&gt; RESOLVED: close Incident + recovery notification
+8.1 采集策略
+默认周期 300 秒；每 Project 可配置 30 秒以上。V1 不支持小于 10 秒高频监控。
+同一项目 6 类 Integration 并发采集，但每类独立 timeout；部分 collector 失败不使整轮 Snapshot 丢失。
+SystemSnapshot 是压缩摘要；完整日志/进程详情不周期性复制，Agent 需要时通过 Tool 即时查。
+metric_samples 默认 30 天 retention，可配置；聚合/清理作业每日执行。
+8.2 Snapshot 示例
+{  "project_id": "...",  "observed_at": "2026-08-18T18:30:00+08:00",  "host": {"cpu_percent": 91.2, "memory_percent": 66.0},  "process": {"target_alive": true, "child_count": 11},  "logs": {"error_count_window": 23, "top_signature": "Connection refused"},  "docker": {"running": true, "restart_count": 0},  "database": {"reachable": true, "connections_usage_percent": 95.0},  "service": {"reachable": true, "latency_ms": 4800}}
+9. 监测 Integration 与 32 个基线信号
+“32 个”是 V1 基线信号集合，不代表每个 Project 必须全部启用；只有已配置/可获取的 signal 才参与规则。Windows 环境不采用 Linux Load Average 作为默认信号。
+类别
+Signal Key
+含义
+来源
+Host
+host.cpu.percent
+CPU 使用率 %
+psutil
+Host
+host.memory.percent
+内存使用率 %
+psutil
+Host
+host.memory.available_bytes
+可用内存
+psutil
+Host
+host.disk.usage_percent
+配置磁盘/目录占用率
+psutil
+Host
+host.disk.free_bytes
+剩余磁盘空间
+psutil
+Host
+host.disk.read_bytes_per_sec
+磁盘读速率
+delta
+Host
+host.disk.write_bytes_per_sec
+磁盘写速率
+delta
+Host
+host.net.rx_bytes_per_sec
+网络接收速率
+delta
+Host
+host.net.tx_bytes_per_sec
+网络发送速率
+delta
+Process
+process.target.alive
+目标进程是否存在
+psutil
+Process
+process.target.count
+目标进程数
+psutil
+Process
+process.target.cpu_percent_sum
+目标进程总 CPU
+psutil
+Process
+process.target.rss_bytes_sum
+目标进程 RSS 总内存
+psutil
+Process
+process.target.child_count
+子进程数
+psutil
+Logs
+log.error.count_window
+窗口 ERROR 数
+cursor tail
+Logs
+log.warning.count_window
+窗口 WARNING 数
+cursor tail
+Logs
+log.error.rate_per_min
+ERROR 速率
+derived
+Logs
+log.top_signature.count
+最高频错误签名次数
+parser
+Docker
+container.running
+容器运行状态
+Docker SDK
+Docker
+container.health
+Health 状态；无 healthcheck 则 unknown
+Docker SDK
+Docker
+container.cpu_percent
+容器 CPU
+Docker stats
+Docker
+container.memory_percent
+容器内存
+Docker stats
+Docker
+container.restart_count
+重启累计/增量
+inspect
+Database
+db.reachable
+数据库可连接
+SQL
+Database
+db.connections.usage_percent
+连接使用率
+pg_stat_activity
+Database
+db.long_query.count
+长查询数量
+pg_stat_activity
+Database
+db.lock_wait.count
+锁等待数量
+pg_locks/activity
+Database
+db.deadlock.delta
+死锁计数增量
+pg_stat_database
+Service
+service.reachable
+HTTP 可达性
+httpx
+Service
+service.status_code
+HTTP 状态码
+httpx
+Service
+service.latency_ms
+探测延迟
+httpx
+Service
+service.consecutive_failures
+连续失败次数
+rule state
+HTTP 错误率：V1 不凭单次 health probe 伪造业务“错误率”。若应用未来暴露 /metrics 或可从访问日志可靠计算，再增加 service.error_rate。
+10. Detector、Alert 与 Incident 生命周期
+10.1 Rule State Machine
+NORMAL -&gt; PENDING -&gt; FIRING -&gt; RECOVERING -&gt; NORMAL                |                        |                +---- still abnormal ---+trigger: threshold + consecutive_hitsrecovery: separate threshold + consecutive_recoveries (hysteresis)
+字段
+含义
+trigger_threshold
+进入异常候选的阈值
+trigger_for
+连续命中次数，例如 2
+recovery_threshold
+低于/高于此恢复阈值才算恢复候选
+recovery_for
+连续恢复次数，例如 2
+severity
+info/warning/critical
+resource_key
+host / process target / container / db / endpoint
+10.2 Incident 生命周期
+OPEN -&gt; INVESTIGATING -&gt; DIAGNOSED -&gt; RESOLVED          \-&gt; FAILED (Agent run exhausted)Alert rule state 与 Incident business status 是两套状态，不混用。
+Fingerprint：SHA-256(project_id | rule_id | resource_key | anomaly_type)。同一阈值的数值变化不创建新 Incident。
+首次 FIRING：创建/合并 Incident，自动创建 Incident Conversation，enqueue incident_investigate。
+持续 FIRING：只更新 last_seen 和新 AlertEvent；默认不每轮调用 Agent。
+再调查：严重度升级、新关联异常/新证据、用户点“深度调查”、或超过默认 60 分钟 stale interval。
+恢复：恢复条件成立后 status=RESOLVED，发送恢复通知，保留所有 Evidence/Diagnosis。
+11. OncallAgent / LangGraph
+入口 Mode 由系统上下文确定，不额外花一次 LLM 做分类：普通消息无 Incident -&gt; CHAT；监控触发 -&gt; INVESTIGATE；绑定 Incident 的回复 -&gt; FOLLOW_UP。
+11.1 Agent State
+OncallState:  run_id, mode  conversation_id, incident_id?, project_id?  user_message  working_messages  conversation_summary?  incident_context?  evidence[]  hypotheses[]  tool_calls_used, tool_budget  knowledge_refs[]  diagnosis?  final_response?  error?
+11.2 Graph 节点
+START  -&gt; load_context  -&gt; reason       |-- no tool needed -----------------&gt; finalize_chat/diagnosis       |-- tool calls -&gt; guard_tools -&gt; execute_tools                              -&gt; record_observations/evidence                              -&gt; reason (bounded loop)  -&gt; persist_result  -&gt; END
+节点
+职责
+关键约束
+load_context
+加载会话摘要、近期消息、Project、Incident/Evidence
+只读数据库；构建 token budget
+reason
+LLM 选择回答或工具
+绑定模式 Prompt + Tool schema
+guard_tools
+权限/预算/重复调用/参数检查
+project_id runtime 注入
+execute_tools
+调用 Integration/RAG
+timeout、truncation、telemetry
+record_observations
+标准化 ToolResult -&gt; Evidence/working context
+仅真实工具结果可标记事实 Evidence
+finalize_chat
+生成普通回答
+引用 RAG/Tool 结果
+finalize_diagnosis
+输出 DiagnosisReport
+必须满足 schema；列出不确定性
+persist_result
+保存 Message/Diagnosis/AgentRun
+事务内完成重要状态
+11.3 Tool/循环预算
+Mode
+最大 Tool Calls
+最大 Reason Loop
+典型用途
+CHAT
+5
+4
+普通 SOP 问答/实时查询
+FOLLOW_UP
+6
+5
+围绕 Incident 追问/复查
+INVESTIGATE
+10
+8
+自动调查
+DEEP（人工触发）
+14
+12
+复杂故障深度调查
+同参数 Tool 重复调用检测
+无新 Evidence 连续 N 轮触发 stagnation breaker
+每 Tool 独立 timeout
+Tool 输出硬截断与结构化摘要
+整个 run 总 timeout
+预算耗尽时必须以“已知/未知/下一步”收敛输出
+12. Agent Tool System
+V1 对模型注册 8 个只读 Tool。Tool 数量不是监测 signal 数量；每个 Tool 聚合一个诊断意图，避免几十个细碎工具增加模型选择错误。
+Tool
+能力
+实现
+query_host_metrics
+当前/指定时间窗 Host 指标摘要
+HostIntegration
+query_metric_history
+某 signal 的历史趋势
+metric_samples repository
+query_processes
+目标进程/子进程/PID/命令行/资源详情
+ProcessIntegration
+query_logs
+按时间/level/keyword/signature 查询日志片段
+LogIntegration
+query_containers
+容器状态、stats、restart、health
+DockerIntegration
+query_database
+连接、长 SQL、锁、死锁等只读诊断
+DatabaseIntegration
+query_service_health
+实时 HTTP 探测与历史结果
+ServiceIntegration
+search_knowledge
+完整 hybrid RAG 检索
+KnowledgeService
+12.1 统一 ToolResult
+ToolResult:  ok: bool  summary: str  data: object | list  observed_at: datetime  truncated: bool  error_code: str | null  source_ref: str | null
+安全边界：Tool schema 不提供 project_id 给模型；Executor 从 OncallState 注入 ProjectScope。V1 的 restart_service / terminate_process / restart_container 等 Action Tools 不注册。
+13. Memory 与 Context 管理
+层
+保存位置
+生命周期
+用途
+Conversation Memory
+PostgreSQL conversations/messages
+永久
+所有用户/Agent 消息事实；重启后继续聊
+Incident Memory
+incidents/evidence/diagnoses/tool_runs
+永久
+故障工作档案；FOLLOW_UP 的事实上下文
+LangGraph Checkpoint
+PostgreSQL langgraph schema
+运行期/可保留
+Graph 恢复、短期 thread state；不是业务事实
+Long-term Personalization
+V1 不实现
+未来
+用户偏好、团队知识等
+RAG Knowledge
+文件 + PG + Milvus
+文档版本化
+操作手册/SOP；不是 Memory
+13.1 多会话持久化
+Web sidebar conversation_id C-123         |         +-- PostgreSQL Conversation + Messages (source of truth)         |         +-- LangGraph thread_id = C-123         |         +-- optional incident_id = INC-009Restart PC/service -&gt; PostgreSQL remains -&gt; GET conversations/messages -&gt; continue C-123
+13.2 Context Builder
+数据库始终保存全部 Message；不会因为上下文裁剪而删除历史。
+LLM 输入 = System Prompt + Project Context + Running Summary + Incident Context（若有）+ 最近消息 + 当前 Evidence + 本轮 RAG/Tool 结果。
+当历史超过约 40 条消息或 12k tokens（两者任一）触发 summary job；实际阈值可调。
+近期原始消息预算默认约 8k tokens，并根据当前模型 context_window 动态计算；不是固定截断条数。
+若聊天流中断：Message 仍保存，agent_run 标记 INTERRUPTED；Web 提供“继续生成”，而不是丢失会话。
+14. RAG / Knowledge Service
+14.1 数据事实与文件布局
+data/knowledge/{document_id}/{version_id}/  raw/&lt;original_filename&gt;  document.json       # canonical DoclingDocument  document.md         # normalized Markdown  manifest.json       # parser/chunker/embedding metadata
+事实
+位置
+说明
+文档元数据/版本
+PostgreSQL
+title、checksum、scope、status、active_version
+原始文件
+Filesystem
+恢复/重新解析所必需
+Canonical JSON/MD
+Filesystem + PG path
+清洗后可重复 chunk 的事实中间层
+Chunk Metadata/Content
+PostgreSQL
+便于版本/审计/引用；Milvus 同步索引
+Dense/BM25 Index
+Milvus
+可随时重建，不反向覆盖 source of truth
+14.2 Ingestion Pipeline
+1. Upload：扩展名 + MIME + 文件大小 allowlist，sanitize filename。
+2. Checksum：SHA-256 去重；相同 scope + checksum 默认不重复入库。
+3. Parse：rag-worker 调 Docling，输出统一 DoclingDocument。[R5][R7]
+4. Normalize/Clean：去控制字符、冗余页眉页脚、重复空白；保留标题、编号、表格、代码块、来源页。
+5. Canonicalize：保存 document.json 与 document.md。
+6. Chunk：Docling HybridChunker baseline；SOP 结构边界优先。[R6]
+7. Metadata：heading_path、section_type、page_range、scope、version 等。
+8. Embedding：通过 EmbeddingGateway 生成 dense vectors。
+9. Index：Milvus 写入 text + dense + BM25 function；成功后 document status=READY。[R8][R9]
+14.3 Chunk 规范
+规则
+默认
+目标长度
+600–900 tokens
+重叠
+80–120 tokens；仅跨自然边界需要时
+标题
+heading_path 写入 metadata，并可拼入 retrieval representation
+编号步骤
+尽量整组保留，不把“步骤 1/2/3”随意拆散
+表格
+优先保留表头/上下文；Docling HybridChunker 可用于表格上下文处理 [R6]
+代码块
+单独或与解释段绑定，避免切断命令
+引用
+保留 page/page_range、document_id/version_id/chunk_id
+14.4 Retrieval Pipeline
+Agent query  -&gt; Rule-based normalize (service/error code/metric names preserved)  -&gt; metadata filter: [global OR current project]  -&gt; dense_top20  ||  bm25_top20  -&gt; RRF fusion / dedupe -&gt; candidate ~30  -&gt; reranker -&gt; top5  -&gt; relevance threshold  -&gt; CitationPackage  -&gt; if poor/no hit: one optional LLM rewrite -&gt; retry once
+中文知识库必须为 BM25 配置并回归验证中文 analyzer/tokenizer；不能默认按英文分词效果推断质量。
+每次检索记录 query、normalized query、召回 IDs、分数、rerank、最终引用，用于离线评估。
+Embedding/Rerank/LLM 都通过 Profile Adapter 配置，不在业务代码硬编码模型名。
+14.5 Model Profiles
+Profile
+用途
+关键 capability
+chat
+普通对话
+streaming, tools
+investigation
+调查
+tools, structured output, larger context
+summary
+会话摘要
+低成本 structured/text
+embedding
+dense 向量
+dimension, batch size
+rerank
+精排
+query-document scoring
+15. Feishu Gateway
+飞书既是通知出口，也是完整对话入口。V1 使用自建应用机器人 + 官方 Python SDK；本机部署首选 WebSocket 长连接接收事件。[R10][R11]
+Feishu WebSocket Event  -&gt; dedupe event_id/message_id  -&gt; resolve sender/chat/root_message  -&gt; ChannelBinding lookup       normal DM/@bot -&gt; Conversation -&gt; CHAT       reply to Incident report -&gt; Incident Conversation -&gt; FOLLOW_UP  -&gt; OncallAgent  -&gt; send/reply message or CardMonitoring -&gt; Incident Diagnosis  -&gt; Notification Outbox  -&gt; Feishu Card  -&gt; save message_id/root_id &lt;-&gt; incident_id/conversation_id
+行为
+规则
+私聊普通消息
+使用用户的 active conversation；/new 创建新会话
+群聊
+默认仅 @bot 或显式配置 allowlist 时响应
+Incident 卡片回复
+按 root_message_id 映射到 Incident Conversation，进入 FOLLOW_UP
+主动通知
+首次诊断、严重度升级、恢复；重复更新受 cooldown 约束
+失败
+指数退避；超过阈值进入 DEAD/FAILED 并保留 outbox 记录
+卡片内容
+Severity/Status、服务、摘要、Evidence、Root Cause/Confidence、Remediation、Verification、Refs、继续追问提示
+16. Web 前端
+16.1 页面信息架构
+页面
+V1 功能
+Chat
+新建/切换/重命名/搜索/归档删除会话；Markdown、引用、Tool timeline、流式回答；Incident 会话
+Incidents
+筛选状态/严重度/项目；详情展示时间线、Evidence、Diagnosis、通知；“继续对话/深度调查”
+Projects
+新增/编辑本机项目；配置 6 类 Integration 和规则；连接测试；当前 Snapshot
+Knowledge
+上传、解析状态、版本、scope、删除、重新索引、失败重试
+Settings
+Model Profiles、Embedding/Rerank、Feishu、保留策略、安全设置
+16.2 ChatGPT 式会话
++------------------+--------------------------------------+| + 新建会话        | Oncall                              || 搜索会话          |                                      ||                  | User: 当前 AutoGEO 正常吗？          || 今天             |                                      ||  AutoGEO 状态    | Agent: 正在检查...                   ||  PostgreSQL SOP |  [tool] query_service_health ✓       ||                  |  [tool] query_database ✓             || Incidents        |  当前服务可达...                      ||  🔴 CPU HIGH     |                                      ||  🟢 DB recovered | [输入消息......................][发送]|+------------------+--------------------------------------+
+Conversation 列表来自 PostgreSQL，刷新/重启仍然存在。
+Tool 执行只展示摘要，默认折叠；不要把敏感原始日志完整暴露。
+Markdown -&gt; markdown-it -&gt; DOMPurify；禁止直接 innerHTML 注入未清洗模型文本。
+Incident Conversation 标记 severity/status，并能跳转到 Incident 详情。
+17. API 设计
+域
+主要 Endpoint
+Auth
+POST /api/auth/login；POST /logout；GET /me
+Conversations
+POST/GET /api/conversations；GET/PATCH/DELETE /{id}；GET /{id}/messages；POST /{id}/messages:stream；POST /{id}/resume
+Projects
+GET/POST /api/projects；GET/PATCH/DELETE /{id}；POST /{id}/test；GET /{id}/snapshot；GET/PATCH /{id}/monitoring-rules
+Incidents
+GET /api/incidents；GET /{id}；POST /{id}/investigate；POST /{id}/conversation；POST /{id}/resolve（人工标记，仅管理）
+Knowledge
+POST/GET /api/knowledge/documents；GET/DELETE /{id}；POST /{id}/reindex；GET /jobs/{id}
+Settings
+GET/PATCH model-profiles；embedding/rerank；feishu；retention
+Monitoring
+GET /api/monitoring/metrics?project_id=...&amp;metric_key=...&amp;from=...&amp;to=...
+所有输入/输出使用 Pydantic DTO；OpenAPI 是前后端契约。
+删除默认 soft-delete/archived；真正 purge 走显式管理流程。
+API 错误统一 ProblemDetail：code/message/request_id/details。
+聊天流使用单独流式协议，最终 Message 仍通过数据库事实确认。
+18. 数据库设计
+18.1 业务表
+表
+关键字段
+用途
+users
+id, username, password_hash, created_at
+单用户也保留 user_id
+sessions
+id, user_id, token_hash, expires_at
+Web session
+projects
+id, user_id, name, enabled, poll_interval, created/updated
+监控聚合根
+project_process_targets
+id, project_id, executable, cmdline_filters, cwd, port
+进程目标
+project_log_sources
+id, project_id, path, encoding, parser_config
+日志源
+project_docker_targets
+id, project_id, container_ref
+容器目标
+project_database_profiles
+id, project_id, type, host, db, user, secret_ref
+V1 postgres
+project_service_endpoints
+id, project_id, url, method, expected_status, timeout
+HTTP 探测
+monitoring_rules
+id, project_id, metric_key, op, thresholds, hit/recovery
+Detector 规则
+monitoring_runs
+id, project_id, started/finished, status, collector_status
+巡检批次
+metric_samples
+project_id, metric_key, resource_key, ts, value
+时间序列样本
+log_cursors
+source_id, file_identity, offset, size, mtime
+增量读取游标
+alert_events
+id, rule_id, project_id, resource_key, state_from/to, payload
+规则变化
+incidents
+id, project_id, fingerprint, status, severity, first/last_seen
+故障生命周期
+incident_evidence
+id, incident_id, type, source, observed_at, summary, raw_ref
+事实证据
+diagnoses
+id, incident_id, agent_run_id, structured_json, confidence
+诊断版本
+conversations
+id, user_id, project_id?, incident_id?, type, title, updated_at
+会话
+messages
+id, conversation_id, role, content, channel, status, created_at
+消息事实
+conversation_summaries
+conversation_id, through_message_id, summary, token_estimate
+长会话摘要
+agent_runs
+id, mode, conversation_id, incident_id, status, model_profile, prompt_version, usage
+Agent 审计
+tool_runs
+id, agent_run_id, tool_name, params_hash, status, summary, latency
+Tool 审计
+knowledge_documents
+id, user_id, project_scope?, title, status, active_version
+知识文档
+knowledge_document_versions
+id, document_id, checksum, parser_version, paths, status
+版本
+knowledge_chunks
+id, version_id, chunk_index, heading_path, page_range, content, metadata
+canonical chunks
+background_jobs
+id, type, payload, status, priority, available_at, lease_until, attempts
+durable job queue
+notifications
+id, incident_id, channel, target, payload, status, attempts, dedupe_key
+outbox
+channel_bindings
+channel, external_user/chat, conversation_id?
+通道映射
+feishu_message_links
+message_id, root_id, chat_id, conversation_id, incident_id
+追问路由
+model_profiles
+id, kind, provider, base_url, model, capabilities, secret_ref
+模型配置
+18.2 关键索引与约束
+messages(conversation_id, created_at, id)
+conversations(user_id, updated_at DESC)
+metric_samples(project_id, metric_key, resource_key, ts DESC)
+incidents(project_id, status, updated_at)；开放 Incident fingerprint 建唯一/条件约束，避免重复创建
+background_jobs(status, available_at, priority DESC)；worker 领取时 FOR UPDATE SKIP LOCKED
+notifications(status, next_attempt_at) + unique(dedupe_key)
+knowledge_document_versions(document_id, checksum) unique；chunks(version_id, chunk_index)
+feishu_message_links(message_id) unique；event/message 去重单独 unique key
+LangGraph 表：由 langgraph-checkpoint-postgres 在独立 schema（例如 langgraph）维护；不要手工把其内部 checkpoint 表当作业务表查询。
+19. 后台任务与可靠性
+由于 V1 不引入 Redis，使用 PostgreSQL 实现 durable job queue。它不是高吞吐消息队列，但对本地 Oncall 的文档解析、Incident 调查和摘要任务足够，并显著减少运维依赖。
+worker transaction:  SELECT * FROM background_jobs  WHERE status='PENDING' AND available_at &lt;= now()  ORDER BY priority DESC, created_at  FOR UPDATE SKIP LOCKED  LIMIT 1;  -&gt; mark RUNNING + lease_until  -&gt; commit  -&gt; execute  -&gt; SUCCEEDED / retry(PENDING, backoff) / DEAD
+Job Type
+Worker
+幂等键
+incident_investigate
+agent-worker
+incident_id + trigger_revision
+rag_ingest
+rag-worker
+document_version_id
+conversation_summarize
+agent/rag worker
+conversation_id + through_message_id
+knowledge_reindex
+rag-worker
+document_version_id + embedding_profile_id
+notification_retry
+outbox sender
+notification.dedupe_key
+20. 流式响应协议
+Web 交互聊天采用 fetch ReadableStream 消费后端流事件。协议用显式事件类型而不是只传纯文本，便于前端展示 Tool 状态和引用。
+event: run.started        {run_id, conversation_id}event: message.delta      {text}event: tool.started       {tool_run_id, name, display_summary}event: tool.completed     {tool_run_id, ok, summary}event: citation           {document_id, chunk_id, title, page}event: message.completed  {message_id, content}event: run.completed      {run_id, usage, status}event: error              {code, message, request_id}
+User Message 在开始 Agent 前即持久化。
+Assistant 最终 Message 在 finalize/persist 后标记 COMPLETED；流中断时保存 agent_run=INTERRUPTED。
+前端收到 run.completed 后重新读取最终 Message，避免网络流和数据库事实不一致。
+21. 安全设计
+威胁/边界
+V1 对策
+本地 Web 暴露
+默认 bind 127.0.0.1；用户显式配置才监听 LAN
+登录凭据
+Argon2id password hash；session token 仅保存 hash；HTTPOnly/SameSite Cookie
+CSRF
+Cookie 认证的 mutation 请求启用 CSRF token / strict same-site 策略
+Secrets at rest
+cryptography AES-GCM；DB 仅存 ciphertext/secret_ref；master key 不入 DB
+监控数据库
+使用只读 PostgreSQL 用户，不授予 DDL/DML
+Prompt injection
+工具输出视为不可信数据；System Policy 优先；Tool scope runtime 注入
+危险动作
+V1 不注册 Action Tools；未来 risk + approval interrupt
+日志敏感数据
+进入 LLM/飞书前 REDACT password/token/cookie/key 等模式
+文件上传
+扩展名/MIME/大小限制；目录 traversal 防护；按 content-addressed path 存储
+XSS
+DOMPurify 清洗模型 Markdown 渲染结果
+22. 可观测与审计
+结构化 JSON 日志：timestamp, level, component, event, request_id, conversation_id, incident_id, agent_run_id, tool_run_id。
+AgentRun 保存 model_profile_id、model、prompt_version、start/end、token usage、error、final status。
+ToolRun 保存参数 hash（敏感参数脱敏）、duration、result size、truncated、error_code。
+RAG retrieval trace 保存 query/normalized query、dense/BM25 candidates、fusion/rerank、final citations。
+MonitoringRun 保存每个 collector 的 duration/status，方便识别“监控系统自身坏了”。
+V1 不强制 LangSmith；预留 OpenTelemetry adapter，避免把可观测绑定某厂商。
+23. 错误处理、幂等与重试
+场景
+策略
+Collector timeout
+记录 collector error，其余结果继续组成 partial snapshot；连续失败可产生 monitoring_self alert
+Tool timeout
+返回 ToolResult(ok=false,error_code=TIMEOUT)，Agent 可换证据源；计入 budget
+LLM/API 429/5xx
+指数退避 + jitter；总 run timeout 内有限重试
+Docling failure
+job RETRY；超过 max attempts -&gt; FAILED，Web 显示错误和重试按钮
+Milvus failure
+document version 不切 READY；可重新 index；不删除 canonical
+Feishu send failure
+notification outbox retry；dedupe_key 防重复
+Feishu duplicate event
+event/message unique key 幂等丢弃
+Worker crash
+lease 到期后 job 可被其他 worker 重新领取；handler 必须幂等
+API restart
+Conversation/Message 不受影响；未完成 run 可 resume/retry
+24. 部署、启动、备份与恢复
+24.1 V1 Windows 本机部署
+Native Windows processes:  oncall-api  oncall-monitor-worker  oncall-agent-worker  oncall-rag-workerDocker Compose:  postgres:18  milvus:2.6.x + its required componentsPersistent:  PostgreSQL volume  Milvus volume (cache/index, still backup optional)  data/knowledge/  configuration + master key backup
+API 与 monitor 必须能读取本机进程/日志，并访问 Docker Engine；因此 V1 默认原生运行。
+前端 `vite build` 后由 FastAPI 静态托管即可；开发期 Vite dev server 独立。
+提供 PowerShell `start.ps1/stop.ps1/status.ps1`；后续可使用 WinSW/NSSM 注册 Windows 服务。
+实现 `oncall doctor`：检查 PostgreSQL、Milvus、写权限、LLM、Embedding、Feishu、Docker、项目日志/DB/HTTP 连接。
+24.2 备份/恢复
+对象
+备份
+恢复
+PostgreSQL
+定期 pg_dump；保留加密配置与业务表
+restore 后会话/Incident/Jobs/配置恢复
+Knowledge files
+备份 data/knowledge
+恢复 canonical/raw 后可重新 index
+Milvus
+可备份卷，但非唯一事实源
+丢失时全量 reindex
+Master key
+单独安全备份，不与 DB dump 放同一位置
+缺失则无法解密 secret
+25. 测试与 Agent Evaluation
+类型
+必须覆盖
+Unit
+Detector hysteresis/fingerprint、Incident state、cursor rotation、context builder、tool policy、chunk normalize、RRF/threshold
+Integration
+PostgreSQL repositories/jobs、Milvus hybrid retrieval、Docling sample docs、6 integrations、LangGraph fake model
+E2E
+Web 多会话重启不丢；上传文档-&gt;检索引用；synthetic alert-&gt;Incident-&gt;Diagnosis-&gt;Feishu mock；Feishu follow-up 路由
+Restart/Chaos
+kill worker mid-job -&gt; lease retry；kill API -&gt; messages persist；Milvus wipe -&gt; reindex
+Agent Eval
+预制 Incident 数据集：Evidence grounding、root-cause correctness、remediation usefulness、unsafe action rate
+RAG Regression
+Recall@K、MRR/NDCG、citation accuracy、no-hit precision、中文专有词 BM25 命中
+25.1 Agent 质量硬约束
+没有 Tool/Evidence 支持时，不允许声称“当前 CPU=xx%”等实时事实。
+Diagnosis 的 root_cause 必须关联 Evidence IDs，若不足则 root_cause 可为“未确认”。
+Remediation 的破坏性步骤必须 risk 标记；V1 仅输出指导，不自动执行。
+每份 Incident Report 必须有 verification_steps，告诉用户处理后如何确认已恢复。
+26. 开发规范
+项目
+规范
+依赖
+uv；禁止随意 unpinned 生产依赖；提交 uv.lock
+Python
+Ruff format/lint + mypy；async I/O 优先；Domain 无第三方 SDK
+DB
+所有 schema 变化 Alembic；Repository 隔离 SQLAlchemy
+API
+Pydantic DTO + OpenAPI；不直接返回 ORM
+Prompt
+文件化 + prompt_version；变更需 Agent Eval
+Tool
+Pydantic 入参 + ToolResult；必须 timeout/telemetry/policy
+Secrets
+任何日志/trace 不输出明文 key/password
+Frontend
+TypeScript strict；API types 尽量从 OpenAPI 生成
+Tests
+新规则/状态机/Tool 必须有 unit；核心链路必须 integration/e2e
+27. 分阶段实施计划
+阶段
+范围
+完成定义
+P0 Foundation
+项目骨架、uv、FastAPI、PostgreSQL/Milvus Compose、Alembic、Auth、Vue shell、jobs/outbox
+能登录；DB 迁移；5 页面 shell；doctor 基础
+P1 Knowledge/RAG
+上传、Docling、canonical、chunk、embedding、Milvus Dense+BM25、RRF/rerank、引用
+文档 READY；测试集 query 可返回带引用 Top5
+P2 Chat Agent
+LLM Gateway、LangGraph、8 Tool contract、Conversation/Message、stream、summary
+Web 多会话可问 RAG/实时 Tool；重启继续聊
+P3 Monitoring
+Project config、6 Integrations、32 signals、Scheduler、Detector、Incident Manager
+synthetic 异常可稳定创建/恢复 Incident；无 LLM 参与检测
+P4 Investigation + Feishu
+agent-worker、DiagnosisReport、Feishu WS、主动卡片、FOLLOW_UP
+Incident 自动完整报告；飞书回复继续同一事故
+P5 Hardening
+安全、脱敏、重试、backup/restore、eval、chaos、性能/留存
+验收用例全部通过；可长期运行
+28. V1 验收标准
+1. 用户在 Web 创建至少 3 个本机 Project，可分别配置进程/日志/Docker/PostgreSQL/HTTP。
+2. Knowledge 页面上传 PDF/DOCX 等文档，解析/索引可见；聊天检索能返回可追溯引用。
+3. Web 支持多个 Conversation；关闭 Oncall/重启电脑后历史列表和消息完整存在并可继续。
+4. 普通 CHAT 可回答运维 SOP；需要实时信息时能调用对应 Tool，不凭空生成实时数据。
+5. Monitoring 按周期生成 Snapshot，并基于规则/滞回创建与恢复 Incident。
+6. 一次故障持续多个周期只形成一个 Incident，不因 CPU 88%-&gt;90% 重复创建/每轮调用 Agent。
+7. 主动调查能在 budget 内使用多工具形成 Evidence，并生成结构化完整报告。
+8. 报告包含：摘要、严重度、影响对象、症状、证据、根因+置信度、不确定性、具体解决步骤、风险、验证步骤、知识引用。
+9. 飞书能主动收到报告；用户回复该报告后进入 FOLLOW_UP 并沿用 Incident Context。
+10. V1 Agent 无法执行重启服务/杀进程/写数据库等操作。
+11. 断开/重启 API、agent-worker、rag-worker 的恢复测试通过；任务不会静默丢失。
+12. 所有重要链路可通过 request/conversation/incident/agent/tool IDs 追踪。
+29. V2+ 路线图
+能力
+演进方式
+远程监控
+引入 RemoteAgent/Collector daemon，与控制平面通过 mTLS/gRPC/HTTPS 通信；Project 指向 remote_node
+Action Tools
+READ/WRITE/DANGEROUS；LangGraph interrupt + Web/Feishu approval；审计与回滚
+多用户/企业
+Organization/Team/RBAC/SSO；Project/Knowledge/Incident scope 数据隔离
+Prometheus/Grafana/K8s
+新增 Integration，不改变 Agent/Incident/RAG 核心模型
+高级关联
+多个 Alert 聚合、时间相关性、变更/部署 Evidence、拓扑关系
+长期记忆
+团队偏好、已验证解决方案等 Store；与 RAG/Incident 仍分层
+分布式基础设施
+当吞吐需要时再加入 Redis/Kafka/专用队列，拆 worker 服务
+附录 A. 关键接口示例
+A.1 Integration Port
+class Integration(Protocol):    async def collect_summary(self, ctx: ProjectContext) -&gt; IntegrationSnapshot: ...# 具体 Integration 再暴露查询方法，由 Tool Adapter 转成 Agent Tool。# connection/config/normalization 共享，周期采集与按需查询的生命周期分开。
+A.2 DiagnosisReport
+DiagnosisReport:  incident_id  summary  severity  affected_service/component  symptoms[]  evidence_refs[]  root_cause  confidence_score / confidence_level  uncertainties[]  remediation_steps[]:    order, action, rationale, risk, requires_confirmation  verification_steps[]  knowledge_refs[]  observed_at
+A.3 Evidence
+Evidence:  id  incident_id  type: metric|process|log|container|database|http|knowledge  source_tool  observed_at  summary  raw_ref  attributes
+附录 B. 默认规则与参数
+说明：下列数值是 V1 初始默认值，不是普适 SRE 真理；每 Project 可配置，并应通过实际 AutoGEO 运行数据校准。
+参数
+默认
+说明
+monitor interval
+300s
+每项目可配置
+CPU trigger
+&gt;85% x2
+恢复 &lt;70% x2
+Memory trigger
+&gt;85% x2
+恢复 &lt;75% x2
+Disk trigger
+&gt;85%
+恢复 &lt;80%；磁盘恢复通常人工
+HTTP failure
+2 consecutive
+恢复 2 consecutive success
+Tool budget investigate
+10
+最大 reason loop 8
+Incident notification cooldown
+30 min
+仅重复更新；首次/升级/恢复不受限
+Stale re-investigation
+60 min
+Incident 持续且没有新诊断时
+Metric retention
+30 days
+可配置
+RAG dense/BM25
+top20 + top20
+RRF ~30 -&gt; rerank -&gt; top5
+Chunk target
+600–900 tokens
+结构边界优先；overlap 80–120
+Conversation summary
+&gt;40 messages OR ~12k tokens
+动态调整
+附录 C. 参考资料
+参考资料与版本核验来源
+以下技术事实于 2026-08-18 依据官方文档/官方仓库核验。架构不依赖具体 patch 版本；实现时以 lockfile 固化并通过 CI 验证。
+[R1] LangGraph Persistence — https://docs.langchain.com/oss/python/langgraph/persistence
+[R2] LangGraph Checkpointers — https://docs.langchain.com/oss/python/langgraph/checkpointers
+[R3] LangGraph Releases — https://github.com/langchain-ai/langgraph/releases
+[R4] FastAPI Releases — https://github.com/fastapi/fastapi/releases
+[R5] Docling Usage / Supported Formats — https://docling-project.github.io/docling/usage/
+[R6] Docling Chunking — https://docling-project.github.io/docling/concepts/chunking/
+[R7] Docling Source / Version — https://github.com/docling-project/docling/blob/main/pyproject.toml
+[R8] Milvus Full Text Search (BM25) — https://milvus.io/docs/full-text-search.md
+[R9] Milvus Multi-Vector Hybrid Search — https://milvus.io/docs/multi-vector-search.md
+[R10] Feishu: 使用长连接接收事件 — https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case?lang=zh-CN
+[R11] Feishu Python SDK: Handle Events — https://open.feishu.cn/document/server-side-sdk/python--sdk/handle-events
+[R12] PostgreSQL 18.6 Release Notes — https://www.postgresql.org/docs/release/18.6/
+[R13] PostgreSQL Versioning Policy — https://www.postgresql.org/support/versioning/
+[R14] OpenSRE Investigation Pipeline (reference design) — https://github.com/Tracer-Cloud/opensre/blob/main/docs/investigation-pipeline-architecture.md
+
+30. 当前代码实现状态与 CodeX 本地交接
+本章是 2026-08-18 RC1 交接补充。原 1-29 章继续定义“系统应该是什么”；本章定义“当前仓库已经实现到哪里、什么已经被当前沙箱真实验证、什么必须由 CodeX 在用户本机继续验证/兼容修正”。核心架构不得在本地联调时随意重写。
+30.1 当前仓库的准确版本口径
+当前版本：`1.0.0-rc1 / Local Handoff Candidate`，不是 GA。
+Python compileall 已通过；当前离线 pytest 为 16/16 通过。
+33 个 FastAPI 路由已有静态路由契约测试，但尚需真 PostgreSQL 的 HTTP integration tests。
+由于构建沙箱没有 Docker、无法访问 PyPI/npm registry，且没有用户真实 LLM/Embedding/Rerank/飞书 Secret，不能声称这些外部链路已在沙箱 E2E。
+后续 CodeX 的第一职责是“本地真实联调和收口”，不是重新设计架构。
+30.2 已实现模块矩阵
+模块/层
+源码状态
+当前沙箱验证
+目标机器 Release Gate
+API/Auth
+33 route；Session；Request-ID；DB health
+route contract
+PostgreSQL HTTP tests
+Project
+监控配置/Secret/dry-run test
+compile
+AutoGEO 实机配置
+Conversation
+多会话/搜索/改名/归档/删除/持久消息
+compile
+restart persistence
+Agent
+CHAT/INVESTIGATE/FOLLOW_UP/DEEP；4 budget
+Mock/contract
+真实 LLM/Tool loop
+Tools
+8 read-only tool + JSON schema + project scope
+tool contract
+真实 Host/DB/Docker/Log
+Monitoring
+32 signal + 6 Integration + snapshot
+Detector tests
+多项目周期采集
+Incident
+fingerprint/state/last_seen/reinvestigate/recovery
+fingerprint/hysteresis
+真实异常闭环
+Jobs/Outbox
+lease queue + notification state/retry/cooldown
+retry tests
+crash/reclaim
+RAG
+Docling/HybridChunker/Dense+BM25/RRF/Rerank
+RRF/compile
+真实文件/索引/E2E
+Trace
+AgentRun/ToolRun/RetrievalTrace/Notification
+compile
+真实数据完整性
+Feishu
+WS event/outbox/card/message link/follow-up
+parser/retry policy
+真实 App Bot
+Frontend
+Chat/Projects/Incidents/Knowledge/Settings
+静态检查
+npm build/browser E2E
+30.3 已修复的关键可靠性问题
+Project “测试采集”使用 `persist_state=False`，不会推进正式日志 cursor。
+Incident 持续 FIRING 时每轮刷新 `last_seen`；手工 resolve 会重置 detector state，因此仍异常时可以再次满足 trigger_for 后新建 Incident，不形成盲区。
+真实模型决策上下文包含 8 个 Tool 的 description + 完整 JSON 参数 schema；project/incident scope 仍由 runtime 注入。 Executor 同时按稳定 schema 做运行时参数校验，拒绝模型注入 project_id 或超范围参数。
+Notification 使用 pending/sent/suppressed/dead 状态、指数退避、max attempts、cooldown；resolved 不被 diagnosis cooldown 吞掉。
+飞书入站事件使用 processing/processed/failed，业务失败不会在处理完成前永久标 processed。
+monitor-worker 使用 PostgreSQL advisory lock，避免同一数据库同时启动多个采集 leader。
+ToolRun 保存 result_size/truncated/error_code；RAG 保存 RetrievalTrace、chunk/version/page_range。
+Knowledge upload 使用分块读取、大小上限、安全文件名和 owner scope，返回真实 durable job id。
+生产环境校验 Master Key、默认管理员密码、真实模型 Key 与飞书凭证；LangGraph strict MsgPack 开关已进入配置模板。
+Milvus collection 采用显式 knowledge index version；索引可由 canonical 文档源重建。
+主动 Incident 调查不再向会话插入伪造 user 消息；首条可见内容是 Agent 诊断报告。
+30.4 CodeX 本地执行顺序
+# A. 基础环境Copy-Item .env.example .envdocker compose up -duv sync --all-extrasuv run alembic -c backend/alembic.ini upgrade headuv run oncall-init-admin# B. 前端cd frontendnpm installnpm run buildcd ..# C. 全局校验.\scripts\validate-local.ps1# D. 启动 API + 3 workers.\scripts\start-all.ps1# E. Mock 主链 E2E.\scripts\e2e-local.ps1# F. 用户填入真实 API 后.\scripts\validate-local.ps1 -External
+若 SDK 实际安装版本与源码 API 有小幅差异，CodeX 应在既定依赖 major/minor 范围内修兼容代码，然后补对应 regression test；不要为了规避兼容问题替换 PostgreSQL/Milvus/LangGraph/Docling 等核心架构。
+30.5 用户需要提供/本机填写的外部信息
+模块/层
+源码状态
+当前沙箱验证
+目标机器 Release Gate
+LLM
+OpenAI-compatible Base URL / Model / API Key
+CHAT/INVESTIGATE/FOLLOW_UP 真实推理
+Embedding
+Base URL / Model / Dimension / API Key
+Dense retrieval
+Rerank
+Endpoint / Model / API Key（如采用外部服务）
+Hybrid 候选精排
+Feishu
+App ID / App Secret / receive target
+双向聊天与主动 Incident report
+AutoGEO
+进程匹配、日志路径、Postgres、Docker、Health URL
+真实监测目标
+Secret 不需要回填到文档，也不应提交 Git；全部进入目标机器 `.env`。
+30.6 后端 API 本地测试要求
+当前路由契约固定为 33 条。CodeX 必须补/执行真 PostgreSQL HTTP integration tests，而不是只做函数测试。测试至少覆盖 Auth、Projects、Conversations/Messages、Incidents/Trace、Metrics、Knowledge/Jobs、Settings，以及 development-only synthetic Incident。每个 owner-scoped 路由还要验证跨用户/错误 UUID/不存在对象。
+30.7 Restart Persistence 硬验收
+创建至少 2 个普通 Conversation；其中一个产生 5 条以上消息。
+触发 synthetic Incident，生成 Diagnosis，并在 Incident Conversation 追问。
+停止 API、monitor-worker、agent-worker、rag-worker，但保留 PostgreSQL/Milvus volume。
+重新启动后，旧 Conversation、Message、Incident、Evidence、Diagnosis、Trace 必须全部恢复。
+在旧 Conversation 再发一条消息，确认能够继续对话，而不是因为内存丢失创建新 thread。
+30.8 RAG 本地硬验收
+至少准备 CPU 高、PostgreSQL connection refused、Playwright/Chromium 异常三份运维手册，跑完整 ingestion/retrieval；再维护不少于 10 条固定 query 回归集。每个结果检查 document/version/chunk/page_range Citation 和 RetrievalTrace。Embedding 模型/维度改变时提升 `ONCALL_KNOWLEDGE_INDEX_VERSION` 并重建，不复用旧索引。
+30.9 真实 Agent / Feishu 硬验收
+普通 SOP 问题应优先合理使用 search_knowledge；实时状态问题应选择实时 Tool。
+Incident 报告必须包含故障概况、Evidence、root cause、confidence、具体 remediation、verification、risks、knowledge refs/unknowns。
+无充分证据时降低 confidence 并明确 unknowns，禁止凭空编造“已确认根因”。
+飞书主动 interactive card 成功后，回复该消息必须回到原 incident_id/conversation_id 并进入 FOLLOW_UP。
+模拟发送失败，验证 retry/backoff/dead；cooldown 抑制重复 diagnosis，但 recovery 必须发送。
+30.10 版本发布规则
+只有附录 D 所有 Release Gate 通过，才允许把 `pyproject.toml` 与 FastAPI 版本从 `1.0.0rc1 / 1.0.0-rc1` 提升为 `1.0.0`。任何真实外部链路未测，都继续保留 RC。
+
+附录 D. Release Gate 与本地测试矩阵
+模块/层
+源码状态
+当前沙箱验证
+目标机器 Release Gate
+依赖锁定
+uv lock + package-lock.json
+必须
+Python
+compileall + pytest + ruff
+必须
+PostgreSQL
+migration + API integration + durable job lease
+必须
+Milvus/Docling
+ingestion + hybrid search + citation
+必须
+Vue
+production build + browser smoke
+必须
+Mock E2E
+Conversation→Agent→Tool→Incident→Follow-up→Recovery
+必须
+Restart
+历史会话/Incident/Checkpoint 继续
+必须
+Real LLM
+Tool schema/loop/Diagnosis/no hallucination
+必须
+Real Feishu
+send/receive/card/follow-up/retry/cooldown
+必须
+AutoGEO
+真实采集 + 一次异常→报告→恢复
+必须
+Security
+production config、Secret、无 destructive tool
+必须
+更细的操作步骤与失败处置见仓库根目录 `LOCAL_HANDOFF.md`；本开发文档仍是模块/接口/数据流的架构权威，LOCAL_HANDOFF 是运行验收权威。

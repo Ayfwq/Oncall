@@ -1,0 +1,373 @@
+
+ONCALL
+AI SRE 平台技术选型报告
+从 0 到 1 的技术栈、架构决策与选型边界
+Architecture Baseline v1.0 / Implementation Handoff v1.0.0-rc1
+技术基线日期：2026-08-18
+状态：架构基线已确认；源码进入本地联调候选（RC1），真实外部依赖需目标机器验收
+设计原则：稳定优先、模块边界清晰、业务事实持久化、Agent 可替换、知识索引可重建、监测检测确定性、AI 负责调查与解释。
+
+目录
+1. 结论摘要
+2. 产品约束与架构目标
+3. 总体架构模式
+4. 后端与工程基础
+5. Agent 与模型层
+6. RAG 与知识库
+7. 数据与持久化
+8. 主动监测与系统集成
+9. 飞书通道
+10. Web 前端
+11. 安全、可观测与测试
+12. 部署拓扑
+13. 不采用的方案与原因
+14. 架构决策记录（ADR）
+15. 版本策略与参考资料
+16. 实施落地状态与本地验收边界
+
+1. 结论摘要
+本报告将 Oncall 定义为一个本地优先、可扩展的 AI SRE 平台。V1 支持同一台主机上的多个被监控项目；提供 ChatGPT 式多会话 Web、飞书双向对话、完整 RAG、确定性主动监测、Incident 管理，以及统一 OncallAgent 的调查与故障报告能力。
+最终推荐：采用“模块化单体（Modular Monolith）+ 多运行进程 + PostgreSQL 持久化协调”。LangGraph 仅承担 Agent 编排；Monitoring Engine、RAG ingestion、业务数据与通道层均保持独立模块。
+层
+推荐技术
+选择结论
+语言/依赖
+Python 3.13.x + uv
+稳定生态；使用 pyproject.toml + uv.lock 固化
+API
+FastAPI 0.141.x + Pydantic 2.13.x
+异步 API、OpenAPI、流式响应
+Agent
+LangGraph 1.2.x + Postgres Checkpointer
+显式 StateGraph、可恢复、线程级状态 [R1][R2][R3]
+业务数据库
+PostgreSQL 18.x + SQLAlchemy 2.0 + Alembic
+业务事实唯一来源；异步访问；迁移可控 [R12][R13]
+RAG解析
+Docling 2.120.x
+统一文档结构、结构化解析、HybridChunker [R5][R6][R7]
+检索
+Milvus 2.6.x Dense + BM25 + Hybrid
+同库实现语义与全文召回，再做融合/重排 [R8][R9]
+监测
+psutil + Docker SDK + httpx + PostgreSQL SQL + 日志 cursor
+V1 本机多项目，纯代码检测
+调度
+APScheduler 3.11.x
+成熟稳定线；V1 不采用尚在演进的主线 API
+飞书
+自建应用机器人 + 官方 lark-oapi + WebSocket 长连接
+本机无需公网回调；支持双向消息 [R10][R11]
+前端
+Vue 3.5.x + Vite 8.x + TypeScript
+ChatGPT 式多会话 + 管理页
+部署
+Windows 原生应用进程 + Docker Compose 基础设施
+Host 监控需要看见 Windows 主机；PostgreSQL/Milvus 容器化
+2. 产品约束与架构目标
+V1 范围：单用户、本机多项目、只读诊断；远程服务器与自动修复延期。
+统一 Agent：只有一个 OncallAgent，支持 CHAT / INVESTIGATE / FOLLOW_UP 三种运行模式。
+主动报告：发生 Incident 后生成完整监测报告，必须包含证据、根因、解决步骤、风险与恢复验证步骤。
+持续追问：Web 或飞书中的 Incident 会话可继续追问；重启服务后历史会话与 Incident 不丢失。
+知识底座：RAG 是共享知识服务，不是 Agent 私有记忆；聊天和调查共用同一检索服务。
+稳定性：监控检测不依赖 LLM；LLM 只在问答、调查、解释、生成诊断时参与。
+3. 总体架构模式
+Web (Vue)                  Feishu App Bot    \                         /     \       Gateway/API     /      +------ FastAPI ------+               |        Application Services      /        |          \Conversation Incident    Knowledge      \        |          /          OncallAgent                Monitoring Engine           LangGraph                 Scheduler/Detector          /   |    \                      |        RAG  Tools  Context          Incident Trigger         |     |       |                   |      Milvus Integrations PostgreSQL &lt;-----+         ^     |       |       Docling |    Durable Facts               | Host / Process / Log / Docker / PostgreSQL / HTTP
+图 1  技术总体结构（逻辑视图）
+边界原则：“业务事实”和“Agent Runtime 状态”严格分开。PostgreSQL 业务表保存 Conversation/Message/Incident/Evidence/Diagnosis；LangGraph checkpoint 只负责运行状态与恢复。
+4. 后端与工程基础
+项目
+推荐
+说明
+Python
+3.13.x
+选择成熟支持线而非追最新解释器；Docling 已支持 3.13。
+包管理
+uv
+统一依赖解析、虚拟环境与锁文件；禁止 requirements.txt 与多套管理并存。
+Web 框架
+FastAPI 0.141.x
+HTTP API、OpenAPI、依赖注入、StreamingResponse。官方仓库当前 0.141.1 [R4]。
+数据模型
+Pydantic 2.13.x
+DTO、配置、结构化 Agent 输出、Tool 参数校验。
+ORM
+SQLAlchemy 2.0.x async
+Repository 层使用 AsyncSession；不在 Domain 中直接依赖 ORM。
+迁移
+Alembic 1.19.x
+所有数据库结构变化必须迁移脚本化。
+HTTP Client
+httpx
+被监控 HTTP 探测、外部 LLM/Embedding/Rerank API。
+代码结构采用模块化单体：一个仓库、共享 Domain/Application/Infrastructure，但 API、monitor-worker、agent-worker、rag-worker 分进程运行。
+V1 不引入 Redis/Kafka/Celery。持久后台任务使用 PostgreSQL jobs 表与 SELECT ... FOR UPDATE SKIP LOCKED 实现可靠领取。
+所有外部 SDK 放在 Infrastructure/Channels/Integrations 层，Domain 不直接依赖第三方库。
+5. Agent 与模型层
+LangGraph 适合本项目的原因不是“流行”，而是其低层 StateGraph、checkpoint、thread 与故障恢复机制与多轮工具调用型 SRE 调查相匹配。[R1][R2][R3]
+设计项
+决策
+Agent 数量
+1 个 OncallAgent
+运行模式
+CHAT / INVESTIGATE / FOLLOW_UP
+编排
+自定义 LangGraph StateGraph，不使用黑盒 create_agent 作为核心架构
+线程键
+conversation_id 作为 LangGraph thread_id
+状态持久化
+langgraph-checkpoint-postgres；独立 schema
+LLM 接入
+ModelGateway + Provider Adapter；OpenAI-compatible 为默认，Anthropic 等可扩展
+结构化输出
+Pydantic DiagnosisReport / ToolResult / CitationRef
+动作权限
+V1 只注册 READ tools；未来 WRITE/DANGEROUS tools 必须 human approval
+稳定性：模型不能选择 project_id。project_id/incident_id 由 runtime 注入 ToolExecutionContext，避免 prompt injection 或模型误操作其他项目。
+6. RAG 与知识库
+Upload -&gt; Validate -&gt; Checksum/Dedupe -&gt; Docling Parse       -&gt; DoclingDocument(JSON) + Normalized Markdown       -&gt; Structure-aware Chunk (HybridChunker baseline)       -&gt; Metadata Enrichment -&gt; Dense Embedding       -&gt; Milvus Dense + BM25 IndexQuery -&gt; Normalize -&gt; [Dense top20 || BM25 top20]      -&gt; RRF Fusion (~30) -&gt; Rerank -&gt; Top5 + Threshold      -&gt; Citation Package -&gt; Agent      -&gt; (low quality only) one-time LLM query rewrite and retry
+Docling：作为 ingestion 统一解析层，保留结构、标题、表格等信息；HybridChunker 以层次结构为基础并做 token-aware 调整。[R5][R6]
+Milvus：同时承载 dense 向量与原生 BM25 sparse 检索，可执行 hybrid search。[R8][R9]
+事实源：原始文件 + canonical DoclingDocument/Markdown + PostgreSQL 元数据是事实源；Milvus 是可重建索引。
+Chunk 原则：SOP 优先保持标题路径、编号步骤、表格/代码块完整；默认 600–900 tokens，结构边界优先于固定长度。
+版本管理：相同 checksum 跳过；更新创建 version；embedding 模型/维度变化时创建新的 embedding_profile/collection namespace，禁止自动 drop 旧集合。
+7. 数据与持久化
+数据类型
+位置
+角色
+业务数据
+PostgreSQL
+Conversation、Messages、Projects、Incidents、Evidence、Diagnosis、Jobs、Notifications 等唯一事实源
+Agent checkpoint
+PostgreSQL 独立 langgraph schema
+Graph 步骤状态/恢复；可删除重建，不作为业务记录
+知识原始与规范化文件
+本地 data/knowledge
+raw、document.json、document.md；备份必需
+RAG 索引
+Milvus
+dense/BM25 索引，可由知识事实源重建
+监测采样
+PostgreSQL
+默认保留 30 天，可配置；不复制完整日志，只保存摘要和 Evidence
+恢复目标：关机或服务重启后，多会话历史从 PostgreSQL 恢复；LangGraph 未完成 run 可按 checkpoint 恢复/重新执行；知识索引丢失时可从 canonical 文档重新构建。
+8. 主动监测与系统集成
+V1 采用 6 个 Integration，共享“周期摘要采集”和“Agent 按需深查”能力。Collector 不是 Tool；Collector 自动巡检，Tool 由 Agent 调查时调用。
+Integration
+周期采集
+Agent 深查
+HostIntegration
+CPU/内存/磁盘/IO/网络
+query_host_metrics, history
+ProcessIntegration
+目标进程存活/资源/子进程摘要
+query_processes
+LogIntegration
+增量 ERROR/WARNING/错误签名
+query_logs
+DockerIntegration
+容器状态/Health/资源/重启
+query_containers
+DatabaseIntegration
+可达性/连接/长查询/锁/死锁
+query_database
+ServiceIntegration
+HTTP 可达/状态码/延迟/连续失败
+query_service_health
+规则状态机：NORMAL -&gt; PENDING -&gt; FIRING -&gt; RECOVERING -&gt; NORMAL；使用持续次数与恢复阈值形成滞回，避免抖动。
+Incident fingerprint = hash(project_id | rule_id | resource_key | anomaly_type)，不比较整个 Snapshot hash。
+同一 Incident 不每 5 分钟重新跑 Agent；仅首次、严重度升级、出现新相关异常、人工深度调查或 stale recheck 触发再调查。
+9. 飞书通道
+V1 直接使用飞书自建应用机器人。对本机部署而言，优先 WebSocket 长连接接收事件：官方 SDK 在本地建立全双工连接，只要求服务器可访问公网，无需给本机暴露公网回调地址。[R10][R11]
+能力
+方案
+用户主动聊天
+接收 im.message.receive 事件；私聊进入当前 Conversation；群聊默认仅 @机器人 响应
+主动 Incident 报告
+调用消息发送 API；使用 Card JSON 2.0 风格结构化卡片
+告警后追问
+保存 root_message_id/message_id -&gt; incident_id/conversation_id 映射；回复报告即 FOLLOW_UP
+幂等
+event_id/message_id 唯一去重；出站 notification outbox 防重复
+凭证
+app_id/app_secret 加密存储；token 由 SDK/TokenCache 管理并预留刷新安全窗口
+10. Web 前端
+技术
+决策
+Vue
+3.5.x 稳定线
+Vite
+8.x
+Node
+24 LTS
+TypeScript
+锁定稳定版
+状态
+Pinia
+路由
+Vue Router
+Markdown
+markdown-it + DOMPurify
+流式输出
+fetch ReadableStream + 后端 event stream
+UI
+自定义 Chat Shell；表单/表格可使用 Element Plus
+核心页面：Chat、Incidents、Projects、Knowledge、Settings。
+Chat 左侧支持新建、重命名、归档/删除、搜索、切换历史会话；Incident 自动创建/绑定 Conversation。
+浏览器只渲染经过 DOMPurify 清洗的 Markdown HTML，避免 LLM 输出造成 XSS。
+11. 安全、可观测与测试
+领域
+基线
+登录
+V1 单管理员账号；Argon2id 哈希；HTTPOnly + SameSite session cookie；默认只绑定 127.0.0.1
+Secrets
+API Key/DB/Feishu secret 以应用 master key 加密后入库；master key 仅环境变量/系统密钥存储
+DB 权限
+被监测 PostgreSQL 使用只读账户
+Tool 风险
+READ / WRITE / DANGEROUS 分级；V1 只注册 READ
+日志脱敏
+进入 LLM/飞书前按规则对 token、password、email 等敏感字段 REDACT
+Trace
+request_id/conversation_id/incident_id/agent_run_id/tool_run_id 全链路关联
+测试
+pytest + pytest-asyncio + Vitest + Playwright E2E；关键状态机和重启恢复必须自动测试
+12. 部署拓扑
+Windows Host  oncall-api.exe / python -m oncall.api          (native)  oncall-monitor-worker                          (native)  oncall-agent-worker                            (native)  oncall-rag-worker                              (native)  Feishu WebSocket listener                      (API lifecycle, single instance V1)Docker Desktop / Compose  PostgreSQL 18.x     &lt;- business + jobs + checkpoints  Milvus 2.6.x stack &lt;- rebuildable RAG indexPersistent host paths  data/knowledge      &lt;- raw + canonical documents  logs/               &lt;- Oncall logs  .env / master key   &lt;- protected configuration
+为什么应用进程不全部放 Docker：V1 要直接通过 psutil、文件系统和 Docker Engine 观察 Windows 本机 AutoGEO 等项目。若把监测进程放进普通容器，会看到容器自身而不是完整宿主机视图。
+13. 不采用的方案与原因
+方案
+V1 不采用原因
+未来条件
+微服务
+部署、链路、调试和一致性复杂度远高于单机产品收益
+远程节点/多租户/独立伸缩后再拆
+Redis/Celery
+PostgreSQL durable jobs 足够；减少运维组件
+任务吞吐或分布式并发成为瓶颈
+RAGFlow
+Agent 深度集成需要 ingestion/retrieval 可控；避免部署额外平台
+仅作为设计参考
+Elasticsearch
+Milvus 已原生 BM25 + dense hybrid；首期无需双检索引擎
+复杂全文分析/海量日志搜索时再评估
+多个 Agent
+Chat/Investigation 重复工具、Prompt、记忆和权限体系
+坚持一个 Agent 多 mode
+LLM 直接监测
+成本、延迟、不可审计；检测应确定性
+LLM 只调查和解释
+自动修复
+高风险；V1 产品价值先集中于诊断与指导
+Action Tool + Human Approval 后加入
+14. 架构决策记录（ADR）
+ADR
+决策
+理由
+状态
+ADR-001
+模块化单体 + 多进程
+降低首期复杂度并保留模块拆分边界
+Accepted
+ADR-002
+一个 OncallAgent 三种 Mode
+共享 RAG/Tools/Memory，避免两套 Agent 漂移
+Accepted
+ADR-003
+LangGraph 仅作为 Agent Runtime
+框架可替换，业务数据不绑定 Agent 框架
+Accepted
+ADR-004
+PostgreSQL 为业务事实源
+会话/Incident/证据重启不丢；便于事务与审计
+Accepted
+ADR-005
+Milvus 为可重建索引
+降低索引损坏/模型升级带来的数据风险
+Accepted
+ADR-006
+Monitoring 规则检测，无 LLM
+可审计、低成本、低延迟
+Accepted
+ADR-007
+V1 只读 Tool
+安全优先；自动修复延期
+Accepted
+ADR-008
+飞书 WebSocket 长连接
+本机部署无需公网 webhook
+Accepted
+ADR-009
+V1 本机多项目
+从 AutoGEO 等本机应用起步；远程 Agent 后续加入
+Accepted
+ADR-010
+V1 单用户但预留 user_id
+控制产品复杂度同时保留扩展空间
+Accepted
+15. 版本策略与参考资料
+本文档中的版本号是 2026-08-18 的工程基线，不将“永远最新”写死为架构要求。
+Python/Node/数据库选择稳定支持线；框架使用兼容 major/minor；实际开发由 uv.lock 与前端 lockfile 固化 patch。
+每月依赖升级通过 CI、Agent Eval、RAG retrieval regression 和重启恢复测试后合并。
+Milvus 选择成熟 2.6.x 作为首期基线；新 major 待检索回归和迁移方案验证后升级。
+参考资料与版本核验来源
+以下技术事实于 2026-08-18 依据官方文档/官方仓库核验。架构不依赖具体 patch 版本；实现时以 lockfile 固化并通过 CI 验证。
+[R1] LangGraph Persistence — https://docs.langchain.com/oss/python/langgraph/persistence
+[R2] LangGraph Checkpointers — https://docs.langchain.com/oss/python/langgraph/checkpointers
+[R3] LangGraph Releases — https://github.com/langchain-ai/langgraph/releases
+[R4] FastAPI Releases — https://github.com/fastapi/fastapi/releases
+[R5] Docling Usage / Supported Formats — https://docling-project.github.io/docling/usage/
+[R6] Docling Chunking — https://docling-project.github.io/docling/concepts/chunking/
+[R7] Docling Source / Version — https://github.com/docling-project/docling/blob/main/pyproject.toml
+[R8] Milvus Full Text Search (BM25) — https://milvus.io/docs/full-text-search.md
+[R9] Milvus Multi-Vector Hybrid Search — https://milvus.io/docs/multi-vector-search.md
+[R10] Feishu: 使用长连接接收事件 — https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case?lang=zh-CN
+[R11] Feishu Python SDK: Handle Events — https://open.feishu.cn/document/server-side-sdk/python--sdk/handle-events
+[R12] PostgreSQL 18.6 Release Notes — https://www.postgresql.org/docs/release/18.6/
+[R13] PostgreSQL Versioning Policy — https://www.postgresql.org/support/versioning/
+[R14] OpenSRE Investigation Pipeline (reference design) — https://github.com/Tracer-Cloud/opensre/blob/main/docs/investigation-pipeline-architecture.md
+
+16. 实施落地状态与本地验收边界
+本节把“技术架构已经确定”“源码已经实现”“当前沙箱已经验证”“目标机器仍需联调”四件事严格分开。后续 CodeX/开发者必须以此作为 Release 口径，不能因为 Mock Provider 或离线单元测试通过，就宣称真实 LLM、飞书、PostgreSQL/Milvus 或 AutoGEO 已完成生产验收。
+模块/层
+源码状态
+当前沙箱验证
+目标机器 Release Gate
+后端/API
+FastAPI、Session、33 路由、Request-ID 已实现
+compile + route contract
+真 PostgreSQL HTTP/API integration
+Agent
+统一 OncallAgent、StateGraph、4 mode、8 Tool schema 已实现
+Mock/contract
+真实 LangGraph + Postgres checkpoint + LLM
+Monitoring
+32 signal、6 Integration、Detector/Incident 已实现
+hysteresis/fingerprint
+AutoGEO/Windows 实机采集与 restart
+RAG
+Docling/Chunk/Dense+BM25/RRF/Rerank/Citation/Trace 已实现
+RRF/contract
+Docling+Milvus+真实 embedding/rerank E2E
+Feishu
+WebSocket 入站、Outbox、Card、Follow-up routing 已实现
+parser/retry policy
+真实应用机器人 send/receive/retry
+Web
+Vue 多会话、Incident/Knowledge/Settings 页面已实现
+静态源码检查
+npm build + 浏览器 E2E
+Persistence
+业务表、jobs/outbox、checkpoint 配置已实现
+源码/contract
+Postgres migration + 服务重启恢复 E2E
+16.1 RC1 技术约束
+版本标记采用 1.0.0-rc1；只有本地 Release Gate 全绿后才改为 1.0.0。
+当前构建环境无法访问 PyPI/npm registry，不能生成真实 uv.lock/package-lock.json；禁止伪造锁文件。目标机器首次成功安装后必须生成。
+真实 LLM API、Embedding、Rerank、飞书 Secret 只放目标机器 .env，不写入源码或文档。
+Milvus collection 名包含 knowledge index version + embedding dimension。Embedding 模型、维度或 schema 语义变化时创建新索引并从 canonical source 重建，不自动 drop 旧索引。
+开发 Hash Embedding/lexical rerank 仅用于无 Key 的工程联调，不作为生产检索质量承诺。
+V1 继续维持 read-only Agent；任何 restart/kill/write-SQL 等 Action Tool 必须进入后续 ADR + human approval。
+16.2 本地 Release Gate
+docker compose up -duv sync --all-extrasuv run alembic -c backend/alembic.ini upgrade headuv run oncall-init-admincd frontend; npm install; npm run buildcd ...\scripts\validate-local.ps1.\scripts\start-all.ps1.\scripts\e2e-local.ps1.\scripts\validate-local.ps1 -External
+其中 `-External` 需要用户自己的真实模型/Embedding/Rerank/飞书配置。最终还必须执行 restart persistence、RAG fixed-query regression、真实 Incident→完整报告→飞书→FOLLOW_UP→恢复闭环。详细步骤见仓库 `LOCAL_HANDOFF.md`。

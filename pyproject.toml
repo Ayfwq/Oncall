@@ -1,0 +1,86 @@
+[project]
+name = "oncall-ai-sre"
+version = "1.0.0"
+description = "Local-first AI SRE platform with deterministic monitoring, incident investigation, RAG and Feishu/Web chat."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "fastapi>=0.141,<0.142",
+  "uvicorn[standard]>=0.35,<0.36",
+  "pydantic>=2.13,<2.14",
+  "pydantic-settings>=2.10,<3",
+  "sqlalchemy[asyncio]>=2.0.43,<2.1",
+  "asyncpg>=0.30,<0.31",
+  "alembic>=1.16,<2",
+  "httpx>=0.28,<0.29",
+  "psutil>=7,<8",
+  "docker>=7.1,<8",
+  "apscheduler>=3.11,<4",
+  "langgraph>=1.2,<1.3",
+  "langgraph-checkpoint-postgres>=3,<4",
+  "langchain-core>=1.4,<2",
+  "docling>=2.120,<2.121",
+  "pymilvus>=2.6,<2.7",
+  "lark-oapi>=1.4,<2",
+  "argon2-cffi>=25,<26",
+  "cryptography>=45,<46",
+  "python-multipart>=0.0.20,<0.1",
+  "aiofiles>=24,<25",
+  "orjson>=3.10,<4",
+  "structlog>=25,<26",
+  "tenacity>=9,<10",
+  "python-dotenv>=1.1,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6,<7",
+  "ruff>=0.12,<0.13",
+  "mypy>=1.17,<2",
+]
+
+[project.scripts]
+oncall-api = "oncall.api.main:run"
+oncall-monitor-worker = "oncall.workers.monitor_worker:run"
+oncall-agent-worker = "oncall.workers.agent_worker:run"
+oncall-rag-worker = "oncall.workers.rag_worker:run"
+oncall-init-admin = "oncall.cli.init_admin:run"
+oncall-doctor = "oncall.cli.doctor:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/src/oncall"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend/src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["backend/tests"]
+addopts = ["--strict-markers", "-ra"]
+markers = [
+  "offline: deterministic tests that do not require network, databases, Docker, or external services",
+  "local: tests that inspect the local host, filesystem, Docker daemon, or local HTTP service",
+  "integration: tests that require the local API and/or PostgreSQL service",
+  "rag: tests that require the local PostgreSQL and Milvus services",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+exclude = ["backend/alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_ignores = true

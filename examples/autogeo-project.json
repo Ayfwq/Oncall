@@ -1,0 +1,64 @@
+{
+  "name": "AutoGEO",
+  "description": "本机 AutoGEO 示例监控配置；请按实际路径/端口修改。",
+  "enabled": true,
+  "timezone": "Asia/Singapore",
+  "poll_interval": 300,
+  "process_targets": [
+    {
+      "name": "AutoGEO FastAPI",
+      "executable": "python",
+      "cmdline_filters": ["uvicorn"],
+      "cwd": "D:\\GEO\\Auto_GEO-main",
+      "port": 8000,
+      "enabled": true
+    },
+    {
+      "name": "Playwright Chromium",
+      "executable": "chromium",
+      "cmdline_filters": [],
+      "cwd": null,
+      "port": null,
+      "enabled": true
+    }
+  ],
+  "log_sources": [
+    {
+      "path": "D:\\GEO\\Auto_GEO-main\\logs\\app.log",
+      "encoding": "utf-8",
+      "parser_config": {},
+      "enabled": true
+    }
+  ],
+  "docker_targets": [
+    {"container_ref": "postgres", "enabled": true}
+  ],
+  "database_profiles": [
+    {
+      "type": "postgresql",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "database": "autogeo",
+      "username": "oncall_readonly",
+      "password": null,
+      "sslmode": "prefer",
+      "enabled": true
+    }
+  ],
+  "service_endpoints": [
+    {
+      "name": "AutoGEO Health",
+      "url": "http://127.0.0.1:8000/health",
+      "method": "GET",
+      "expected_status": 200,
+      "timeout_ms": 3000,
+      "enabled": true
+    }
+  ],
+  "rules": [
+    {"metric_key":"host.cpu.percent","resource_key":"default","operator":">","trigger_threshold":85,"trigger_for":2,"recovery_threshold":70,"recovery_for":2,"severity":"warning","enabled":true},
+    {"metric_key":"host.memory.percent","resource_key":"default","operator":">","trigger_threshold":85,"trigger_for":2,"recovery_threshold":75,"recovery_for":2,"severity":"warning","enabled":true},
+    {"metric_key":"host.disk.usage_percent","resource_key":"default","operator":">","trigger_threshold":85,"trigger_for":1,"recovery_threshold":80,"recovery_for":1,"severity":"warning","enabled":true},
+    {"metric_key":"service.reachable","resource_key":"default","operator":"<","trigger_threshold":1,"trigger_for":2,"recovery_threshold":0.5,"recovery_for":2,"severity":"critical","enabled":true}
+  ]
+}
