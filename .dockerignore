@@ -16,7 +16,8 @@ data
 logs
 work
 outputs
-deploy
+deploy/*
+!deploy/nginx.conf
 frontend/node_modules
 frontend/dist
 frontend/frontend-build.log
