@@ -1,6 +1,7 @@
 .git
 .github
 .codegraph
+.deploy_tmp
 .venv
 .env
 .env.*
@@ -15,8 +16,10 @@ data
 logs
 work
 outputs
+deploy
 frontend/node_modules
 frontend/dist
 frontend/frontend-build.log
+*.log
 *.docx
 *.pdf

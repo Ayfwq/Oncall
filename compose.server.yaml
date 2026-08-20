@@ -6,6 +6,7 @@ x-backend-environment: &backend-environment
   environment:
     ONCALL_ENV: production
     ONCALL_HOST: 0.0.0.0
+    PYTHONPATH: /app/backend/src
     ONCALL_DATABASE_URL: postgresql+asyncpg://oncall:${POSTGRES_PASSWORD:-oncall}@postgres:5432/oncall
     ONCALL_LANGGRAPH_DATABASE_URL: postgresql://oncall:${POSTGRES_PASSWORD:-oncall}@postgres:5432/oncall
     ONCALL_MILVUS_URI: http://milvus:19530
@@ -67,11 +68,12 @@ services:
   migrate:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: /venv/bin/alembic -c backend/alembic.ini upgrade head
+    command: /opt/venv/bin/alembic -c backend/alembic.ini upgrade head
     restart: "no"
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
+      - ./backend:/app/backend:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,11 +84,12 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     <<: *backend-environment
-    command: /venv/bin/oncall-api
+    command: /opt/venv/bin/oncall-api
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
+      - ./backend:/app/backend:ro
     expose:
       - "9900"
     healthcheck:
@@ -104,12 +107,13 @@ services:
   monitor-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: /venv/bin/oncall-monitor-worker
+    command: /opt/venv/bin/oncall-monitor-worker
     restart: unless-stopped
     pid: host
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
+      - ./backend:/app/backend:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt:/host/opt:ro
       - /var/log:/host/var/log:ro
@@ -121,11 +125,12 @@ services:
   agent-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: /venv/bin/oncall-agent-worker
+    command: /opt/venv/bin/oncall-agent-worker
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
+      - ./backend:/app/backend:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -135,11 +140,12 @@ services:
   rag-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: /venv/bin/oncall-rag-worker
+    command: /opt/venv/bin/oncall-rag-worker
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
+      - ./backend:/app/backend:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

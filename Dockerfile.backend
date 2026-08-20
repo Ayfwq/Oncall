@@ -3,10 +3,9 @@ FROM docker.m.daocloud.io/library/python:3.13-slim AS build
 
 ARG UV_VERSION=0.11.8
 ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    UV_EXTRA_INDEX_URL= \
-      UV_LINK_MODE=copy \
-      UV_CONCURRENT_INSTALLS=1 \
-      UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_CONCURRENT_INSTALLS=8 \
+    UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,11 +27,10 @@ FROM docker.m.daocloud.io/library/python:3.13-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /app
-COPY --from=build /opt/venv /venv
-RUN find /venv/bin -maxdepth 1 -type f -exec sed -i 's|^#!/opt/venv/bin/python|#!/venv/bin/python|' {} +
+COPY --from=build /opt/venv /opt/venv
 COPY --from=build /app/backend /app/backend
 
 EXPOSE 9900

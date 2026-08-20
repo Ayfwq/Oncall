@@ -12,3 +12,6 @@ frontend/dist/
 logs/
 frontend/frontend-build.log
 work/
+.deploy_tmp/
+backend-local.err.log
+backend-local.log

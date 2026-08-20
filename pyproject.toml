@@ -62,7 +62,8 @@ torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
-  url = "https://download.pytorch.org/whl/cpu"
+  url = "https://mirrors.huaweicloud.com/pytorch-wheels"
+  type = "find-links"
 explicit = true
 
 [tool.hatch.build.targets.wheel]
