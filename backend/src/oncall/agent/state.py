@@ -10,6 +10,16 @@ class OncallState(TypedDict, total=False):
     incident_id: str | None
     project_id: str | None
     user_message: str
+    channel: str
+    intent: str
+    route_confidence: float
+    route_reason: str
+    is_ops_related: bool
+    requires_knowledge: bool
+    requires_project: bool
+    requires_incident: bool
+    requires_realtime: bool
+    clarification_question: str | None
     working_messages: list[dict[str, str]]
     conversation_summary: str | None
     project_context: dict[str, Any] | None
@@ -26,6 +36,12 @@ class OncallState(TypedDict, total=False):
     pending_tool: dict[str, Any] | None
     current_tool_result: dict[str, Any] | None
     knowledge_refs: list[dict[str, Any]]
+    knowledge_query: str | None
+    knowledge_status: str
+    knowledge_hits: list[dict[str, Any]]
+    allowed_tools: list[str]
+    tool_plan: list[dict[str, Any]]
+    answer_sources: list[dict[str, Any]]
     diagnosis: dict[str, Any] | None
     final_response: str | None
     exhausted: bool

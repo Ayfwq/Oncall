@@ -28,6 +28,8 @@ class MockProvider(ModelProvider):
     async def decide(self,context:dict[str,Any])->AgentDecision:
         mode=context.get('mode','chat');called_keys=set(context.get('called_tools',[]));called={x.split(':',1)[0] for x in called_keys};msg=(context.get('user_message') or '').lower();incident=context.get('incident_context') or {}
         if mode=='chat':
+            if context.get('intent') == 'casual_chat':
+                return AgentDecision(action='final',answer='你好，我是 Oncall AI SRE，可以协助回答运维问题、检索知识库，并在绑定项目后查询实时运行状态。')
             realtime=any(k in msg for k in ['cpu','内存','memory','磁盘','进程','日志','docker','数据库','postgres','健康','health','现在','当前'])
             if realtime and context.get('project_id') and 'query_host_metrics' not in called:
                 if any(k in msg for k in ['日志','error','异常日志']):name='query_logs';args={'keyword':'','level':'error','limit':50}
@@ -39,8 +41,12 @@ class MockProvider(ModelProvider):
                 return AgentDecision(action='tool',rationale='需要真实运行状态',tool_name=name,tool_args=args)
             if 'search_knowledge' not in called:
                 return AgentDecision(action='tool',rationale='先检索运维知识库',tool_name='search_knowledge',tool_args={'query':context.get('user_message','')})
-            ev=context.get('evidence',[]);summary='；'.join(x.get('summary','') for x in ev[-3:]) or '知识库未提供可用内容'
-            return AgentDecision(action='final',answer=f'基于当前可用信息：{summary}\n\n如果你希望我检查某个具体项目的实时状态，请先在 Projects 中绑定该会话。')
+            ev=context.get('evidence',[]);summary='；'.join(x.get('summary','') for x in ev[-3:]) or '知识库暂未提供可用内容'
+            if context.get('project_id'):
+                answer=f'基于当前可用信息：{summary}\n\n如果你希望我继续检查该项目的实时状态，我可以调用监控工具复查。'
+            else:
+                answer=f'基于当前可用信息：{summary}\n\n当前为通用运维问答模式。'
+            return AgentDecision(action='final',answer=answer)
         if mode=='follow_up':
             realtime=any(k in msg for k in ['现在','当前','cpu','内存','memory','进程','日志','docker','数据库','health','健康','恢复'])
             if realtime and context.get('project_id'):

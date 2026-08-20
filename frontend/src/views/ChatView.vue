@@ -65,6 +65,9 @@ async function send() {
       if (t === 'token') streamingMsg.content += d.content
       else if (t === 'tool_started') statusLine.value = '正在调用只读工具 ' + d.tool_name + ' …'
       else if (t === 'tool_finished') statusLine.value = (d.ok ? '✓ ' : '✗ ') + d.tool_name + (d.ok ? '' : ' · ' + (d.error || '失败'))
+      else if (t === 'intent_routed') { const label = ({ casual_chat: '普通聊天', ops_qa: '运维问答', project_query: '项目实时查询', incident_followup: '告警追问', incident_investigation: '告警调查', clarification: '需要补充上下文' } as Record<string, string>)[d.intent]; statusLine.value = '已识别为 ' + (label || d.intent) }
+      else if (t === 'knowledge_started') statusLine.value = '正在检索运维知识库…'
+      else if (t === 'knowledge_finished') statusLine.value = d.ok ? '知识库检索完成，正在生成…' : '知识库暂不可用，使用通用知识继续回答…'
       else if (t === 'rag_retrieved') statusLine.value = '已检索知识库 ' + d.count + ' 条，正在生成…'
       else if (t === 'diagnosis_ready') statusLine.value = '诊断完成 · 置信度 ' + Math.round((d.confidence || 0) * 100) + '%'
       else if (t === 'final') streamingMsg.content = d.content
@@ -135,7 +138,7 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
           <div class="empty-icon">◈</div>
             <div class="welcome-kicker">ONCALL AI SRE</div>
             <h2>从一个运维问题开始</h2>
-            <p class="muted">绑定项目后，我会用实时采集、知识库和只读工具协助你定位问题。</p>
+            <p class="muted">普通运维问题可直接咨询；绑定项目后可进一步查询实时日志、指标和服务状态。</p>
             <div class="prompt-grid">
               <button class="prompt-card" @click="startWith('检查当前项目的 CPU、内存和磁盘状态')"><b>检查主机状态</b><span>CPU · 内存 · 磁盘</span><i>→</i></button>
               <button class="prompt-card" @click="startWith('最近有没有异常告警？请给出优先级最高的问题')"><b>梳理当前告警</b><span>Incident · 优先级 · 影响</span><i>→</i></button>

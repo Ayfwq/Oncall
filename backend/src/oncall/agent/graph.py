@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.agent.context_builder import ContextBuilder
 from oncall.agent.model_gateway import ModelProvider, get_model_provider
+from oncall.agent.router import classify_intent
 from oncall.agent.state import OncallState
 from oncall.agent.tool_contracts import ALLOWED_TOOLS, public_tool_specs
 from oncall.agent.tool_registry import ToolExecutionContext, ToolRegistry
@@ -35,20 +36,25 @@ class OncallGraphRuntime:
             except Exception:pass
 
     def _context(self,state:OncallState)->dict:
-        context={k:state.get(k) for k in ('mode','user_message','project_id','project_context','incident_context','previous_diagnosis','conversation_summary','working_messages','evidence','called_tools','tool_calls_used','tool_budget','knowledge_refs')}
-        context['available_tools']=public_tool_specs()
+        context={k:state.get(k) for k in ('mode','user_message','project_id','project_context','incident_context','previous_diagnosis','conversation_summary','working_messages','evidence','called_tools','tool_calls_used','tool_budget','knowledge_refs','knowledge_hits','knowledge_status','intent','route_reason','requires_realtime','requires_project')}
+        allowed=set(state.get('allowed_tools') or [])
+        context['available_tools']=[x for x in public_tool_specs() if x['name'] in allowed]
         return context
 
     def build(self,checkpointer=None):
         g=StateGraph(OncallState)
         g.add_node('load_context',self.load_context)
+        g.add_node('route_intent',self.route_intent)
+        g.add_node('retrieve_knowledge',self.retrieve_knowledge)
         g.add_node('reason',self.reason)
         g.add_node('guard_tools',self.guard_tools)
         g.add_node('execute_tools',self.execute_tools)
         g.add_node('record_observations',self.record_observations)
         g.add_node('finalize',self.finalize)
         g.add_node('persist_result',self.persist_result)
-        g.add_edge(START,'load_context');g.add_edge('load_context','reason')
+        g.add_edge(START,'load_context');g.add_edge('load_context','route_intent')
+        g.add_conditional_edges('route_intent',self.route_after_route,{'knowledge':'retrieve_knowledge','reason':'reason','clarify':'finalize'})
+        g.add_edge('retrieve_knowledge','reason')
         g.add_conditional_edges('reason',self.route_after_reason,{'tool':'guard_tools','final':'finalize'})
         g.add_conditional_edges('guard_tools',self.route_after_guard,{'tool':'execute_tools','final':'finalize'})
         g.add_edge('execute_tools','record_observations');g.add_edge('record_observations','reason')
@@ -60,7 +66,40 @@ class OncallGraphRuntime:
         tool_budget,loop_budget=BUDGETS.get(state.get('mode','chat'),BUDGETS['chat'])
         # A LangGraph thread is durable across turns, but tool/loop budgets are
         # per AgentRun. Never inherit transient counters from the previous checkpoint.
-        return {**built,'tool_calls_used':0,'tool_budget':tool_budget,'reason_loops':0,'reason_loop_budget':loop_budget,'called_tools':[],'knowledge_refs':[],'pending_tool':None,'current_tool_result':None,'decision':{},'diagnosis':None,'final_response':None,'exhausted':False}
+        return {**built,'tool_calls_used':0,'tool_budget':tool_budget,'reason_loops':0,'reason_loop_budget':loop_budget,'called_tools':[],'knowledge_refs':[],'knowledge_hits':[],'knowledge_status':'skipped','allowed_tools':[],'tool_plan':[],'answer_sources':[],'pending_tool':None,'current_tool_result':None,'decision':{},'diagnosis':None,'final_response':None,'exhausted':False}
+
+    async def route_intent(self,state:OncallState)->dict:
+        route=classify_intent(state.get('user_message',''),project_id=state.get('project_id'),incident_id=state.get('incident_id'),mode=state.get('mode','chat'))
+        if route.get('requires_realtime'):
+            route['allowed_tools']=[x['name'] for x in public_tool_specs()]
+        elif route.get('requires_knowledge'):
+            route['allowed_tools']=['search_knowledge']
+        else:
+            route['allowed_tools']=[]
+        self._emit('intent_routed',{'intent':route.get('intent'),'confidence':route.get('route_confidence'),'reason':route.get('route_reason')})
+        if route.get('intent') == 'clarification':
+            route['decision']={'action':'final','rationale':route.get('route_reason',''),'answer':route.get('clarification_question')}
+        return route
+
+    def route_after_route(self,state:OncallState)->str:
+        if state.get('intent') == 'clarification': return 'clarify'
+        return 'knowledge' if state.get('requires_knowledge') else 'reason'
+
+    async def retrieve_knowledge(self,state:OncallState)->dict:
+        query=str(state.get('user_message','')).strip()
+        if not query: return {'knowledge_status':'skipped'}
+        ctx=ToolExecutionContext(project_id=UUID(state['project_id']) if state.get('project_id') else None,incident_id=UUID(state['incident_id']) if state.get('incident_id') else None,agent_run_id=UUID(state['run_id']))
+        self._emit('knowledge_started',{'query':query[:200]})
+        try:
+            result=await self.tools.execute('search_knowledge',{'query':query,'top_k':5},ctx)
+            dumped=result.model_dump(mode='json');hits=dumped.get('data') if isinstance(dumped.get('data'),list) else []
+            refs=[{'document_id':x.get('document_id',''),'version_id':x.get('version_id'),'chunk_id':x.get('id'),'title':x.get('title'),'page_range':x.get('page_range'),'score':x.get('rerank_score',x.get('rrf_score'))} for x in hits[:5]]
+            self._emit('knowledge_finished',{'ok':bool(dumped.get('ok')),'count':len(hits),'summary':dumped.get('summary','')})
+            key='search_knowledge:'+__import__('json').dumps({'query':query,'top_k':5},sort_keys=True,ensure_ascii=False)
+            return {'knowledge_query':query,'knowledge_status':'hit' if hits else ('unavailable' if not dumped.get('ok') else 'empty'),'knowledge_hits':hits,'knowledge_refs':refs,'called_tools':[key],'answer_sources':[{'type':'knowledge','count':len(hits)}]}
+        except Exception as exc:
+            self._emit('knowledge_finished',{'ok':False,'count':0,'error':str(exc)[:300]})
+            return {'knowledge_query':query,'knowledge_status':'unavailable','knowledge_hits':[],'knowledge_refs':[],'answer_sources':[{'type':'knowledge','count':0,'error':str(exc)[:300]}]}
 
     async def reason(self,state:OncallState)->dict:
         loops=state.get('reason_loops',0)+1
@@ -172,6 +211,15 @@ class OncallGraphRuntime:
                 await self.session.rollback()
         if run:
             try:
+                run.usage={
+                    **(run.usage or {}),
+                    'intent':state.get('intent'),
+                    'route_confidence':state.get('route_confidence'),
+                    'route_reason':state.get('route_reason'),
+                    'knowledge_status':state.get('knowledge_status'),
+                    'knowledge_refs':state.get('knowledge_refs',[])[:5],
+                    'answer_sources':state.get('answer_sources',[]),
+                }
                 run.status='completed';run.finished_at=datetime.now().astimezone();await self.session.commit()
             except Exception:
                 await self.session.rollback()

@@ -28,10 +28,14 @@ FROM docker.m.daocloud.io/library/python:3.13-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /app
-COPY --from=build /opt/venv /opt/venv
+# The venv is placed at /venv (not /opt/venv) because monitor-worker mounts
+# the host /opt read-only, which would hide anything under /opt in the image.
+COPY --from=build /opt/venv /venv
+# Console-script shebangs still point at the build-time path; rewrite them.
+RUN find /venv/bin -maxdepth 1 -type f -exec sed -i 's|^#!/opt/venv/bin/python|#!/venv/bin/python|' {} +
 COPY --from=build /app/backend /app/backend
 
 EXPOSE 9900

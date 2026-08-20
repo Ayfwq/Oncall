@@ -26,7 +26,7 @@ class AgentService:
         if not (channel=='monitor' and mode in (AgentMode.INVESTIGATE,AgentMode.DEEP)):
             await ConversationService(self.session).add_message(conversation_id,'user',user_message,channel=channel)
         run=AgentRun(mode=mode.value,conversation_id=conversation_id,incident_id=conv.incident_id,status='running',model_profile='default',prompt_version='v1');self.session.add(run);await self.session.commit();await self.session.refresh(run)
-        initial={'run_id':str(run.id),'mode':mode.value,'conversation_id':str(conversation_id),'incident_id':str(conv.incident_id) if conv.incident_id else None,'project_id':str(conv.project_id) if conv.project_id else None,'user_message':user_message,'called_tools':[],'evidence':[],'knowledge_refs':[]}
+        initial={'run_id':str(run.id),'mode':mode.value,'channel':channel,'conversation_id':str(conversation_id),'incident_id':str(conv.incident_id) if conv.incident_id else None,'project_id':str(conv.project_id) if conv.project_id else None,'user_message':user_message,'called_tools':[],'evidence':[],'knowledge_refs':[]}
         model=get_model_provider()
         graph=OncallGraphRuntime(self.session,model=model,emit=emit).build(self.checkpointer);config={'configurable':{'thread_id':str(conversation_id)}}
         try:
