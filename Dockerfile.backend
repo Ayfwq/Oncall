@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM docker.m.daocloud.io/library/python:3.13-slim
+FROM docker.m.daocloud.io/library/python:3.13-slim AS build
 
 ARG UV_VERSION=0.11.8
 ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
@@ -22,6 +22,16 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY backend ./backend
 RUN uv sync --frozen --no-dev
+
+FROM docker.m.daocloud.io/library/python:3.13-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/venv/bin:$PATH
+
+WORKDIR /app
+COPY --from=build /opt/venv /opt/venv
+COPY --from=build /app/backend /app/backend
 
 EXPOSE 9900
 CMD ["oncall-api"]
