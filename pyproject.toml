@@ -62,7 +62,7 @@ torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
-  url = "https://mirrors.huaweicloud.com/pytorch-wheels"
+  url = "https://mirrors.aliyun.com/pytorch-wheels/cpu"
   type = "find-links"
 explicit = true
 
