@@ -138,13 +138,14 @@ class OncallGraphRuntime:
         return {'current_tool_result':dumped,'tool_calls_used':state.get('tool_calls_used',0)+1,'called_tools':[*state.get('called_tools',[]),p['call_key']]}
 
     async def record_observations(self,state:OncallState)->dict:
-        p=state.get('pending_tool') or {};r=state.get('current_tool_result') or {};evidence=list(state.get('evidence',[]));refs=list(state.get('knowledge_refs',[]))
+        p=state.get('pending_tool') or {};r=state.get('current_tool_result') or {};evidence=list(state.get('evidence',[]));refs=list(state.get('knowledge_refs',[]));sources=list(state.get('answer_sources',[]))
         if p.get('name')=='search_knowledge':
             if r.get('ok') and isinstance(r.get('data'),list):
                 refs.extend([{'document_id':x.get('document_id',''),'version_id':x.get('version_id'),'chunk_id':x.get('id'),'title':x.get('title'),'page_range':x.get('page_range'),'score':x.get('rerank_score',x.get('rrf_score'))} for x in r['data'][:5]])
                 if r['data']:
                     self._emit('rag_retrieved',{'count':len(r['data']),'top':[{'title':x.get('title',''),'score':x.get('rerank_score',x.get('rrf_score'))} for x in r['data'][:5]]})
         elif r:
+            sources.append({'type':'tool','tool_name':p.get('name','unknown'),'ok':bool(r.get('ok')),'observed_at':r.get('observed_at')})
             item=EvidenceItem(type='tool_observation',source_tool=p.get('name','unknown'),observed_at=datetime.fromisoformat(r['observed_at']) if isinstance(r.get('observed_at'),str) else datetime.now().astimezone(),summary=r.get('summary',''),data=r.get('data'),source_ref=r.get('source_ref')).model_dump(mode='json')
             evidence.append(item)
             if state.get('incident_id') and r.get('ok') and await self._incident_alive(state['incident_id']):
@@ -152,7 +153,7 @@ class OncallGraphRuntime:
                     self.session.add(IncidentEvidence(incident_id=UUID(state['incident_id']),type='tool_observation',source=p.get('name','unknown'),summary=r.get('summary',''),data={'result':r.get('data') or {}},raw_ref=r.get('source_ref')));await self.session.commit()
                 except Exception:
                     await self.session.rollback()
-        return {'evidence':evidence,'knowledge_refs':refs,'pending_tool':None,'current_tool_result':None}
+        return {'evidence':evidence,'knowledge_refs':refs,'answer_sources':sources,'pending_tool':None,'current_tool_result':None}
 
     async def _incident_alive(self,incident_id:str|None)->bool:
         if not incident_id:return False
@@ -195,7 +196,7 @@ class OncallGraphRuntime:
         if run and run.status=='completed':return {}
         cs=ConversationService(self.session)
         try:
-            await cs.add_message(UUID(state['conversation_id']),'assistant',state.get('final_response') or '',channel='agent',metadata={'agent_run_id':state['run_id'],'mode':state.get('mode')})
+            await cs.add_message(UUID(state['conversation_id']),'assistant',state.get('final_response') or '',channel='agent',metadata={'agent_run_id':state['run_id'],'mode':state.get('mode'),'intent':state.get('intent'),'knowledge_status':state.get('knowledge_status'),'answer_sources':state.get('answer_sources',[])})
         except Exception:
             # The conversation may have been deleted while a durable investigation ran.
             await self.session.rollback()

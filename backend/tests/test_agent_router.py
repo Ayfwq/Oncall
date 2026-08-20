@@ -31,3 +31,10 @@ def test_incident_conversation_keeps_incident_context():
     assert route['intent'] == 'incident_followup'
     assert route['requires_incident'] is True
     assert route['requires_knowledge'] is True
+
+
+def test_incident_conversation_can_switch_to_general_ops_question():
+    route = classify_intent('Docker 怎么清理无用镜像？', project_id='project-1', incident_id='incident-1', mode='follow_up')
+    assert route['intent'] == 'ops_qa'
+    assert route['requires_incident'] is False
+    assert route['requires_realtime'] is False
