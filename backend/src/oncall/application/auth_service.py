@@ -52,3 +52,15 @@ class AuthService:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         await self.session.execute(delete(Session).where(Session.token_hash == token_hash))
         await self.session.commit()
+
+    async def change_password(self, user: User, current_password: str, new_password: str, current_token: str | None) -> bool:
+        if not verify_password(user.password_hash, current_password):
+            return False
+        user.password_hash = hash_password(new_password)
+        if current_token:
+            current_hash = hashlib.sha256(current_token.encode()).hexdigest()
+            await self.session.execute(delete(Session).where(Session.user_id == user.id, Session.token_hash != current_hash))
+        else:
+            await self.session.execute(delete(Session).where(Session.user_id == user.id))
+        await self.session.commit()
+        return True

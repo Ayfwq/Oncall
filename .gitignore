@@ -11,3 +11,4 @@ frontend/dist/
 .DS_Store
 logs/
 frontend/frontend-build.log
+work/

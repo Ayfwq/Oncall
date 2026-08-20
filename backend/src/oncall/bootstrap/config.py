@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import re
 
 
 class Settings(BaseSettings):
@@ -81,6 +82,22 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.knowledge_dir.mkdir(parents=True, exist_ok=True)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+
+
+def update_env_values(values: dict[str, str]) -> None:
+    """Update selected ONCALL_* values without exposing secrets to the API response."""
+    env_path = Path('.env')
+    content = env_path.read_text(encoding='utf-8') if env_path.exists() else ''
+    for key, value in values.items():
+        pattern = rf'(?m)^\s*#?\s*{re.escape(key)}\s*=.*$'
+        replacement = f'{key}={value}'
+        if re.search(pattern, content):
+            content = re.sub(pattern, replacement, content)
+        else:
+            if content and not content.endswith('\n'):
+                content += '\n'
+            content += replacement + '\n'
+    env_path.write_text(content, encoding='utf-8', newline='\n')
 
 
 @lru_cache(maxsize=1)

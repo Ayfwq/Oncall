@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 const router = useRouter()
 const route = useRoute()
 const navOpen = ref(false)
+const me = ref({ username: 'admin' })
 const pageTitle = computed(() => {
   if (route.path.startsWith('/projects')) return '监控项目'
   if (route.path.startsWith('/incidents')) return '告警中心'
@@ -12,6 +13,9 @@ const pageTitle = computed(() => {
   return 'AI 运维工作台'
 })
 watch(() => route.path, () => { navOpen.value = false })
+onMounted(async () => {
+  try { me.value = await fetch('/api/auth/me', { credentials: 'include' }).then(r => r.ok ? r.json() : me.value) } catch { /* login page or unavailable API */ }
+})
 async function logout() {
   await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
   router.push('/login')
@@ -51,7 +55,7 @@ async function logout() {
       </nav>
       <div class="sidebar-footer">
         <div class="avatar">A</div>
-        <div class="who"><b>admin</b><span>本地管理员</span></div>
+        <div class="who"><b>{{ me.username }}</b><span>本地管理员</span></div>
         <button class="logout" @click="logout">退出</button>
       </div>
     </aside>

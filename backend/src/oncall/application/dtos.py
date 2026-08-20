@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from math import isfinite
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 from urllib.parse import urlsplit
 
@@ -320,6 +320,26 @@ class ConversationPatchDTO(BaseModel):
 class ChatMessageDTO(BaseModel):
     content: str = Field(min_length=1, max_length=30000)
     channel: str = 'web'
+
+
+class PasswordChangeDTO(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+    confirm_password: str = Field(min_length=8, max_length=200)
+
+    @model_validator(mode='after')
+    def passwords_match(self) -> 'PasswordChangeDTO':
+        if self.new_password != self.confirm_password:
+            raise ValueError('new password and confirmation do not match')
+        return self
+
+
+class FeishuSettingsDTO(BaseModel):
+    enabled: bool = False
+    app_id: str = Field(default='', max_length=200)
+    app_secret: str | None = Field(default=None, max_length=500)
+    default_receive_id: str = Field(default='', max_length=255)
+    default_receive_id_type: Literal['chat_id', 'open_id', 'user_id', 'union_id'] = 'chat_id'
 
 
 class SnapshotDTO(BaseModel):

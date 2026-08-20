@@ -13,10 +13,10 @@ from oncall.api.deps import current_user
 from oncall.application.agent_service import AgentService
 from oncall.application.auth_service import AuthService
 from oncall.application.conversation_service import ConversationService
-from oncall.application.dtos import ChatMessageDTO, ConversationCreateDTO, ConversationPatchDTO, ProjectCreateDTO
+from oncall.application.dtos import ChatMessageDTO, ConversationCreateDTO, ConversationPatchDTO, FeishuSettingsDTO, PasswordChangeDTO, ProjectCreateDTO
 from oncall.application.knowledge_service import KnowledgeService
 from oncall.application.project_service import ProjectService
-from oncall.bootstrap.config import get_settings
+from oncall.bootstrap.config import get_settings, update_env_values
 from oncall.bootstrap.logging import configure_logging
 from oncall.infrastructure.db.models import (AgentRun, BackgroundJob, Conversation, Diagnosis, Incident, IncidentEvidence, KnowledgeDocument, KnowledgeDocumentVersion, MetricSample, MonitoringRule, MonitoringRun, Notification, Project, RetrievalTrace, ToolRun)
 from oncall.infrastructure.db.session import SessionFactory, get_session
@@ -89,6 +89,13 @@ async def logout(response:Response,request:Request,db:AsyncSession=Depends(get_s
 
 @app.get('/api/auth/me')
 async def me(user=Depends(current_user)):return {'id':str(user.id),'username':user.username}
+
+@app.post('/api/auth/password')
+async def change_password(dto:PasswordChangeDTO,request:Request,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    token=request.cookies.get('oncall_session')
+    ok=await AuthService(db).change_password(user,dto.current_password,dto.new_password,token)
+    if not ok:raise HTTPException(400,'current password is incorrect')
+    return {'ok':True,'message':'password changed; other sessions were signed out'}
 
 @app.get('/api/conversations')
 async def conversations(q:str|None=Query(default=None,max_length=200),include_archived:bool=False,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
@@ -381,6 +388,29 @@ async def settings_readiness(user=Depends(current_user)):
         'security':{'secret_master_key_configured':bool(s.secret_master_key),'default_admin_password_in_use':s.admin_password=='change-me-now'},
         'storage':{'database':'postgresql' if s.database_url.startswith('postgresql') else 'other','milvus_uri':s.milvus_uri,'data_dir':str(s.data_dir)},
     }
+
+@app.get('/api/settings/feishu')
+async def feishu_settings(user=Depends(current_user)):
+    return {'enabled':s.feishu_enabled,'app_id':s.feishu_app_id,'app_secret_configured':bool(s.feishu_app_secret),'default_receive_id':s.feishu_default_receive_id,'default_receive_id_type':s.feishu_default_receive_id_type,'restart_required':False}
+
+@app.put('/api/settings/feishu')
+async def update_feishu_settings(dto:FeishuSettingsDTO,user=Depends(current_user)):
+    app_id=dto.app_id.strip()
+    app_secret=(dto.app_secret or '').strip() or s.feishu_app_secret
+    if dto.enabled and (not app_id or not app_secret):
+        raise HTTPException(400,'启用飞书时必须填写 App ID 和 App Secret')
+    if dto.enabled:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response=await client.post('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',json={'app_id':app_id,'app_secret':app_secret})
+            body=response.json()
+        except Exception as exc:
+            raise HTTPException(400,f'飞书凭证验证失败：{exc}')
+        if response.status_code >= 400 or body.get('code') != 0 or not body.get('tenant_access_token'):
+            raise HTTPException(400,f"飞书凭证验证失败：{body.get('msg') or 'unknown error'}")
+    update_env_values({'ONCALL_FEISHU_ENABLED':str(dto.enabled).lower(),'ONCALL_FEISHU_APP_ID':app_id,'ONCALL_FEISHU_APP_SECRET':app_secret,'ONCALL_FEISHU_DEFAULT_RECEIVE_ID':dto.default_receive_id.strip(),'ONCALL_FEISHU_DEFAULT_RECEIVE_ID_TYPE':dto.default_receive_id_type})
+    return {'ok':True,'message':'飞书配置已保存，重启 API 和 Agent Worker 后生效','restart_required':True}
 
 @app.get('/api/settings/tool-contracts')
 async def settings_tool_contracts(user=Depends(current_user)):

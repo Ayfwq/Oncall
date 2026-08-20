@@ -1,0 +1,166 @@
+name: oncall
+
+x-backend-environment: &backend-environment
+  env_file:
+    - .env
+  environment:
+    ONCALL_ENV: production
+    ONCALL_HOST: 0.0.0.0
+    ONCALL_DATABASE_URL: postgresql+asyncpg://oncall:${POSTGRES_PASSWORD:-oncall}@postgres:5432/oncall
+    ONCALL_LANGGRAPH_DATABASE_URL: postgresql://oncall:${POSTGRES_PASSWORD:-oncall}@postgres:5432/oncall
+    ONCALL_MILVUS_URI: http://milvus:19530
+    ONCALL_DATA_DIR: /app/data
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: oncall
+      POSTGRES_USER: oncall
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-oncall}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oncall -d oncall"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  etcd:
+    image: ${ETCD_IMAGE:-registry.cn-hangzhou.aliyuncs.com/mdpublic/mingdaoyun-etcd:v3.5.25}
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir=/etcd
+    volumes:
+      - etcd_data:/etcd
+
+  minio:
+    image: ${MINIO_IMAGE:-docker.m.daocloud.io/minio/minio:RELEASE.2025-07-23T15-54-02Z}
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - minio_data:/minio_data
+
+  milvus:
+    image: ${MILVUS_IMAGE:-docker.m.daocloud.io/milvusdb/milvus:v2.6.3}
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    depends_on:
+      - etcd
+      - minio
+    volumes:
+      - milvus_data:/var/lib/milvus
+
+  migrate:
+    image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
+    <<: *backend-environment
+    command: alembic -c backend/alembic.ini upgrade head
+    restart: "no"
+    volumes:
+      - ./.env:/app/.env
+      - oncall_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    <<: *backend-environment
+    command: oncall-api
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env
+      - oncall_data:/app/data
+    expose:
+      - "9900"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9900/api/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      milvus:
+        condition: service_started
+
+  monitor-worker:
+    image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
+    <<: *backend-environment
+    command: oncall-monitor-worker
+    restart: unless-stopped
+    pid: host
+    volumes:
+      - ./.env:/app/.env
+      - oncall_data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt:/opt:ro
+      - /var/log:/var/log:ro
+      - /home:/home:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  agent-worker:
+    image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
+    <<: *backend-environment
+    command: oncall-agent-worker
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env
+      - oncall_data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      milvus:
+        condition: service_started
+
+  rag-worker:
+    image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
+    <<: *backend-environment
+    command: oncall-rag-worker
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env
+      - oncall_data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      milvus:
+        condition: service_started
+
+  frontend:
+    image: oncall-ai-sre-frontend:${ONCALL_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "${ONCALL_WEB_PORT:-3000}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  oncall_data:

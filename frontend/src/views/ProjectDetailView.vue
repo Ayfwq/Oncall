@@ -11,6 +11,7 @@ const testing = ref(false)
 const message = ref('')
 const messageError = ref(false)
 const tab = ref('form')
+const advancedMode = ref(false)
 const snapshot = ref<any>(null)
 const testFeedback = ref<{ passed: number, failed: number, missingRules: string[] } | null>(null)
 const jsonText = ref('')
@@ -20,6 +21,7 @@ const cfg = ref<any>({
   name: '', description: '', enabled: true, timezone: 'Asia/Shanghai', poll_interval: 300,
   process_targets: [], log_sources: [], docker_targets: [], database_profiles: [], service_endpoints: [], rules: [],
 })
+const quick = ref({ projectPath: '', healthUrl: '', logPath: '', pollInterval: 300 })
 
 const TIMEZONES = ['Asia/Shanghai', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Hong_Kong', 'UTC', 'America/Los_Angeles', 'Europe/London']
 const ENCODINGS = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'latin-1']
@@ -131,11 +133,62 @@ function applyData(data: any) {
   }
 }
 
+function quickDefaults(): boolean {
+  if (!quick.value.projectPath && !quick.value.healthUrl && !quick.value.logPath) {
+    setMessage('至少填写项目目录、健康检查地址或日志文件中的一项', true)
+    return false
+  }
+  const name = cfg.value.name || '项目'
+  if (!quick.value.healthUrl && quick.value.projectPath.toLowerCase().includes('auto_geo')) {
+    quick.value.healthUrl = 'http://127.0.0.1:8001/api/health'
+  }
+  if (!quick.value.logPath && quick.value.projectPath.toLowerCase().includes('auto_geo')) {
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: cfg.value.timezone || 'Asia/Shanghai' }).format(new Date())
+    quick.value.logPath = `${quick.value.projectPath.replace(/[\\/]$/, '')}\\backend\\logs\\auto_geo_${today}.log`
+  }
+  if (quick.value.projectPath && !cfg.value.process_targets.some((x: any) => x.cwd === quick.value.projectPath)) {
+    cfg.value.process_targets.push({ id: null, name: `${name} 后端`, executable: 'python', cmdline_filters: 'backend.main', cwd: quick.value.projectPath, port: 8001, enabled: true })
+  }
+  if (quick.value.healthUrl && !cfg.value.service_endpoints.some((x: any) => x.url === quick.value.healthUrl)) {
+    cfg.value.service_endpoints.push({ id: null, name: `${name} 健康检查`, url: quick.value.healthUrl, method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true })
+  }
+  if (quick.value.logPath && !cfg.value.log_sources.some((x: any) => x.path === quick.value.logPath)) {
+    cfg.value.log_sources.push({ id: null, path: quick.value.logPath, encoding: 'utf-8', parser_config: {}, enabled: true })
+  }
+  const addRule = (metric_key: string, operator: string, trigger_threshold: number, recovery_threshold: number, severity = 'warning') => {
+    if (!cfg.value.rules.some((x: any) => x.metric_key === metric_key && x.enabled)) {
+      cfg.value.rules.push({ id: null, metric_key, resource_key: 'default', operator, trigger_threshold, trigger_for: 2, recovery_threshold, recovery_for: 2, severity, enabled: true })
+    }
+  }
+  addRule('process.target.alive', '<', 0.5, 1, 'critical')
+  addRule('service.reachable', '<', 0.5, 1, 'critical')
+  if (quick.value.logPath) addRule('log.error.rate_per_min', '>', 5, 1, 'warning')
+  cfg.value.poll_interval = Number(quick.value.pollInterval) || 300
+  setMessage('已生成配置草稿')
+  return true
+}
+
+async function quickSetup() {
+  if (!quickDefaults()) return
+  await save()
+}
+
+function syncQuickFromConfig() {
+  const process = cfg.value.process_targets.find((x: any) => x.enabled)
+  const service = cfg.value.service_endpoints.find((x: any) => x.enabled)
+  const log = cfg.value.log_sources.find((x: any) => x.enabled)
+  quick.value.projectPath = process?.cwd || quick.value.projectPath
+  quick.value.healthUrl = service?.url || quick.value.healthUrl
+  quick.value.logPath = log?.path || quick.value.logPath
+  quick.value.pollInterval = cfg.value.poll_interval
+}
+
 async function load() {
   loading.value = true
   try {
     const data = await api(`/projects/${id}`)
     applyData(data)
+    syncQuickFromConfig()
     jsonText.value = JSON.stringify(data, null, 2)
   } catch (e: any) { setMessage('加载失败：' + errorMessage(e), true) }
   finally { loading.value = false }
@@ -313,6 +366,39 @@ onMounted(load)
     <el-tabs v-model="tab">
       <el-tab-pane label="表单配置" name="form">
         <el-form label-position="top" size="default">
+          <div class="card quick-card">
+            <div class="quick-head">
+              <div>
+                <h3>快速配置</h3>
+                <p class="muted quick-desc">输入项目目录和一个健康检查地址，系统会自动生成进程、服务、日志和基础告警配置。</p>
+              </div>
+              <el-tag type="success" effect="plain">推荐</el-tag>
+            </div>
+            <div class="quick-grid">
+              <el-form-item label="项目目录（可选）" class="span-2">
+                <el-input v-model="quick.projectPath" placeholder="例如：D:\\GEO\\Auto_GEO-main" />
+                <small class="field-help">用于识别本机进程和工作目录；如果只监控 HTTP 服务可以留空。</small>
+              </el-form-item>
+              <el-form-item label="健康检查地址（可选）" class="span-2">
+                <el-input v-model="quick.healthUrl" placeholder="例如：http://127.0.0.1:8001/api/health" />
+                <small class="field-help">返回 200 表示服务正常。</small>
+              </el-form-item>
+              <el-form-item label="日志文件（可选）" class="span-2">
+                <el-input v-model="quick.logPath" placeholder="例如：D:\\GEO\\Auto_GEO-main\\backend\\logs\\app.log" />
+                <small class="field-help">填写正在写入的日志文件；暂不需要日志监控可以留空。</small>
+              </el-form-item>
+              <el-form-item label="检查间隔（秒）">
+                <el-input-number v-model="quick.pollInterval" :min="10" :max="86400" style="width: 100%" />
+              </el-form-item>
+            </div>
+            <div class="quick-actions">
+              <el-button type="primary" :loading="saving" @click="quickSetup">生成并保存</el-button>
+              <el-button text @click="advancedMode = !advancedMode">{{ advancedMode ? '收起高级配置' : '打开高级配置' }}</el-button>
+              <span class="muted quick-note">保存后可点击右上角“测试采集”验证。</span>
+            </div>
+          </div>
+
+          <div v-if="advancedMode" class="advanced-config">
           <!-- 基本信息 -->
           <div class="card form-card">
             <h3>基本信息</h3>
@@ -516,6 +602,7 @@ onMounted(load)
               </div>
             </div>
           </div>
+          </div>
         </el-form>
       </el-tab-pane>
 
@@ -553,6 +640,16 @@ onMounted(load)
 <style scoped>
 .msg { font-size: 13px; color: var(--success); margin: -8px 0 14px; }
 .msg.err { color: var(--danger); }
+.quick-card { margin-bottom: 16px; border: 1px solid #dfe0ff; background: linear-gradient(135deg, #fbfbff, #fff); }
+.quick-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+.quick-head h3 { margin: 0 0 4px; }
+.quick-desc { margin: 0; font-size: 13px; }
+.quick-grid { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 0 14px; }
+.quick-grid .span-2 { grid-column: span 2; }
+.field-help { display: block; margin-top: 4px; color: var(--text-3); font-size: 12px; line-height: 1.35; }
+.quick-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
+.quick-note { font-size: 12px; }
+.advanced-config { border-top: 1px dashed var(--border); padding-top: 16px; }
 .test-feedback { display: flex; flex-wrap: wrap; gap: 12px; margin: -6px 0 14px; font-size: 13px; color: var(--text-2); }
 .err-text { color: var(--danger); }
 .form-card { margin-bottom: 16px; }
@@ -579,4 +676,8 @@ onMounted(load)
 }
 .collector-chip.ok { background: #e6f7ec; color: #17823f; }
 .collector-chip.err { background: #fdeceb; color: #c22c34; }
+@media (max-width: 760px) {
+  .quick-grid { grid-template-columns: 1fr; }
+  .quick-grid .span-2 { grid-column: auto; }
+}
 </style>

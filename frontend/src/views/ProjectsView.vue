@@ -73,7 +73,7 @@ onMounted(load)
         <el-input-number v-model="pollInterval" :min="10" :max="86400" controls-position="right" />
         <el-button type="primary" :loading="creating" @click="add">＋ 创建项目</el-button>
       </div>
-      <span class="muted" style="font-size: 12px">默认生成 CPU / 内存 / 磁盘基础规则；创建后必须在详情页完成目标配置并测试采集。</span>
+      <span class="muted" style="font-size: 12px">创建后进入“快速配置”，填写项目目录、健康检查地址或日志文件即可开始。</span>
     </div>
     <div class="list-toolbar">
       <div><h2>我的项目</h2><span class="muted">每个项目代表一台主机或一组需要持续观察的服务</span></div>
