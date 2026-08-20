@@ -21,6 +21,8 @@ dependencies = [
   "langgraph-checkpoint-postgres>=3,<4",
   "langchain-core>=1.4,<2",
   "docling>=2.120,<2.121",
+  "torch==2.6.0",
+  "torchvision==0.21.0",
   "pymilvus>=2.6,<2.7",
   "lark-oapi>=1.4,<2",
   "argon2-cffi>=25,<26",
@@ -53,6 +55,15 @@ oncall-doctor = "oncall.cli.doctor:run"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+  url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend/src/oncall"]

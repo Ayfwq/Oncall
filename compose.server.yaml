@@ -67,7 +67,7 @@ services:
   migrate:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: alembic -c backend/alembic.ini upgrade head
+    command: /opt/venv/bin/alembic -c backend/alembic.ini upgrade head
     restart: "no"
     volumes:
       - ./.env:/app/.env
@@ -82,7 +82,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     <<: *backend-environment
-    command: oncall-api
+    command: /opt/venv/bin/oncall-api
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
@@ -104,7 +104,7 @@ services:
   monitor-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: oncall-monitor-worker
+    command: /opt/venv/bin/oncall-monitor-worker
     restart: unless-stopped
     pid: host
     volumes:
@@ -121,7 +121,7 @@ services:
   agent-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: oncall-agent-worker
+    command: /opt/venv/bin/oncall-agent-worker
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
@@ -135,7 +135,7 @@ services:
   rag-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: oncall-rag-worker
+    command: /opt/venv/bin/oncall-rag-worker
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
