@@ -12,12 +12,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import delete, select
-
 from oncall.infrastructure.db.models import AgentRun, Conversation, RetrievalTrace
 from oncall.rag.embedding import HashEmbeddingProvider, get_embedding_provider
 from oncall.rag.milvus_store import MilvusKnowledgeIndex
 from oncall.rag.retrieval import KnowledgeRetriever, rrf
+from sqlalchemy import delete, select
 
 # (query, expected top document, section/content marker that must be in the
 #  top hits) -- covers natural language, error codes, tools, proprietary terms.

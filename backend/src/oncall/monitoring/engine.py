@@ -3,13 +3,23 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.dtos import SnapshotDTO
 from oncall.application.incident_service import IncidentService, incident_fingerprint
 from oncall.application.project_service import ProjectService
-from oncall.infrastructure.db.models import AlertEvent, Conversation, Incident, LogCursor, MetricSample, MonitoringRule, MonitoringRuleState, MonitoringRun
+from oncall.infrastructure.db.models import (
+    AlertEvent,
+    Conversation,
+    Incident,
+    LogCursor,
+    MetricSample,
+    MonitoringRule,
+    MonitoringRuleState,
+    MonitoringRun,
+)
 from oncall.integrations.database import DatabaseIntegration
 from oncall.integrations.docker_integration import DockerIntegration
 from oncall.integrations.host import HostIntegration
@@ -148,6 +158,7 @@ class MonitoringEngine:
                 # every time. If an operator manually resolved the Incident while the
                 # metric stayed abnormal, recreate it instead of leaving a blind spot.
                 from datetime import timedelta
+
                 from oncall.jobs.queue import JobQueue
                 fp=incident_fingerprint(project_id,rule.id,rule.resource_key,rule.metric_key)
                 inc=await self.session.scalar(select(Incident).where(Incident.project_id==project_id,Incident.fingerprint==fp,Incident.status.in_(['open','investigating','diagnosed'])).order_by(Incident.first_seen.desc()).limit(1))

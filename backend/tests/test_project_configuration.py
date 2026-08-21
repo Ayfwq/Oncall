@@ -1,14 +1,13 @@
 """Fast, dependency-light validation coverage for Project configuration."""
 
 import pytest
-from pydantic import ValidationError
-
 from oncall.application.dtos import (
     MonitoringRuleDTO,
     ProcessTargetDTO,
     ProjectCreateDTO,
     ServiceEndpointDTO,
 )
+from pydantic import ValidationError
 
 
 def test_project_accepts_host_rule_and_reserved_test_metric():

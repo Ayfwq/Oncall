@@ -27,6 +27,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
 
   etcd:
     image: ${ETCD_IMAGE:-registry.cn-hangzhou.aliyuncs.com/mdpublic/mingdaoyun-etcd:v3.5.25}
@@ -39,6 +44,16 @@ services:
     command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir=/etcd
     volumes:
       - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
 
   minio:
     image: ${MINIO_IMAGE:-docker.m.daocloud.io/minio/minio:RELEASE.2025-07-23T15-54-02Z}
@@ -49,6 +64,16 @@ services:
     command: minio server /minio_data --console-address ":9001"
     volumes:
       - minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
 
   milvus:
     image: ${MILVUS_IMAGE:-docker.m.daocloud.io/milvusdb/milvus:v2.6.3}
@@ -60,23 +85,43 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
     depends_on:
-      - etcd
-      - minio
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
 
   migrate:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
     <<: *backend-environment
     command: /opt/venv/bin/alembic -c backend/alembic.ini upgrade head
     restart: "no"
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
-      - ./backend:/app/backend:ro
     depends_on:
       postgres:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
 
   api:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
@@ -89,7 +134,6 @@ services:
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
-      - ./backend:/app/backend:ro
     expose:
       - "9900"
     healthcheck:
@@ -103,6 +147,11 @@ services:
         condition: service_completed_successfully
       milvus:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
 
   monitor-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
@@ -113,7 +162,6 @@ services:
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
-      - ./backend:/app/backend:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt:/host/opt:ro
       - /var/log:/host/var/log:ro
@@ -121,6 +169,11 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
 
   agent-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
@@ -130,12 +183,16 @@ services:
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
-      - ./backend:/app/backend:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
       milvus:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
 
   rag-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
@@ -145,12 +202,16 @@ services:
     volumes:
       - ./.env:/app/.env
       - oncall_data:/app/data
-      - ./backend:/app/backend:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
       milvus:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8g
 
   frontend:
     image: oncall-ai-sre-frontend:${ONCALL_IMAGE_TAG:-latest}
@@ -163,6 +224,11 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
 
 volumes:
   postgres_data:

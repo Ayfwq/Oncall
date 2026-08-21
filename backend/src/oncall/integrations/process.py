@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
+
 import psutil
+
 from oncall.application.dtos import ProcessTargetDTO
 from oncall.domain.schemas import ToolResult
+
 from .base import CollectResult
 
 
@@ -41,7 +45,7 @@ class ProcessIntegration:
                 except (psutil.AccessDenied,psutil.NoSuchProcess):pass
                 break
         if matched:
-            import time;time.sleep(0.1)
+            time.sleep(0.1)
         rows=[]
         for p,target in matched:
             try:

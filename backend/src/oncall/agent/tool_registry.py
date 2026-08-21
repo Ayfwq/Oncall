@@ -7,9 +7,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from oncall.agent.tool_contracts import ALLOWED_TOOLS, validate_tool_args
 from oncall.application.project_service import ProjectService
 from oncall.domain.schemas import ToolResult
 from oncall.infrastructure.db.models import MetricSample, RetrievalTrace, ToolRun
@@ -21,7 +23,6 @@ from oncall.integrations.process import ProcessIntegration
 from oncall.integrations.service import ServiceIntegration
 from oncall.rag.retrieval import KnowledgeRetriever
 from oncall.security.redact import redact_text
-from oncall.agent.tool_contracts import ALLOWED_TOOLS, validate_tool_args
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ class ToolExecutionContext:
 
 
 class ToolRegistry:
-    def __init__(self,session:AsyncSession):self.session=session
+    def __init__(self,session:AsyncSession):self.session=session;self._retriever:KnowledgeRetriever|None=None
 
     async def execute(self,name:str,args:dict,ctx:ToolExecutionContext,timeout:float=15)->ToolResult:
         if name not in ALLOWED_TOOLS:return ToolResult(ok=False,summary='工具未授权',error_code='TOOL_NOT_ALLOWED')
@@ -45,7 +46,7 @@ class ToolRegistry:
             try:
                 result=await asyncio.wait_for(self._dispatch(name,args,ctx),timeout=timeout);status='ok' if result.ok else 'error'
             except TimeoutError:result=ToolResult(ok=False,summary='工具执行超时',error_code='TIMEOUT');status='timeout'
-            except Exception as e:result=ToolResult(ok=False,summary='工具执行失败',error_code='TOOL_ERROR',data={'error':str(e)});status='error'
+            except Exception as e:result=ToolResult(ok=False,summary='工具执行失败',error_code='TOOL_ERROR',data={'error':redact_text(str(e))});status='error'
         result.summary=redact_text(result.summary);latency=(time.perf_counter()-start)*1000
         if isinstance(result.data,list):
             result_size=len(result.data)
@@ -80,7 +81,9 @@ class ToolRegistry:
         return result
 
     async def _dispatch(self,name:str,args:dict,ctx:ToolExecutionContext)->ToolResult:
-        if name=='search_knowledge':return await KnowledgeRetriever().search(str(args.get('query','')),ctx.project_id,top_k=int(args.get('top_k',5)))
+        if name=='search_knowledge':
+            if self._retriever is None:self._retriever=KnowledgeRetriever()
+            return await self._retriever.search(str(args.get('query','')),ctx.project_id,top_k=int(args.get('top_k',5)))
         cfg=await ProjectService(self.session).runtime_config(ctx.project_id)
         if name=='query_host_metrics':return await HostIntegration().query()
         if name=='query_processes':return await ProcessIntegration(cfg.process_targets).query(int(args.get('limit',30)))

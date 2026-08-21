@@ -18,8 +18,6 @@ from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import select
-
 from oncall.bootstrap.config import get_settings
 from oncall.infrastructure.db.models import (
     BackgroundJob,
@@ -37,6 +35,7 @@ from oncall.infrastructure.db.models import (
 )
 from oncall.infrastructure.db.session import SessionFactory
 from oncall.security.passwords import hash_password
+from sqlalchemy import select
 
 pytestmark = pytest.mark.integration
 

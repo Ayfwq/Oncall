@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncpg
+
 from oncall.application.dtos import DatabaseProfileDTO
 from oncall.domain.schemas import ToolResult
+
 from .base import CollectResult
 
 

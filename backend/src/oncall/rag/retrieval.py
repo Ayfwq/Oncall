@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from uuid import UUID
-from oncall.domain.schemas import CitationRef, ToolResult
+
+from oncall.domain.schemas import ToolResult
 from oncall.rag.embedding import get_embedding_provider
 from oncall.rag.milvus_store import MilvusKnowledgeIndex
 from oncall.rag.rerank import Reranker
+from oncall.security.redact import redact_text
 
 
 def rrf(lists:list[list[dict]],k:int=60)->list[dict]:
@@ -30,4 +32,4 @@ class KnowledgeRetriever:
             candidates=rrf([dense,bm25])[:30];items=await self.reranker.rerank(query,candidates,top_k=top_k)
             return ToolResult(ok=True,summary=f'知识库命中 {len(items)} 条',data=items)
         except Exception as e:
-            return ToolResult(ok=False,summary='知识库检索不可用',error_code='RAG_UNAVAILABLE',data={'error':str(e)})
+            return ToolResult(ok=False,summary='知识库检索不可用',error_code='RAG_UNAVAILABLE',data={'error':redact_text(str(e))})

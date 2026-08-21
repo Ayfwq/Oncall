@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 from uuid import UUID
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.dtos import (
-    DatabaseProfileDTO, DockerTargetDTO, LogSourceDTO, MonitoringRuleDTO, ProcessTargetDTO,
-    ProjectCreateDTO, ProjectRuntimeConfig, ServiceEndpointDTO,
+    DatabaseProfileDTO,
+    DockerTargetDTO,
+    LogSourceDTO,
+    MonitoringRuleDTO,
+    ProcessTargetDTO,
+    ProjectCreateDTO,
+    ProjectRuntimeConfig,
+    ServiceEndpointDTO,
 )
 from oncall.bootstrap.config import get_settings
 from oncall.infrastructure.db.models import (
-    MonitoringRule, Project, ProjectDatabaseProfile, ProjectDockerTarget, ProjectLogSource,
-    ProjectProcessTarget, ProjectServiceEndpoint,
+    MonitoringRule,
+    Project,
+    ProjectDatabaseProfile,
+    ProjectDockerTarget,
+    ProjectLogSource,
+    ProjectProcessTarget,
+    ProjectServiceEndpoint,
 )
 from oncall.security.crypto import SecretBox
 

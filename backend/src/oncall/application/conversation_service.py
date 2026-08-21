@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from uuid import UUID
-from sqlalchemy import delete, select
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.infrastructure.db.models import Conversation, ConversationSummary, Message

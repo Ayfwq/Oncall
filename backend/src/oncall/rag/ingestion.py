@@ -6,11 +6,16 @@ import json
 import shutil
 from pathlib import Path
 from uuid import UUID
-from sqlalchemy import delete, select
+
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.bootstrap.config import get_settings
-from oncall.infrastructure.db.models import KnowledgeChunk, KnowledgeDocument, KnowledgeDocumentVersion
+from oncall.infrastructure.db.models import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeDocumentVersion,
+)
 from oncall.rag.embedding import get_embedding_provider
 from oncall.rag.milvus_store import MilvusKnowledgeIndex
 
@@ -32,6 +37,10 @@ class KnowledgeIngestor:
         cs=await asyncio.to_thread(checksum,source);resolved_title=title or source.stem
         # Same title + scope is treated as a new version of the same logical document.
         # Uploading identical bytes is idempotent and returns the existing version.
+        # Serialize concurrent uploads of the same logical document so the checksum
+        # dedup check below is race-free (advisory lock released at commit/rollback).
+        lock_key=hash((str(user_id),str(project_scope),resolved_title))%(2**31)
+        await self.session.execute(text('SELECT pg_advisory_xact_lock(:k)'),{'k':lock_key})
         doc=await self.session.scalar(select(KnowledgeDocument).where(KnowledgeDocument.user_id==user_id,KnowledgeDocument.project_scope==project_scope,KnowledgeDocument.title==resolved_title).order_by(KnowledgeDocument.created_at.asc()).limit(1))
         if not doc:
             doc=KnowledgeDocument(user_id=user_id,project_scope=project_scope,title=resolved_title,status='uploaded');self.session.add(doc);await self.session.flush()
@@ -42,14 +51,25 @@ class KnowledgeIngestor:
         ver=KnowledgeDocumentVersion(document_id=doc.id,checksum=cs,original_filename=source.name,raw_path=str(raw),status='uploaded');self.session.add(ver);doc.status='uploaded';await self.session.commit();await self.session.refresh(ver);return ver
 
     async def ingest_version(self,version_id:UUID)->None:
+        # Atomically claim the version: only 'uploaded' (first ingest) or 'failed'
+        # (retry) states may transition to 'processing'. A concurrent worker that
+        # already claimed it (status already 'processing'/'ready') makes the UPDATE
+        # match zero rows and we no-op instead of double-processing.
+        claimed=await self.session.execute(
+            update(KnowledgeDocumentVersion)
+            .where(KnowledgeDocumentVersion.id==version_id,KnowledgeDocumentVersion.status.in_(['uploaded','failed']))
+            .values(status='processing')
+            .returning(KnowledgeDocumentVersion.id)
+        )
+        if claimed.rowcount==0:
+            return  # already claimed or in terminal state
         ver=await self.session.get(KnowledgeDocumentVersion,version_id)
-        if not ver:
+        doc=await self.session.get(KnowledgeDocument,ver.document_id) if ver else None
+        if ver is None or doc is None:
             # Document was deleted before this durable job was claimed; nothing to do.
+            await self.session.rollback()
             return
-        doc=await self.session.get(KnowledgeDocument,ver.document_id)
-        if not doc:
-            return
-        ver.status='processing';doc.status='processing';await self.session.commit()
+        doc.status='processing';await self.session.commit()
         try:
             converted=await asyncio.to_thread(self._convert,Path(ver.raw_path))
             outdir=Path(ver.raw_path).parent;json_path=outdir/'document.json';md_path=outdir/'document.md'
@@ -80,8 +100,8 @@ class KnowledgeIngestor:
             await self.session.commit();raise
 
     def _convert(self,path:Path)->dict:
-        from docling.document_converter import DocumentConverter
         from docling.chunking import HybridChunker
+        from docling.document_converter import DocumentConverter
         result=DocumentConverter().convert(path);dl=result.document
         chunker=HybridChunker(merge_peers=True)
         chunks=[]

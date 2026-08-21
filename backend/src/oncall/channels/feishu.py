@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+
 import httpx
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,8 +181,8 @@ def start_ws_listener(on_message):
     """
     s=get_settings()
     if not s.feishu_enabled:return None
-    import threading
     import asyncio
+    import threading
     def _run():
         import lark_oapi as lark
         new_loop = asyncio.new_event_loop()

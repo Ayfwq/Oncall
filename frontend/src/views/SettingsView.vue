@@ -1,23 +1,38 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import type { AuthUser, FeishuReceiveType, FeishuSettings, Readiness } from '../types'
 
-const readiness = ref<any>()
-const me = ref<any>()
-const feishu = ref({ enabled: false, app_id: '', app_secret: '', app_secret_configured: false, default_receive_id: '', default_receive_id_type: 'chat_id' })
+interface FeishuForm {
+  enabled: boolean
+  app_id: string
+  app_secret: string
+  app_secret_configured: boolean
+  default_receive_id: string
+  default_receive_id_type: FeishuReceiveType
+}
+
+const readiness = ref<Readiness | null>(null)
+const me = ref<AuthUser | null>(null)
+const feishu = ref<FeishuForm>({ enabled: false, app_id: '', app_secret: '', app_secret_configured: false, default_receive_id: '', default_receive_id_type: 'chat_id' })
 const error = ref('')
 const message = ref('')
 const password = ref({ current_password: '', new_password: '', confirm_password: '' })
 const savingPassword = ref(false)
 const savingFeishu = ref(false)
 
+function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e) }
+
 async function load() {
   error.value = ''
   try {
-    ;[readiness.value, me.value, feishu.value] = await Promise.all([
-      api<any>('/settings/readiness'), api<any>('/auth/me'), api<any>('/settings/feishu'),
+    const [r, m, f] = await Promise.all([
+      api<Readiness>('/settings/readiness'), api<AuthUser>('/auth/me'), api<FeishuSettings>('/settings/feishu'),
     ])
-  } catch (e: any) { error.value = e.message }
+    readiness.value = r
+    me.value = m
+    feishu.value = { ...f, app_secret: '' }
+  } catch (e) { error.value = errorText(e) }
 }
 
 async function changePassword() {
@@ -26,10 +41,10 @@ async function changePassword() {
   if (password.value.new_password !== password.value.confirm_password) { error.value = '两次输入的新密码不一致'; return }
   savingPassword.value = true
   try {
-    const result = await api<any>('/auth/password', { method: 'POST', body: JSON.stringify(password.value) })
+    const result = await api<{ ok: boolean; message: string }>('/auth/password', { method: 'POST', body: JSON.stringify(password.value) })
     message.value = result.message || '密码已修改'
     password.value = { current_password: '', new_password: '', confirm_password: '' }
-  } catch (e: any) { error.value = e.message }
+  } catch (e) { error.value = errorText(e) }
   finally { savingPassword.value = false }
 }
 
@@ -37,11 +52,18 @@ async function saveFeishu() {
   error.value = ''; message.value = ''
   savingFeishu.value = true
   try {
-    const result = await api<any>('/settings/feishu', { method: 'PUT', body: JSON.stringify(feishu.value) })
+    const payload = {
+      enabled: feishu.value.enabled,
+      app_id: feishu.value.app_id,
+      app_secret: feishu.value.app_secret,
+      default_receive_id: feishu.value.default_receive_id,
+      default_receive_id_type: feishu.value.default_receive_id_type,
+    }
+    const result = await api<{ ok: boolean; message: string }>('/settings/feishu', { method: 'PUT', body: JSON.stringify(payload) })
     message.value = result.message || '飞书配置已保存'
     feishu.value.app_secret = ''
     await load()
-  } catch (e: any) { error.value = e.message }
+  } catch (e) { error.value = errorText(e) }
   finally { savingFeishu.value = false }
 }
 

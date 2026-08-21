@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-import re
 
 
 class Settings(BaseSettings):
@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     host: str = '127.0.0.1'
     port: int = 9900
     log_level: str = 'INFO'
+    log_dir: Path = Path('./logs')
+    log_retention_days: int = Field(default=2, ge=1, le=30)
     database_url: str = 'postgresql+asyncpg://oncall:oncall@127.0.0.1:5432/oncall'
     langgraph_database_url: str = 'postgresql://oncall:oncall@127.0.0.1:5432/oncall'
     milvus_uri: str = 'http://127.0.0.1:19530'
@@ -82,6 +84,7 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.knowledge_dir.mkdir(parents=True, exist_ok=True)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
 
 def update_env_values(values: dict[str, str]) -> None:

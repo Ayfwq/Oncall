@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import time
+
 import httpx
+
 from oncall.application.dtos import ServiceEndpointDTO
 from oncall.domain.schemas import ToolResult
+
 from .base import CollectResult
 
 

@@ -6,30 +6,33 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 COMPOSE=(docker compose -f compose.server.yaml)
 STAMP=".deploy/checksums"
-mkdir -p "$STAMP"
+STAMP_TMP="$STAMP/.pending"
+mkdir -p "$STAMP" "$STAMP_TMP"
 
 files_changed() {
   local name="$1"; shift
   local cur prev
   cur="$(sha256sum "$@" | sha256sum | cut -d' ' -f1)"
+  echo "$cur" > "$STAMP_TMP/$name"
   prev="$(cat "$STAMP/$name" 2>/dev/null || echo none)"
-  if [ "$cur" != "$prev" ]; then
-    echo "$cur" > "$STAMP/$name"
-    return 0
-  fi
-  return 1
+  [ "$cur" != "$prev" ]
 }
 
 tree_changed() {
   local name="$1"; shift
   local cur prev
   cur="$(find "$@" -type f -not -path '*/__pycache__/*' -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  echo "$cur" > "$STAMP_TMP/$name"
   prev="$(cat "$STAMP/$name" 2>/dev/null || echo none)"
-  if [ "$cur" != "$prev" ]; then
-    echo "$cur" > "$STAMP/$name"
-    return 0
-  fi
-  return 1
+  [ "$cur" != "$prev" ]
+}
+
+# 仅在全部构建/迁移/重启成功后才提交校验和，避免中途失败导致下次部署被误跳过
+commit_stamps() {
+  for f in "$STAMP_TMP"/*; do
+    [ -f "$f" ] || continue
+    mv -f "$f" "$STAMP/"
+  done
 }
 
 NEED_BACKEND_BUILD=0
@@ -80,4 +83,5 @@ fi
 
 "${COMPOSE[@]}" up -d
 "${COMPOSE[@]}" ps
+commit_stamps
 echo "==> 更新完成"

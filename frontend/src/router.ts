@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from './stores/auth'
 import ChatView from './views/ChatView.vue'
 import IncidentsView from './views/IncidentsView.vue'
 import IncidentDetailView from './views/IncidentDetailView.vue'
@@ -7,6 +8,29 @@ import ProjectDetailView from './views/ProjectDetailView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
 import SettingsView from './views/SettingsView.vue'
 import LoginView from './views/LoginView.vue'
-export default createRouter({history:createWebHistory(),routes:[
-{path:'/login',component:LoginView},{path:'/',component:ChatView},{path:'/incidents',component:IncidentsView},{path:'/incidents/:id',component:IncidentDetailView},{path:'/projects',component:ProjectsView},{path:'/projects/:id',component:ProjectDetailView},{path:'/knowledge',component:KnowledgeView},{path:'/settings',component:SettingsView}
-]})
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: '/login', component: LoginView },
+    { path: '/', component: ChatView },
+    { path: '/incidents', component: IncidentsView },
+    { path: '/incidents/:id', component: IncidentDetailView },
+    { path: '/projects', component: ProjectsView },
+    { path: '/projects/:id', component: ProjectDetailView },
+    { path: '/knowledge', component: KnowledgeView },
+    { path: '/settings', component: SettingsView },
+  ],
+})
+
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  if (to.path === '/login') return true
+  if (!auth.loaded) await auth.load()
+  if (!auth.user) {
+    return { path: '/login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
+  }
+  return true
+})
+
+export default router

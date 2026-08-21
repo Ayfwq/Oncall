@@ -1,5 +1,4 @@
 import pytest
-
 from oncall.rag.embedding import HashEmbeddingProvider
 from oncall.rag.rerank import lexical_score
 

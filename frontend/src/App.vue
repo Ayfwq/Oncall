@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { api } from './api'
+import { useAuthStore } from './stores/auth'
 const router = useRouter()
 const route = useRoute()
 const navOpen = ref(false)
-const me = ref({ username: 'admin' })
+const auth = useAuthStore()
+const me = computed(() => auth.user || { username: 'admin' })
 const pageTitle = computed(() => {
   if (route.path.startsWith('/projects')) return '监控项目'
   if (route.path.startsWith('/incidents')) return '告警中心'
@@ -13,11 +16,18 @@ const pageTitle = computed(() => {
   return 'AI 运维工作台'
 })
 watch(() => route.path, () => { navOpen.value = false })
-onMounted(async () => {
-  try { me.value = await fetch('/api/auth/me', { credentials: 'include' }).then(r => r.ok ? r.json() : me.value) } catch { /* login page or unavailable API */ }
+function handleUnauthorized() {
+  auth.setUser(null)
+  if (route.path !== '/login') router.push('/login')
+}
+onMounted(() => {
+  auth.load()
+  window.addEventListener('oncall:unauthorized', handleUnauthorized)
 })
+onBeforeUnmount(() => window.removeEventListener('oncall:unauthorized', handleUnauthorized))
 async function logout() {
-  await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+  try { await api('/auth/logout', { method: 'POST' }) } catch { /* ignore */ }
+  auth.setUser(null)
   router.push('/login')
 }
 </script>

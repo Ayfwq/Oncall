@@ -5,6 +5,7 @@ because the build sandbox does not contain asyncpg/LangGraph. Target-machine tes
 exercise the live HTTP endpoints through scripts/e2e_smoke.py.
 """
 from __future__ import annotations
+
 import ast
 from pathlib import Path
 

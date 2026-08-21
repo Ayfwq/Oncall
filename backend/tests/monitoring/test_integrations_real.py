@@ -82,8 +82,8 @@ def _docker_available() -> bool:
         return False
 
 
-@pytest.mark.skipif(not _docker_available(), reason="Docker daemon not available")
-async def test_docker_integration_real_container_state():
+async def test_docker_integration_real_container_state(service_gate):
+    service_gate(_docker_available(), "Docker daemon not available")
     result = await DockerIntegration(
         [DockerTargetDTO(container_ref="oncall-ai-sre-postgres-1")]
     ).query()
@@ -116,9 +116,8 @@ async def test_docker_unavailable_returns_explicit_error_not_fake_data(monkeypat
     assert not cr.ok and cr.error
 
 
-async def test_database_integration_real_pg(pg_ready):
-    if not pg_ready:
-        pytest.skip("PostgreSQL unreachable")
+async def test_database_integration_real_pg(pg_ready, service_gate):
+    service_gate(pg_ready, "PostgreSQL unreachable")
     profile = DatabaseProfileDTO(
         host="127.0.0.1", port=5432, database="oncall",
         username="oncall", password="oncall",
@@ -137,7 +136,7 @@ async def test_database_integration_real_pg(pg_ready):
     assert 0 <= float(cr.signals["db.connections.usage_percent"]) <= 100
 
 
-async def test_service_integration_real_http_health():
+async def test_service_integration_real_http_health(service_gate):
     endpoint = ServiceEndpointDTO(url="http://127.0.0.1:9900/api/health")
     result = await ServiceIntegration([endpoint]).query()
     # tolerate transient HTTP hiccups (the API is shared with the live worker)
@@ -147,7 +146,7 @@ async def test_service_integration_real_http_health():
         await asyncio.sleep(0.5)
         result = await ServiceIntegration([endpoint]).query()
     if not result.ok and result.data and result.data[0].get("error"):
-        pytest.skip(f"local API not reachable: {result.data[0]['error']}")
+        service_gate(False, f"local API not reachable: {result.data[0]['error']}")
     assert result.ok, f"service probe failed: {result.summary} {result.data}"
     row = result.data[0]
     assert row["reachable"] is True

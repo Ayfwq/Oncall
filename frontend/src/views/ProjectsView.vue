@@ -2,22 +2,23 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../api'
-const rows = ref<any[]>([]), name = ref('本机监控'), description = ref(''), pollInterval = ref(300), creating = ref(false), loading = ref(false), message = ref(''), messageError = ref(false), search = ref(''), router = useRouter()
+import type { MonitoringRule, ProjectSummary } from '../types'
+const rows = ref<ProjectSummary[]>([]), name = ref('本机监控'), description = ref(''), pollInterval = ref(300), creating = ref(false), loading = ref(false), message = ref(''), messageError = ref(false), search = ref(''), router = useRouter()
 const filteredRows = computed(() => {
   const q = search.value.trim().toLowerCase()
   return q ? rows.value.filter(x => `${x.name} ${x.description || ''}`.toLowerCase().includes(q)) : rows.value
 })
 const enabledCount = computed(() => rows.value.filter(x => x.enabled).length)
 const defaultRules = [
-  { metric_key: 'host.cpu.percent', resource_key: 'default', operator: '>', trigger_threshold: 85, trigger_for: 2, recovery_threshold: 70, recovery_for: 2, severity: 'warning', enabled: true },
-  { metric_key: 'host.memory.percent', resource_key: 'default', operator: '>', trigger_threshold: 85, trigger_for: 2, recovery_threshold: 75, recovery_for: 2, severity: 'warning', enabled: true },
-  { metric_key: 'host.disk.usage_percent', resource_key: 'default', operator: '>', trigger_threshold: 85, trigger_for: 1, recovery_threshold: 80, recovery_for: 1, severity: 'warning', enabled: true },
-]
-function errorMessage(error: any): string {
-  const raw = String(error?.message || error || '未知错误')
+  { id: null, metric_key: 'host.cpu.percent', resource_key: 'default', operator: '>', trigger_threshold: 85, trigger_for: 2, recovery_threshold: 70, recovery_for: 2, severity: 'warning', enabled: true },
+  { id: null, metric_key: 'host.memory.percent', resource_key: 'default', operator: '>', trigger_threshold: 85, trigger_for: 2, recovery_threshold: 75, recovery_for: 2, severity: 'warning', enabled: true },
+  { id: null, metric_key: 'host.disk.usage_percent', resource_key: 'default', operator: '>', trigger_threshold: 85, trigger_for: 1, recovery_threshold: 80, recovery_for: 1, severity: 'warning', enabled: true },
+] as MonitoringRule[]
+function errorMessage(error: unknown): string {
+  const raw = String(error instanceof Error ? error.message : error || '未知错误')
   try {
     const body = JSON.parse(raw)
-    if (Array.isArray(body?.detail)) return body.detail.map((x: any) => x.msg || '参数错误').join('；')
+    if (Array.isArray(body?.detail)) return body.detail.map((x: { msg?: string }) => x.msg || '参数错误').join('；')
     if (typeof body?.detail === 'string') return body.detail
     if (typeof body?.message === 'string') return body.message
   } catch { /* api may return plain text */ }
@@ -26,8 +27,8 @@ function errorMessage(error: any): string {
 
 async function load() {
   loading.value = true
-  try { rows.value = await api('/projects'); message.value = '' }
-  catch (error: any) { messageError.value = true; message.value = '项目列表加载失败：' + errorMessage(error) }
+  try { rows.value = await api<ProjectSummary[]>('/projects'); message.value = '' }
+  catch (error) { messageError.value = true; message.value = '项目列表加载失败：' + errorMessage(error) }
   finally { loading.value = false }
 }
 
@@ -41,12 +42,12 @@ async function add() {
   creating.value = true
   message.value = ''
   try {
-    const r = await api<any>('/projects', { method: 'POST', body: JSON.stringify({
+    const r = await api<{ id: string }>('/projects', { method: 'POST', body: JSON.stringify({
       name: name.value.trim(), description: description.value.trim(), timezone: 'Asia/Shanghai', poll_interval: interval,
       process_targets: [], log_sources: [], docker_targets: [], database_profiles: [], service_endpoints: [], rules: defaultRules,
     }) })
     await load(); router.push(`/projects/${r.id}`)
-  } catch (error: any) {
+  } catch (error) {
     messageError.value = true; message.value = '创建失败：' + errorMessage(error)
   } finally { creating.value = false }
 }

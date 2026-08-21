@@ -23,9 +23,8 @@ SOP_FILES = [
 
 async def _pg_probe() -> bool:
     import asyncpg
-    from sqlalchemy.engine import make_url
-
     from oncall.bootstrap.config import get_settings
+    from sqlalchemy.engine import make_url
 
     url = make_url(get_settings().database_url)
     conn = None
@@ -66,9 +65,8 @@ def rag_ready() -> bool:
 
 
 @pytest.fixture
-async def db(rag_ready):
-    if not rag_ready:
-        pytest.skip("PostgreSQL/Milvus unreachable; skipping RAG integration test")
+async def db(rag_ready, service_gate):
+    service_gate(rag_ready, "PostgreSQL/Milvus unreachable; skipping RAG integration test")
     from oncall.infrastructure.db.session import SessionFactory
 
     async with SessionFactory() as session:
@@ -76,18 +74,15 @@ async def db(rag_ready):
 
 
 @pytest.fixture(scope="session")
-async def rag_kb(rag_ready):
+async def rag_kb(rag_ready, service_gate):
     """Ingest the three SOP fixtures under a dedicated user; cleaned up after."""
-    if not rag_ready:
-        pytest.skip("PostgreSQL/Milvus unreachable; skipping RAG integration test")
-    from sqlalchemy import delete
-
+    service_gate(rag_ready, "PostgreSQL/Milvus unreachable; skipping RAG integration test")
     from oncall.infrastructure.db.models import User
+    from oncall.infrastructure.db.session import SessionFactory
     from oncall.rag.ingestion import KnowledgeIngestor
     from oncall.rag.milvus_store import MilvusKnowledgeIndex
     from oncall.security.passwords import hash_password
-
-    from oncall.infrastructure.db.session import SessionFactory
+    from sqlalchemy import delete
 
     username = f"ragtest_{uuid.uuid4().hex[:8]}"
     async with SessionFactory() as session:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from oncall.agent.graph import OncallGraphRuntime
 from oncall.agent.model_gateway import get_model_provider
-from oncall.application.memory_service import ConversationMemoryService
 from oncall.application.conversation_service import ConversationService
+from oncall.application.memory_service import ConversationMemoryService
 from oncall.domain.enums import AgentMode
 from oncall.infrastructure.db.models import AgentRun, Conversation, Incident
 

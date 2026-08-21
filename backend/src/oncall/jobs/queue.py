@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from uuid import UUID
+
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from oncall.infrastructure.db.models import BackgroundJob
 
 

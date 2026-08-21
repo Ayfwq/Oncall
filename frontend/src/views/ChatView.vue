@@ -4,15 +4,13 @@ import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import { api, streamChat } from '../api'
 import { useRoute } from 'vue-router'
-
-type C = { id: string; title: string; type: string; project_id?: string | null; incident_id?: string | null; updated_at?: string }
-type M = { id?: string; role: string; content: string }
-type P = { id: string; name: string }
+import type { ChatMessage, Conversation, ProjectSummary } from '../types'
 
 const route = useRoute()
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
-const convs = ref<C[]>([]), projects = ref<P[]>([]), active = ref(''), messages = ref<M[]>([]), input = ref('')
+const convs = ref<Conversation[]>([]), projects = ref<ProjectSummary[]>([]), active = ref(''), messages = ref<ChatMessage[]>([]), input = ref('')
 const busy = ref(false), newProject = ref(''), search = ref(''), showArchived = ref(false), statusLine = ref('')
+const mobileListOpen = ref(false)
 
 const activeConversation = computed(() => convs.value.find(x => x.id === active.value))
 function render(text: string) { return DOMPurify.sanitize(md.render(text || '')) }
@@ -27,7 +25,7 @@ async function load() {
   if (!active.value && convs.value[0]) await open(convs.value[0].id)
 }
 async function create() {
-  const c = await api<C>('/conversations', { method: 'POST', body: JSON.stringify({ title: '新对话', project_id: newProject.value || null }) })
+  const c = await api<Conversation>('/conversations', { method: 'POST', body: JSON.stringify({ title: '新对话', project_id: newProject.value || null }) })
   newProject.value = ''; search.value = ''; showArchived.value = false
   await load(); await open(c.id)
 }
@@ -35,7 +33,9 @@ async function startWith(promptText: string) {
   if (!active.value) await create()
   input.value = promptText
 }
-async function open(id: string) { active.value = id; messages.value = await api(`/conversations/${id}/messages`) }
+async function open(id: string) {
+  active.value = id; messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
+}
 async function rename() {
   const c = activeConversation.value; if (!c) return
   const title = prompt('会话名称', c.title)?.trim(); if (!title) return
@@ -57,30 +57,35 @@ async function send() {
   if (!input.value.trim() || !active.value || busy.value) return
   const text = input.value; input.value = ''
   messages.value.push({ role: 'user', content: text })
-  const streamingMsg: M = { role: 'assistant', content: '' }
+  const streamingMsg: ChatMessage = { role: 'assistant', content: '' }
   messages.value.push(streamingMsg)
   busy.value = true; statusLine.value = '正在分析…'
   try {
-    await streamChat(active.value, text, (t, d) => {
-      if (t === 'token') streamingMsg.content += d.content
-      else if (t === 'tool_started') statusLine.value = '正在调用只读工具 ' + d.tool_name + ' …'
-      else if (t === 'tool_finished') statusLine.value = (d.ok ? '✓ ' : '✗ ') + d.tool_name + (d.ok ? '' : ' · ' + (d.error || '失败'))
-      else if (t === 'intent_routed') { const label = ({ casual_chat: '普通聊天', ops_qa: '运维问答', project_query: '项目实时查询', incident_followup: '告警追问', incident_investigation: '告警调查', clarification: '需要补充上下文' } as Record<string, string>)[d.intent]; statusLine.value = '已识别为 ' + (label || d.intent) }
-      else if (t === 'knowledge_started') statusLine.value = '正在检索运维知识库…'
-      else if (t === 'knowledge_finished') statusLine.value = d.ok ? '知识库检索完成，正在生成…' : '知识库暂不可用，使用通用知识继续回答…'
-      else if (t === 'rag_retrieved') statusLine.value = '已检索知识库 ' + d.count + ' 条，正在生成…'
-      else if (t === 'diagnosis_ready') statusLine.value = '诊断完成 · 置信度 ' + Math.round((d.confidence || 0) * 100) + '%'
-      else if (t === 'final') streamingMsg.content = d.content
-      else if (t === 'error') streamingMsg.content = '错误：' + d.message
+    await streamChat(active.value, text, (e) => {
+      if (e.type === 'token') streamingMsg.content += e.data.content
+      else if (e.type === 'tool_started') statusLine.value = '正在调用只读工具 ' + e.data.tool_name + ' …'
+      else if (e.type === 'tool_finished') statusLine.value = (e.data.ok ? '✓ ' : '✗ ') + e.data.tool_name + (e.data.ok ? '' : ' · ' + (e.data.error || '失败'))
+      else if (e.type === 'intent_routed') { const label = ({ casual_chat: '普通聊天', ops_qa: '运维问答', project_query: '项目实时查询', incident_followup: '告警追问', incident_investigation: '告警调查', clarification: '需要补充上下文' } as Record<string, string>)[e.data.intent]; statusLine.value = '已识别为 ' + (label || e.data.intent) }
+      else if (e.type === 'knowledge_started') statusLine.value = '正在检索运维知识库…'
+      else if (e.type === 'knowledge_finished') statusLine.value = e.data.ok ? '知识库检索完成，正在生成…' : '知识库暂不可用，使用通用知识继续回答…'
+      else if (e.type === 'rag_retrieved') statusLine.value = '已检索知识库 ' + e.data.count + ' 条，正在生成…'
+      else if (e.type === 'diagnosis_ready') statusLine.value = '诊断完成 · 置信度 ' + Math.round((e.data.confidence || 0) * 100) + '%'
+      else if (e.type === 'final') streamingMsg.content = e.data.content
+      else if (e.type === 'error') streamingMsg.content = '错误：' + e.data.message
     })
     await load()
-  } catch (e: any) {
-    if (!streamingMsg.content) streamingMsg.content = '错误：' + e.message
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (!streamingMsg.content) streamingMsg.content = '错误：' + msg
   } finally { busy.value = false; statusLine.value = '' }
 }
 function autoresize(e: Event) { const t = e.target as HTMLTextAreaElement; t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 200) + 'px' }
+function onEnterKey(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return
+  send()
+}
 
-let timer: any
+let timer: ReturnType<typeof setTimeout> | undefined
 watch(search, () => { clearTimeout(timer); timer = setTimeout(load, 250) })
 watch(showArchived, load)
 onMounted(async () => { await load(); const q = String(route.query.conversation || ''); if (q) await open(q) })
@@ -89,7 +94,8 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 <template>
   <div class="chat-layout">
     <!-- conversation list -->
-    <section class="conv-list">
+    <div v-if="mobileListOpen" class="conv-scrim" @click="mobileListOpen = false"></div>
+    <section class="conv-list" :class="{ open: mobileListOpen }">
       <div class="conv-list-top">
         <el-select v-model="newProject" clearable placeholder="绑定项目（可选）" size="small" style="width: 100%; margin-bottom: 10px">
           <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
@@ -116,21 +122,24 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 
     <!-- chat -->
     <section class="chat">
-      <div class="chat-head" v-if="activeConversation">
-        <div class="t">
-          <b>{{ activeConversation.title }}</b>
-          <span>{{ activeConversation.incident_id ? '围绕 Incident 持续追问' : activeConversation.project_id ? '已绑定监控项目' : '通用问答' }}</span>
-        </div>
-        <el-dropdown trigger="click" @command="onCmd">
-          <button class="menu-btn" title="更多">⋯</button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="rename">重命名</el-dropdown-item>
-              <el-dropdown-item command="archive">归档</el-dropdown-item>
-              <el-dropdown-item command="remove" divided>删除</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+      <div class="chat-head">
+        <button class="menu-btn mobile-conv-toggle" @click="mobileListOpen = true" title="会话列表">☰</button>
+        <template v-if="activeConversation">
+          <div class="t">
+            <b>{{ activeConversation.title }}</b>
+            <span>{{ activeConversation.incident_id ? '围绕 Incident 持续追问' : activeConversation.project_id ? '已绑定监控项目' : '通用问答' }}</span>
+          </div>
+          <el-dropdown trigger="click" @command="onCmd">
+            <button class="menu-btn" title="更多">⋯</button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="rename">重命名</el-dropdown-item>
+                <el-dropdown-item command="archive">归档</el-dropdown-item>
+                <el-dropdown-item command="remove" divided>删除</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
       </div>
 
       <div class="messages">
@@ -160,7 +169,7 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 
       <div class="composer">
         <div class="composer-inner">
-          <textarea v-model="input" placeholder="输入运维问题，Enter 发送 / Shift+Enter 换行" @input="autoresize" @keydown.enter.exact.prevent="send" @keydown.ctrl.enter.prevent="send"></textarea>
+          <textarea v-model="input" placeholder="输入运维问题，Enter 发送 / Shift+Enter 换行" @input="autoresize" @keydown.enter.exact.prevent="onEnterKey" @keydown.ctrl.enter.prevent="onEnterKey"></textarea>
           <button class="send-btn" :disabled="busy || !input.trim()" @click="send" title="发送">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </button>
@@ -186,4 +195,13 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 .prompt-card span { font-size: 11px; color: var(--text-3); }
 .prompt-card i { position: absolute; right: 12px; bottom: 12px; color: var(--accent-strong); font-style: normal; }
 @media (max-width: 760px) { .prompt-grid { grid-template-columns: 1fr; max-width: 360px; } .empty-state { padding-top: 55px; } }
+
+.mobile-conv-toggle { display: none; }
+.conv-scrim { display: none; }
+@media (max-width: 680px) {
+  .mobile-conv-toggle { display: inline-flex; margin-left: -6px; flex-shrink: 0; }
+  .conv-list { display: flex; position: fixed; z-index: 45; inset: 0 auto 0 0; width: 280px; max-width: 86vw; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow-lg); background: #fbfbfc; }
+  .conv-list.open { transform: translateX(0); }
+  .conv-scrim { display: block; position: fixed; inset: 0; z-index: 40; background: rgba(15, 23, 42, .35); }
+}
 </style>

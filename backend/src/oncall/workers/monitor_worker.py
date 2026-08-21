@@ -1,27 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
+
 from sqlalchemy import delete, select, text
 
 from oncall.bootstrap.config import get_settings
+from oncall.bootstrap.logging import configure_logging
 from oncall.infrastructure.db.models import MetricSample, MonitoringRun, Project
 from oncall.infrastructure.db.session import SessionFactory, engine
 from oncall.monitoring.engine import MonitoringEngine
+
+logger = logging.getLogger(__name__)
 
 MONITOR_ADVISORY_LOCK_KEY = 0x4F4E43414C4C  # "ONCALL" within signed bigint range
 
 
 async def _project_is_due(db, project: Project, now: datetime) -> bool:
     last = await db.scalar(select(MonitoringRun).where(MonitoringRun.project_id==project.id).order_by(MonitoringRun.started_at.desc()).limit(1))
-    if not last:return True
+    if not last:
+        return True
     anchor=last.finished_at or last.started_at
     return (now-anchor).total_seconds()>=max(10,project.poll_interval)
 
 
 async def _cleanup_metric_retention(db,days:int)->None:
     cutoff=datetime.now().astimezone()-timedelta(days=days)
-    await db.execute(delete(MetricSample).where(MetricSample.ts<cutoff));await db.commit()
+    await db.execute(delete(MetricSample).where(MetricSample.ts<cutoff))
+    await db.commit()
 
 
 async def _acquire_leader_lock():
@@ -35,14 +42,16 @@ async def _acquire_leader_lock():
     conn=await engine.connect()
     acquired=await conn.scalar(text('SELECT pg_try_advisory_lock(:key)'),{'key':MONITOR_ADVISORY_LOCK_KEY})
     if not acquired:
-        await conn.close();return False
+        await conn.close()
+        return False
     return conn
 
 
 async def loop()->None:
-    settings=get_settings();lock_conn=await _acquire_leader_lock()
+    settings=get_settings()
+    lock_conn=await _acquire_leader_lock()
     if lock_conn is False:
-        print('monitor-worker: another leader already holds the advisory lock; exiting')
+        logger.warning('monitor-worker: another leader already holds the advisory lock; exiting')
         return
     cleanup_counter=0
     try:
@@ -52,17 +61,26 @@ async def loop()->None:
                 projects=list((await db.scalars(select(Project).where(Project.enabled.is_(True)))).all())
                 for project in projects:
                     try:
-                        if await _project_is_due(db,project,now):await MonitoringEngine(db).run_project(project.id)
-                    except Exception as exc:print('monitor error',project.id,exc)
+                        if await _project_is_due(db,project,now):
+                            await MonitoringEngine(db).run_project(project.id)
+                    except Exception as exc:
+                        logger.exception('monitor error project=%s: %s',project.id,exc)
                 cleanup_counter+=1
                 if cleanup_counter>=720:
-                    try:await _cleanup_metric_retention(db,settings.metric_retention_days)
-                    finally:cleanup_counter=0
+                    try:
+                        await _cleanup_metric_retention(db,settings.metric_retention_days)
+                    finally:
+                        cleanup_counter=0
             await asyncio.sleep(5)
     finally:
         if lock_conn not in (None,False):
-            try:await lock_conn.execute(text('SELECT pg_advisory_unlock(:key)'),{'key':MONITOR_ADVISORY_LOCK_KEY})
-            finally:await lock_conn.close()
+            try:
+                await lock_conn.execute(text('SELECT pg_advisory_unlock(:key)'),{'key':MONITOR_ADVISORY_LOCK_KEY})
+            finally:
+                await lock_conn.close()
 
 
-def run()->None:asyncio.run(loop())
+def run()->None:
+    s=get_settings()
+    configure_logging(s.log_level,s.log_dir,s.log_retention_days)
+    asyncio.run(loop())

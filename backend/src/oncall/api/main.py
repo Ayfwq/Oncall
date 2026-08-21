@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import json
+import logging
+from contextlib import asynccontextmanager
+
 import uvicorn
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
@@ -13,15 +25,39 @@ from oncall.api.deps import current_user
 from oncall.application.agent_service import AgentService
 from oncall.application.auth_service import AuthService
 from oncall.application.conversation_service import ConversationService
-from oncall.application.dtos import ChatMessageDTO, ConversationCreateDTO, ConversationPatchDTO, FeishuSettingsDTO, PasswordChangeDTO, ProjectCreateDTO
+from oncall.application.dtos import (
+    ChatMessageDTO,
+    ConversationCreateDTO,
+    ConversationPatchDTO,
+    FeishuSettingsDTO,
+    PasswordChangeDTO,
+    ProjectCreateDTO,
+)
 from oncall.application.knowledge_service import KnowledgeService
 from oncall.application.project_service import ProjectService
 from oncall.bootstrap.config import get_settings, update_env_values
-from oncall.bootstrap.logging import configure_logging
-from oncall.infrastructure.db.models import (AgentRun, BackgroundJob, Conversation, Diagnosis, Incident, IncidentEvidence, KnowledgeDocument, KnowledgeDocumentVersion, MetricSample, MonitoringRule, MonitoringRun, Notification, Project, RetrievalTrace, ToolRun)
+from oncall.bootstrap.logging import configure_logging, set_request_id
+from oncall.infrastructure.db.models import (
+    AgentRun,
+    BackgroundJob,
+    Conversation,
+    Diagnosis,
+    Incident,
+    IncidentEvidence,
+    KnowledgeDocument,
+    KnowledgeDocumentVersion,
+    MetricSample,
+    MonitoringRule,
+    MonitoringRun,
+    Notification,
+    Project,
+    RetrievalTrace,
+    ToolRun,
+)
 from oncall.infrastructure.db.session import SessionFactory, get_session
 
-s=get_settings();configure_logging(s.log_level)
+logger=logging.getLogger(__name__)
+s=get_settings();configure_logging(s.log_level, s.log_dir, s.log_retention_days)
 
 def _uuid(value, what='id'):
     """Parse a path/query UUID; malformed ids are 404, matching the routes' semantics."""
@@ -36,24 +72,32 @@ async def lifespan(app:FastAPI):
     import os
     if s.langgraph_strict_msgpack:os.environ.setdefault('LANGGRAPH_STRICT_MSGPACK','true')
     app.state.checkpointer=None
+    logger.info('starting oncall api (env=%s)', s.env)
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         cm=AsyncPostgresSaver.from_conn_string(s.langgraph_database_url); cp=await cm.__aenter__();await cp.setup();app.state.checkpointer=cp;app.state.checkpointer_cm=cm
+        logger.info('langgraph checkpointer ready')
     except Exception as e:
         app.state.checkpointer_error=str(e)
+        logger.error('langgraph checkpointer unavailable: %s', e)
     async with SessionFactory() as db: await AuthService(db).ensure_admin()
+    logger.info('admin account ensured')
     app.state.feishu_ws_thread=None
     if s.feishu_enabled:
         try:
             import asyncio
+
             from oncall.channels.feishu import start_ws_listener
             from oncall.channels.feishu_gateway import FeishuGateway, build_lark_callback
             loop=asyncio.get_running_loop()
             gateway=FeishuGateway(app.state.checkpointer)
             app.state.feishu_ws_thread=start_ws_listener(build_lark_callback(loop,gateway))
+            logger.info('feishu websocket listener started')
         except Exception as e:
             app.state.feishu_ws_error=str(e)
+            logger.error('feishu websocket listener failed: %s', e)
     yield
+    logger.info('stopping oncall api')
     if getattr(app.state,'checkpointer_cm',None):await app.state.checkpointer_cm.__aexit__(None,None,None)
 
 app=FastAPI(title='Oncall AI SRE',version='1.0.0',lifespan=lifespan)
@@ -61,10 +105,19 @@ app.add_middleware(CORSMiddleware,allow_origins=[s.web_origin],allow_credentials
 
 @app.middleware('http')
 async def request_id_middleware(request:Request,call_next):
+    from time import perf_counter
     from uuid import uuid4
     request_id=request.headers.get('x-request-id') or str(uuid4())
     request.state.request_id=request_id
-    response=await call_next(request)
+    set_request_id(request_id)
+    start=perf_counter()
+    try:
+        response=await call_next(request)
+    except Exception:
+        logger.exception('request failed %s %s', request.method, request.url.path)
+        raise
+    duration_ms=(perf_counter()-start)*1000
+    logger.info('%s %s -> %d (%.1f ms)', request.method, request.url.path, response.status_code, duration_ms)
     response.headers['x-request-id']=request_id
     return response
 
@@ -74,28 +127,37 @@ async def health(request:Request):
     try:
         async with SessionFactory() as db:
             await db.execute(text('select 1'));db_ok=True
-    except Exception as exc:db_error=str(exc)
+    except Exception as exc:
+        db_error=str(exc)
+        logger.error('health check database probe failed: %s', exc)
     return {'ok':db_ok,'database':db_ok,'database_error':db_error,'checkpointer':bool(request.app.state.checkpointer),'checkpointer_error':getattr(request.app.state,'checkpointer_error',None),'feishu_ws_error':getattr(request.app.state,'feishu_ws_error',None)}
 
 @app.post('/api/auth/login')
-async def login(payload:dict,response:Response,db:AsyncSession=Depends(get_session)):
-    result=await AuthService(db).login(payload.get('username',''),payload.get('password',''))
-    if not result:raise HTTPException(401,'invalid credentials')
-    user,token=result;response.set_cookie('oncall_session',token,httponly=True,samesite='strict',secure=s.env.lower()=='production',max_age=s.session_days*86400);return {'id':str(user.id),'username':user.username}
+async def login(payload:dict,request:Request,response:Response,db:AsyncSession=Depends(get_session)):
+    username=payload.get('username','')
+    result=await AuthService(db).login(username,payload.get('password',''))
+    if not result:
+        logger.info('login failed for user %s', username)
+        raise HTTPException(401,'invalid credentials')
+    user,token=result
+    logger.info('login succeeded for user %s', user.username)
+    response.set_cookie('oncall_session',token,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=s.session_days*86400);return {'id':str(user.id),'username':user.username}
 
 @app.post('/api/auth/logout')
 async def logout(response:Response,request:Request,db:AsyncSession=Depends(get_session)):
     await AuthService(db).logout(request.cookies.get('oncall_session'));response.delete_cookie('oncall_session');return {'ok':True}
-
-@app.get('/api/auth/me')
-async def me(user=Depends(current_user)):return {'id':str(user.id),'username':user.username}
 
 @app.post('/api/auth/password')
 async def change_password(dto:PasswordChangeDTO,request:Request,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
     token=request.cookies.get('oncall_session')
     ok=await AuthService(db).change_password(user,dto.current_password,dto.new_password,token)
     if not ok:raise HTTPException(400,'current password is incorrect')
+    logger.info('password changed for user %s', user.username)
     return {'ok':True,'message':'password changed; other sessions were signed out'}
+
+@app.get('/api/auth/me')
+async def me(user=Depends(current_user)):
+    return {'id':str(user.id),'username':user.username}
 
 @app.get('/api/conversations')
 async def conversations(q:str|None=Query(default=None,max_length=200),include_archived:bool=False,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
@@ -259,9 +321,9 @@ async def documents(user=Depends(current_user),db:AsyncSession=Depends(get_sessi
 
 @app.post('/api/knowledge/documents')
 async def upload_document(file:UploadFile=File(...),project_scope:str|None=Form(default=None),user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    import tempfile
     from pathlib import Path
     from uuid import UUID
-    import tempfile
     try:
         scope=UUID(project_scope) if project_scope else None
     except (ValueError, TypeError):
@@ -300,6 +362,7 @@ async def knowledge_job(jid:str,user=Depends(current_user),db:AsyncSession=Depen
 @app.post('/api/knowledge/documents/{did}/reindex')
 async def reindex_document(did:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
     from uuid import uuid4
+
     from oncall.jobs.queue import JobQueue
     doc=await db.scalar(select(KnowledgeDocument).where(KnowledgeDocument.id==_uuid(did),KnowledgeDocument.user_id==user.id))
     if not doc or not doc.active_version_id:raise HTTPException(404,'document/version not found')
@@ -309,6 +372,7 @@ async def reindex_document(did:str,user=Depends(current_user),db:AsyncSession=De
 @app.delete('/api/knowledge/documents/{did}')
 async def delete_document(did:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
     import shutil
+
     from oncall.rag.milvus_store import MilvusKnowledgeIndex
     doc=await db.scalar(select(KnowledgeDocument).where(KnowledgeDocument.id==_uuid(did),KnowledgeDocument.user_id==user.id))
     if not doc:raise HTTPException(404,'not found')
@@ -345,6 +409,7 @@ async def incident_trace(iid:str,user=Depends(current_user),db:AsyncSession=Depe
 async def dev_trigger_incident(payload:dict,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
     if s.env.lower()!='development':raise HTTPException(404,'not found')
     from uuid import UUID
+
     from oncall.application.incident_service import IncidentService
     try:
         pid=UUID(str(payload.get('project_id')))

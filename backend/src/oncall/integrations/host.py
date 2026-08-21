@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+
 import psutil
+
 from oncall.domain.schemas import ToolResult
+
 from .base import CollectResult
 
 

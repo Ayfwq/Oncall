@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from uuid import UUID
+
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,9 +15,17 @@ from oncall.agent.state import OncallState
 from oncall.agent.tool_contracts import ALLOWED_TOOLS, public_tool_specs
 from oncall.agent.tool_registry import ToolExecutionContext, ToolRegistry
 from oncall.application.conversation_service import ConversationService
-from oncall.domain.enums import AgentMode
-from oncall.domain.schemas import DiagnosisReport, EvidenceItem
-from oncall.infrastructure.db.models import AgentRun, Diagnosis, Incident, IncidentEvidence, Notification
+from oncall.domain.schemas import DiagnosisReport, EvidenceItem, ToolResult
+from oncall.infrastructure.db.models import (
+    AgentRun,
+    Diagnosis,
+    Incident,
+    IncidentEvidence,
+    Notification,
+)
+from oncall.security.redact import redact_text
+
+logger=logging.getLogger(__name__)
 
 BUDGETS={
     'chat':(5,4),
@@ -33,12 +43,26 @@ class OncallGraphRuntime:
     def _emit(self,event_type:str,data:dict|None=None)->None:
         if self.emit:
             try:self.emit(event_type,data or {})
-            except Exception:pass
+            except Exception as exc:logger.warning('emit callback failed',extra={'event_type':event_type},exc_info=exc)
+
+    @staticmethod
+    def _trim_for_context(items:list|None,max_items:int=8,max_chars:int=400)->list:
+        out=[]
+        for x in (items or [])[:max_items]:
+            if not isinstance(x,dict):
+                out.append(x);continue
+            d=dict(x)
+            for k,v in d.items():
+                if isinstance(v,str) and len(v)>max_chars:d[k]=v[:max_chars]+'…'
+            out.append(d)
+        return out
 
     def _context(self,state:OncallState)->dict:
         context={k:state.get(k) for k in ('mode','user_message','project_id','project_context','incident_context','previous_diagnosis','conversation_summary','working_messages','evidence','called_tools','tool_calls_used','tool_budget','knowledge_refs','knowledge_hits','knowledge_status','intent','route_reason','requires_realtime','requires_project')}
         allowed=set(state.get('allowed_tools') or [])
         context['available_tools']=[x for x in public_tool_specs() if x['name'] in allowed]
+        context['knowledge_hits']=self._trim_for_context(state.get('knowledge_hits'),max_items=8,max_chars=400)
+        context['evidence']=self._trim_for_context(state.get('evidence'),max_items=10,max_chars=500)
         return context
 
     def build(self,checkpointer=None):
@@ -131,11 +155,20 @@ class OncallGraphRuntime:
         try:
             result=await self.tools.execute(p['name'],p['args'],ctx)
         except Exception as exc:
-            self._emit('tool_finished',{'tool_name':p['name'],'ok':False,'error':str(exc)[:500]})
-            raise
+            logger.warning('tool dispatch raised; degrading to failed result',extra={'tool_name':p['name']},exc_info=exc)
+            self._emit('tool_finished',{'tool_name':p['name'],'ok':False,'error':redact_text(str(exc))[:500]})
+            failed=ToolResult(ok=False,summary='工具调用内部错误',error_code='INTERNAL_ERROR',data={'error':redact_text(str(exc))}).model_dump(mode='json')
+            return {'current_tool_result':failed,'tool_calls_used':state.get('tool_calls_used',0)+1,'called_tools':[*state.get('called_tools',[]),p['call_key']]}
         dumped=result.model_dump(mode='json')
         self._emit('tool_finished',{'tool_name':p['name'],'ok':bool(dumped.get('ok')),'summary':dumped.get('summary','')})
         return {'current_tool_result':dumped,'tool_calls_used':state.get('tool_calls_used',0)+1,'called_tools':[*state.get('called_tools',[]),p['call_key']]}
+
+    @staticmethod
+    def _parse_observed_at(value):
+        if isinstance(value,str) and value:
+            try:return datetime.fromisoformat(value)
+            except ValueError:pass
+        return datetime.now().astimezone()
 
     async def record_observations(self,state:OncallState)->dict:
         p=state.get('pending_tool') or {};r=state.get('current_tool_result') or {};evidence=list(state.get('evidence',[]));refs=list(state.get('knowledge_refs',[]));sources=list(state.get('answer_sources',[]))
@@ -146,7 +179,7 @@ class OncallGraphRuntime:
                     self._emit('rag_retrieved',{'count':len(r['data']),'top':[{'title':x.get('title',''),'score':x.get('rerank_score',x.get('rrf_score'))} for x in r['data'][:5]]})
         elif r:
             sources.append({'type':'tool','tool_name':p.get('name','unknown'),'ok':bool(r.get('ok')),'observed_at':r.get('observed_at')})
-            item=EvidenceItem(type='tool_observation',source_tool=p.get('name','unknown'),observed_at=datetime.fromisoformat(r['observed_at']) if isinstance(r.get('observed_at'),str) else datetime.now().astimezone(),summary=r.get('summary',''),data=r.get('data'),source_ref=r.get('source_ref')).model_dump(mode='json')
+            item=EvidenceItem(type='tool_observation',source_tool=p.get('name','unknown'),observed_at=self._parse_observed_at(r.get('observed_at')),summary=r.get('summary',''),data=r.get('data'),source_ref=r.get('source_ref')).model_dump(mode='json')
             evidence.append(item)
             if state.get('incident_id') and r.get('ok') and await self._incident_alive(state['incident_id']):
                 try:
@@ -160,6 +193,7 @@ class OncallGraphRuntime:
         try:
             return await self.session.scalar(select(Incident.id).where(Incident.id==UUID(incident_id))) is not None
         except Exception:
+            logger.warning('incident_alive check failed',extra={'incident_id':incident_id},exc_info=True)
             return False
 
     async def finalize(self,state:OncallState)->dict:

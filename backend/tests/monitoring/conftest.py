@@ -54,9 +54,8 @@ def pg_ready() -> bool:
 
 
 @pytest.fixture
-async def db(pg_ready):
-    if not pg_ready:
-        pytest.skip("PostgreSQL unreachable; skipping database-backed test")
+async def db(pg_ready, service_gate):
+    service_gate(pg_ready, "PostgreSQL unreachable; skipping database-backed test")
     from oncall.infrastructure.db.session import SessionFactory
 
     async with SessionFactory() as session:

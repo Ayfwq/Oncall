@@ -11,7 +11,6 @@ import hashlib
 import time
 
 import pytest
-
 from helpers import SYNTH, make_project_with_rule, project_incidents, rule_id, synth_snapshot
 from oncall.application.incident_service import IncidentService, incident_fingerprint
 from oncall.infrastructure.db.models import Incident
@@ -156,9 +155,8 @@ async def test_restart_preserves_open_incident(db, test_user):
 @pytest.mark.integration
 async def test_severity_upgrade_enqueues_reinvestigation(db, test_user):
     """Severity escalation (warning -> critical) re-runs the Agent, not just updates the field."""
-    from sqlalchemy import select
-
     from oncall.infrastructure.db.models import BackgroundJob
+    from sqlalchemy import select
 
     project = await make_project_with_rule(db, test_user)
     rid = await rule_id(db, project.id)
@@ -195,9 +193,8 @@ async def test_severity_upgrade_enqueues_reinvestigation(db, test_user):
 @pytest.mark.integration
 async def test_same_severity_firing_does_not_reinvestigate(db, test_user):
     """Sustained firing at the same severity refreshes last_seen without new Agent runs."""
-    from sqlalchemy import select
-
     from oncall.infrastructure.db.models import BackgroundJob
+    from sqlalchemy import select
 
     project = await make_project_with_rule(db, test_user)
     rid = await rule_id(db, project.id)

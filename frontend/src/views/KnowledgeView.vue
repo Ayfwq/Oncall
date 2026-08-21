@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
-const docs = ref<any[]>([]), file = ref<File>(), busy = ref(false), message = ref('')
-async function load() { docs.value = await api('/knowledge/documents') }
+import type { KnowledgeDocument, KnowledgeJob } from '../types'
+const docs = ref<KnowledgeDocument[]>([]), file = ref<File>(), busy = ref(false), message = ref('')
+async function load() { docs.value = await api<KnowledgeDocument[]>('/knowledge/documents') }
+function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e) }
 async function waitJob(id: string) {
   for (let i = 0; i < 120; i++) {
-    const j = await api<any>(`/knowledge/jobs/${id}`)
+    const j = await api<KnowledgeJob>(`/knowledge/jobs/${id}`)
     if (j.status === 'done') { await load(); return }
     if (j.status === 'dead') throw new Error(j.last_error || '入库任务失败')
     await new Promise(r => setTimeout(r, 1000))
@@ -20,13 +22,13 @@ async function upload() {
     const fd = new FormData(); fd.append('file', file.value)
     const r = await fetch('/api/knowledge/documents', { method: 'POST', credentials: 'include', body: fd })
     if (!r.ok) throw new Error(await r.text())
-    const x = await r.json()
+    const x = (await r.json()) as { job_id: string }
     message.value = '已上传，正在 Docling 解析并写入 Milvus…'
     await waitJob(x.job_id); message.value = '已入库，可在对话中检索'
-  } catch (e: any) { message.value = '失败：' + e.message }
+  } catch (e) { message.value = '失败：' + errorText(e) }
   finally { busy.value = false }
 }
-async function reindex(id: string) { busy.value = true; try { const x = await api<any>(`/knowledge/documents/${id}/reindex`, { method: 'POST' }); await waitJob(x.job_id); message.value = '已重建索引' } catch (e: any) { message.value = '失败：' + e.message } finally { busy.value = false } }
+async function reindex(id: string) { busy.value = true; try { const x = await api<{ job_id: string }>(`/knowledge/documents/${id}/reindex`, { method: 'POST' }); await waitJob(x.job_id); message.value = '已重建索引' } catch (e) { message.value = '失败：' + errorText(e) } finally { busy.value = false } }
 async function remove(id: string) { if (!confirm('确认删除该知识文档及其索引？')) return; await api(`/knowledge/documents/${id}`, { method: 'DELETE' }); await load() }
 onMounted(load)
 const status = (s: string) => s === 'ready' ? 'ok' : s === 'processing' ? 'warn' : 'neutral'

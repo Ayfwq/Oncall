@@ -2,8 +2,9 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../api'
-const rows = ref<any[]>([]), router = useRouter()
-onMounted(async () => rows.value = await api('/incidents'))
+import type { IncidentSummary } from '../types'
+const rows = ref<IncidentSummary[]>([]), router = useRouter()
+onMounted(async () => rows.value = await api<IncidentSummary[]>('/incidents'))
 const sev = (s: string) => s === 'critical' ? 'err' : 'warn'
 const sevTxt = (s: string) => s === 'critical' ? '严重' : '警告'
 </script>

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+
 from sqlalchemy import text
+
 from oncall.bootstrap.config import get_settings
 from oncall.infrastructure.db.session import engine
 

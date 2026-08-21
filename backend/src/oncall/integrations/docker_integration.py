@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+
 from oncall.application.dtos import DockerTargetDTO
 from oncall.domain.schemas import ToolResult
+
 from .base import CollectResult
 
 

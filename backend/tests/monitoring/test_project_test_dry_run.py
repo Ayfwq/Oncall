@@ -39,9 +39,9 @@ async def _api_up() -> bool:
 
 
 @pytest.fixture
-async def api_client(pg_ready):
-    if not await _api_up():
-        pytest.skip("live API not reachable")
+async def api_client(pg_ready, service_gate):
+    api_up = await _api_up()
+    service_gate(api_up, "live API not reachable")
     s = get_settings()
     async with httpx.AsyncClient(base_url=API, timeout=30, follow_redirects=True) as client:
         r = await client.post("/api/auth/login", json={"username": s.admin_username, "password": s.admin_password})

@@ -4,7 +4,6 @@ from __future__ import annotations
 import runpy
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 CHECK_EXTERNAL = runpy.run_path(str(ROOT / "scripts" / "check_external.py"))
 

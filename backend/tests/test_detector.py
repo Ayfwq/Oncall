@@ -1,5 +1,6 @@
 from oncall.domain.enums import RuleState
-from oncall.monitoring.detector import Detector,RuleConfig,RuleRuntimeState
+from oncall.monitoring.detector import Detector, RuleConfig, RuleRuntimeState
+
 
 def test_hysteresis():
     d=Detector();s=RuleRuntimeState();cfg=RuleConfig('>',85,2,70,2)

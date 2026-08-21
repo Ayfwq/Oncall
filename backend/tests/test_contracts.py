@@ -1,6 +1,6 @@
 from oncall.agent.tool_contracts import ALLOWED_TOOLS
-from oncall.monitoring.signals import BASELINE_SIGNALS
 from oncall.channels.feishu_events import parse_lark_message
+from oncall.monitoring.signals import BASELINE_SIGNALS
 
 
 def test_v1_has_exactly_32_baseline_signals():

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+
 import httpx
 from pydantic import ValidationError
+
 from oncall.agent.prompts import DECISION_SCHEMA, STREAM_ANSWER_PROMPT, SYSTEM_PROMPT
 from oncall.bootstrap.config import get_settings
 from oncall.domain.schemas import AgentDecision, DiagnosisReport
@@ -80,8 +82,8 @@ class OpenAICompatibleProvider(ModelProvider):
     def __init__(self):self.s=get_settings()
 
     async def _chat(self,messages:list[dict[str,str]],temperature:float=0.1)->str:
-        last=None
-        for attempt in range(2):
+        last:BaseException|None=None
+        for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=90) as client:
                     r=await client.post(
@@ -91,15 +93,16 @@ class OpenAICompatibleProvider(ModelProvider):
                     )
                     if r.status_code==429 or r.status_code>=500:
                         last=RuntimeError(f'LLM HTTP {r.status_code}: {r.text[:500]}')
-                        if attempt==0:
-                            await __import__('asyncio').sleep(1.0);continue
+                        if attempt<2:
+                            await __import__('asyncio').sleep(2**attempt)
+                            continue
                     r.raise_for_status();body=r.json()
                     return str(body['choices'][0]['message']['content'])
             except (httpx.TimeoutException,httpx.NetworkError) as exc:
                 last=exc
-                if attempt==0:
-                    await __import__('asyncio').sleep(1.0);continue
-                raise
+                if attempt<2:
+                    await __import__('asyncio').sleep(2**attempt)
+                    continue
         raise RuntimeError(f'LLM request failed: {last}')
 
     @staticmethod
@@ -135,27 +138,41 @@ class OpenAICompatibleProvider(ModelProvider):
         """Stream the final prose answer token-by-token via SSE (stream=True)."""
         payload_context=json.dumps(context,ensure_ascii=False,default=str)
         messages=[{'role':'system','content':STREAM_ANSWER_PROMPT},{'role':'user','content':payload_context}]
-        parts:list[str]=[]
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream('POST',f"{self.s.model_base_url.rstrip('/')}/chat/completions",
-                headers={'Authorization':f'Bearer {self.s.model_api_key}'},
-                json={'model':self.s.model_name,'temperature':0.2,'stream':True,'messages':messages}) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith('data:'):
-                        continue
-                    payload=line[5:].strip()
-                    if payload=='[DONE]':
-                        break
-                    try:
-                        obj=json.loads(payload)
-                        delta=obj.get('choices',[{}])[0].get('delta',{}).get('content')
-                    except Exception:
-                        continue
-                    if delta:
-                        parts.append(delta)
-                        if on_token:on_token(delta)
-        return ''.join(parts).strip()
+        last:BaseException|None=None
+        for attempt in range(3):
+            parts:list[str]=[]
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    async with client.stream('POST',f"{self.s.model_base_url.rstrip('/')}/chat/completions",
+                        headers={'Authorization':f'Bearer {self.s.model_api_key}'},
+                        json={'model':self.s.model_name,'temperature':0.2,'stream':True,'messages':messages}) as resp:
+                        if resp.status_code==429 or resp.status_code>=500:
+                            last=RuntimeError(f'LLM stream HTTP {resp.status_code}: {resp.text[:500]}')
+                            if attempt<2:
+                                await __import__('asyncio').sleep(2**attempt)
+                                continue
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line or not line.startswith('data:'):
+                                continue
+                            payload=line[5:].strip()
+                            if payload=='[DONE]':
+                                break
+                            try:
+                                obj=json.loads(payload)
+                                delta=obj.get('choices',[{}])[0].get('delta',{}).get('content')
+                            except Exception:
+                                continue
+                            if delta:
+                                parts.append(delta)
+                                if on_token:on_token(delta)
+                return ''.join(parts).strip()
+            except (httpx.TimeoutException,httpx.NetworkError,httpx.HTTPStatusError) as exc:
+                last=exc
+                if attempt<2:
+                    await __import__('asyncio').sleep(2**attempt)
+                    continue
+        raise RuntimeError(f'LLM stream answer failed: {last}')
 
 
 def get_model_provider()->ModelProvider:

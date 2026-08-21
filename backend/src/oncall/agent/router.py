@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 CASUAL_MARKERS = ('你好', '您好', '嗨', 'hello', 'hi', '你是谁', '什么模型', '你是什么')
 REALTIME_MARKERS = ('当前', '现在', '最近', '实时', '状态', '日志', '指标', 'cpu', '内存', '磁盘', '进程', '容器', '健康', 'health', '接口')
 OPS_MARKERS = ('docker', 'linux', 'postgres', '数据库', '备份', '部署', '安装', '故障', '异常', '日志', '监控', '服务', '容器', '进程', '网络', '磁盘', 'cpu', '内存', '告警', '排查', '运维', '恢复')

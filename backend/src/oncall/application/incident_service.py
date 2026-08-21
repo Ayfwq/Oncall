@@ -3,11 +3,19 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.conversation_service import ConversationService
-from oncall.infrastructure.db.models import Conversation, Incident, IncidentEvidence, MonitoringRule, MonitoringRuleState, Notification
+from oncall.infrastructure.db.models import (
+    Conversation,
+    Incident,
+    IncidentEvidence,
+    MonitoringRule,
+    MonitoringRuleState,
+    Notification,
+)
 from oncall.jobs.queue import JobQueue
 
 _SEVERITY_RANK={'info':0,'warning':1,'critical':2}

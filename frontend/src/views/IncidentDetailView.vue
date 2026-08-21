@@ -2,11 +2,12 @@
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-const route = useRoute(), router = useRouter(), id = String(route.params.id), item = ref<any>(), trace = ref<any>(), busy = ref(false)
-async function load() { item.value = await api(`/incidents/${id}`); trace.value = await api(`/incidents/${id}/trace`) }
+import type { IncidentDetail, IncidentTrace } from '../types'
+const route = useRoute(), router = useRouter(), id = String(route.params.id), item = ref<IncidentDetail | null>(null), trace = ref<IncidentTrace | null>(null), busy = ref(false)
+async function load() { item.value = await api<IncidentDetail>(`/incidents/${id}`); trace.value = await api<IncidentTrace>(`/incidents/${id}/trace`) }
 async function investigate() { busy.value = true; try { await api(`/incidents/${id}/investigate`, { method: 'POST' }); await load() } finally { busy.value = false } }
 async function resolve() { await api(`/incidents/${id}/resolve`, { method: 'POST' }); await load() }
-async function chat() { const r = await api<any>(`/incidents/${id}/conversation`, { method: 'POST' }); router.push('/?conversation=' + r.conversation_id) }
+async function chat() { const r = await api<{ conversation_id: string }>(`/incidents/${id}/conversation`, { method: 'POST' }); router.push('/?conversation=' + r.conversation_id) }
 onMounted(load)
 const sev = (s: string) => s === 'critical' ? 'err' : 'warn'
 </script>

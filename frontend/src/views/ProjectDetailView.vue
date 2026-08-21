@@ -2,6 +2,10 @@
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
+import type {
+  DatabaseProfile, DockerTarget, LogSource, MonitoringRule, ProcessTarget,
+  ProjectConfig, ServiceEndpoint, SnapshotDTO,
+} from '../types'
 
 const route = useRoute()
 const id = String(route.params.id)
@@ -12,12 +16,35 @@ const message = ref('')
 const messageError = ref(false)
 const tab = ref('form')
 const advancedMode = ref(false)
-const snapshot = ref<any>(null)
+const snapshot = ref<SnapshotDTO | null>(null)
 const testFeedback = ref<{ passed: number, failed: number, missingRules: string[] } | null>(null)
 const jsonText = ref('')
 const jsonError = ref('')
 
-const cfg = ref<any>({
+type FormProcess = Omit<ProcessTarget, 'cmdline_filters'> & { cmdline_filters: string }
+type FormDb = Omit<DatabaseProfile, 'password'> & { password: string }
+type FormLog = LogSource
+type FormDocker = DockerTarget
+type FormService = ServiceEndpoint
+type FormRule = MonitoringRule
+
+interface FormConfig {
+  name: string
+  description: string
+  enabled: boolean
+  timezone: string
+  poll_interval: number
+  process_targets: FormProcess[]
+  log_sources: FormLog[]
+  docker_targets: FormDocker[]
+  database_profiles: FormDb[]
+  service_endpoints: FormService[]
+  rules: FormRule[]
+}
+
+type TargetArrayKey = 'process_targets' | 'log_sources' | 'docker_targets' | 'database_profiles' | 'service_endpoints'
+
+const cfg = ref<FormConfig>({
   name: '', description: '', enabled: true, timezone: 'Asia/Shanghai', poll_interval: 300,
   process_targets: [], log_sources: [], docker_targets: [], database_profiles: [], service_endpoints: [], rules: [],
 })
@@ -78,7 +105,7 @@ const METRIC_GROUPS = [
 ]
 
 const KNOWN_METRICS = new Set(METRIC_GROUPS.flatMap(group => group.options.map(option => option.value)))
-const METRIC_TARGETS: Record<string, string> = {
+const METRIC_TARGETS: Record<string, TargetArrayKey> = {
   'process.': 'process_targets', 'log.': 'log_sources', 'container.': 'docker_targets',
   'db.': 'database_profiles', 'service.': 'service_endpoints',
 }
@@ -89,26 +116,26 @@ const METRIC_RANGES: Record<string, [number, number]> = {
 }
 
 // ---------- 行数据工厂（新建空行） ----------
-const blankProcess = () => ({ id: null, name: '进程', executable: '', cmdline_filters: '', cwd: '', port: null, enabled: true })
-const blankLog = () => ({ id: null, path: '', encoding: 'utf-8', parser_config: {}, enabled: true })
-const blankDocker = () => ({ id: null, container_ref: '', enabled: true })
-const blankDb = () => ({ id: null, type: 'postgresql', host: '127.0.0.1', port: 5432, database: '', username: '', password: '', sslmode: 'prefer', enabled: true })
-const blankService = () => ({ id: null, name: '健康检查', url: '', method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true })
-const blankRule = () => ({ id: null, metric_key: '', resource_key: 'default', operator: '>', trigger_threshold: null, trigger_for: 2, recovery_threshold: null, recovery_for: 2, severity: 'warning', enabled: true })
+const blankProcess = (): FormProcess => ({ id: null, name: '进程', executable: '', cmdline_filters: '', cwd: '', port: null, enabled: true })
+const blankLog = (): FormLog => ({ id: null, path: '', encoding: 'utf-8', parser_config: {}, enabled: true })
+const blankDocker = (): FormDocker => ({ id: null, container_ref: '', enabled: true })
+const blankDb = (): FormDb => ({ id: null, type: 'postgresql', host: '127.0.0.1', port: 5432, database: '', username: '', password: '', sslmode: 'prefer', enabled: true })
+const blankService = (): FormService => ({ id: null, name: '健康检查', url: '', method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true })
+const blankRule = (): FormRule => ({ id: null, metric_key: '', resource_key: 'default', operator: '>', trigger_threshold: null, trigger_for: 2, recovery_threshold: null, recovery_for: 2, severity: 'warning', enabled: true })
 
 // ---------- 行数据标准化（API JSON -> 表单行） ----------
-const normProcess = (x: any) => ({ id: x?.id ?? null, name: x?.name || '进程', executable: x?.executable ?? '', cmdline_filters: (x?.cmdline_filters || []).join(', '), cwd: x?.cwd ?? '', port: x?.port ?? null, enabled: x?.enabled !== false })
-const normLog = (x: any) => ({ id: x?.id ?? null, path: x?.path ?? '', encoding: x?.encoding || 'utf-8', parser_config: x?.parser_config || {}, enabled: x?.enabled !== false })
-const normDocker = (x: any) => ({ id: x?.id ?? null, container_ref: x?.container_ref ?? '', enabled: x?.enabled !== false })
-const normDb = (x: any) => ({ id: x?.id ?? null, type: x?.type || 'postgresql', host: x?.host ?? '', port: x?.port ?? 5432, database: x?.database ?? '', username: x?.username ?? '', password: '', sslmode: x?.sslmode || 'prefer', enabled: x?.enabled !== false })
-const normService = (x: any) => ({ id: x?.id ?? null, name: x?.name || '健康检查', url: x?.url ?? '', method: x?.method || 'GET', expected_status: x?.expected_status ?? 200, timeout_ms: x?.timeout_ms ?? 3000, enabled: x?.enabled !== false })
-const normRule = (x: any) => ({ id: x?.id ?? null, metric_key: x?.metric_key ?? '', resource_key: x?.resource_key || 'default', operator: x?.operator || '>', trigger_threshold: x?.trigger_threshold ?? null, trigger_for: x?.trigger_for ?? 2, recovery_threshold: x?.recovery_threshold ?? null, recovery_for: x?.recovery_for ?? 2, severity: x?.severity || 'warning', enabled: x?.enabled !== false })
+const normProcess = (x: ProcessTarget): FormProcess => ({ id: x.id ?? null, name: x.name || '进程', executable: x.executable ?? '', cmdline_filters: (x.cmdline_filters || []).join(', '), cwd: x.cwd ?? '', port: x.port ?? null, enabled: x.enabled !== false })
+const normLog = (x: LogSource): FormLog => ({ id: x.id ?? null, path: x.path ?? '', encoding: x.encoding || 'utf-8', parser_config: x.parser_config || {}, enabled: x.enabled !== false })
+const normDocker = (x: DockerTarget): FormDocker => ({ id: x.id ?? null, container_ref: x.container_ref ?? '', enabled: x.enabled !== false })
+const normDb = (x: DatabaseProfile): FormDb => ({ id: x.id ?? null, type: x.type || 'postgresql', host: x.host ?? '', port: x.port ?? 5432, database: x.database ?? '', username: x.username ?? '', password: '', sslmode: x.sslmode || 'prefer', enabled: x.enabled !== false })
+const normService = (x: ServiceEndpoint): FormService => ({ id: x.id ?? null, name: x.name || '健康检查', url: x.url ?? '', method: x.method || 'GET', expected_status: x.expected_status ?? 200, timeout_ms: x.timeout_ms ?? 3000, enabled: x.enabled !== false })
+const normRule = (x: MonitoringRule): FormRule => ({ id: x.id ?? null, metric_key: x.metric_key ?? '', resource_key: x.resource_key || 'default', operator: x.operator || '>', trigger_threshold: x.trigger_threshold ?? null, trigger_for: x.trigger_for ?? 2, recovery_threshold: x.recovery_threshold ?? null, recovery_for: x.recovery_for ?? 2, severity: x.severity || 'warning', enabled: x.enabled !== false })
 
-function errorMessage(error: any): string {
-  const raw = String(error?.message || error || '未知错误')
+function errorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error || '未知错误')
   try {
     const body = JSON.parse(raw)
-    if (Array.isArray(body?.detail)) return body.detail.map((x: any) => x.msg || '参数错误').join('；')
+    if (Array.isArray(body?.detail)) return body.detail.map((x: { msg?: string }) => x.msg || '参数错误').join('；')
     if (typeof body?.detail === 'string') return body.detail
     if (typeof body?.message === 'string') return body.message
   } catch { /* api may return plain text */ }
@@ -120,7 +147,7 @@ function setMessage(text: string, isError = false) {
   message.value = text
 }
 
-function applyData(data: any) {
+function applyData(data: ProjectConfig) {
   cfg.value = {
     name: data?.name ?? '', description: data?.description ?? '', enabled: data?.enabled !== false,
     timezone: data?.timezone ?? 'Asia/Shanghai', poll_interval: data?.poll_interval ?? 300,
@@ -146,17 +173,17 @@ function quickDefaults(): boolean {
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: cfg.value.timezone || 'Asia/Shanghai' }).format(new Date())
     quick.value.logPath = `${quick.value.projectPath.replace(/[\\/]$/, '')}\\backend\\logs\\auto_geo_${today}.log`
   }
-  if (quick.value.projectPath && !cfg.value.process_targets.some((x: any) => x.cwd === quick.value.projectPath)) {
+  if (quick.value.projectPath && !cfg.value.process_targets.some(x => x.cwd === quick.value.projectPath)) {
     cfg.value.process_targets.push({ id: null, name: `${name} 后端`, executable: 'python', cmdline_filters: 'backend.main', cwd: quick.value.projectPath, port: 8001, enabled: true })
   }
-  if (quick.value.healthUrl && !cfg.value.service_endpoints.some((x: any) => x.url === quick.value.healthUrl)) {
+  if (quick.value.healthUrl && !cfg.value.service_endpoints.some(x => x.url === quick.value.healthUrl)) {
     cfg.value.service_endpoints.push({ id: null, name: `${name} 健康检查`, url: quick.value.healthUrl, method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true })
   }
-  if (quick.value.logPath && !cfg.value.log_sources.some((x: any) => x.path === quick.value.logPath)) {
+  if (quick.value.logPath && !cfg.value.log_sources.some(x => x.path === quick.value.logPath)) {
     cfg.value.log_sources.push({ id: null, path: quick.value.logPath, encoding: 'utf-8', parser_config: {}, enabled: true })
   }
   const addRule = (metric_key: string, operator: string, trigger_threshold: number, recovery_threshold: number, severity = 'warning') => {
-    if (!cfg.value.rules.some((x: any) => x.metric_key === metric_key && x.enabled)) {
+    if (!cfg.value.rules.some(x => x.metric_key === metric_key && x.enabled)) {
       cfg.value.rules.push({ id: null, metric_key, resource_key: 'default', operator, trigger_threshold, trigger_for: 2, recovery_threshold, recovery_for: 2, severity, enabled: true })
     }
   }
@@ -174,9 +201,9 @@ async function quickSetup() {
 }
 
 function syncQuickFromConfig() {
-  const process = cfg.value.process_targets.find((x: any) => x.enabled)
-  const service = cfg.value.service_endpoints.find((x: any) => x.enabled)
-  const log = cfg.value.log_sources.find((x: any) => x.enabled)
+  const process = cfg.value.process_targets.find(x => x.enabled)
+  const service = cfg.value.service_endpoints.find(x => x.enabled)
+  const log = cfg.value.log_sources.find(x => x.enabled)
   quick.value.projectPath = process?.cwd || quick.value.projectPath
   quick.value.healthUrl = service?.url || quick.value.healthUrl
   quick.value.logPath = log?.path || quick.value.logPath
@@ -186,44 +213,66 @@ function syncQuickFromConfig() {
 async function load() {
   loading.value = true
   try {
-    const data = await api(`/projects/${id}`)
+    const data = await api<ProjectConfig>(`/projects/${id}`)
     applyData(data)
     syncQuickFromConfig()
     jsonText.value = JSON.stringify(data, null, 2)
-  } catch (e: any) { setMessage('加载失败：' + errorMessage(e), true) }
+  } catch (e) { setMessage('加载失败：' + errorMessage(e), true) }
   finally { loading.value = false }
 }
 
 // ---------- 表单 -> 提交 payload ----------
-function toPayload(): any {
+interface PayloadBase { id?: string | null }
+interface PayloadProcess extends PayloadBase, Omit<ProcessTarget, 'id'> {}
+interface PayloadLog extends PayloadBase, Omit<LogSource, 'id'> {}
+interface PayloadDocker extends PayloadBase, Omit<DockerTarget, 'id'> {}
+interface PayloadDb extends PayloadBase, Omit<DatabaseProfile, 'id'> {}
+interface PayloadService extends PayloadBase, Omit<ServiceEndpoint, 'id'> {}
+interface PayloadRule extends PayloadBase, Omit<MonitoringRule, 'id'> {}
+
+interface ProjectUpdatePayload {
+  name: string
+  description: string
+  enabled: boolean
+  timezone: string
+  poll_interval: number
+  process_targets: PayloadProcess[]
+  log_sources: PayloadLog[]
+  docker_targets: PayloadDocker[]
+  database_profiles: PayloadDb[]
+  service_endpoints: PayloadService[]
+  rules: PayloadRule[]
+}
+
+function toPayload(): ProjectUpdatePayload {
   const c = cfg.value
-  const num = (v: any, d?: number) => (v === '' || v === null || v === undefined) ? (d ?? null) : Number(v)
-  const int = (v: any, d: number) => (v === '' || v === null || v === undefined) ? d : Math.max(0, Math.round(Number(v)))
-  const split = (s: any) => String(s || '').split(/[,，;；\s]+/).map(x => x.trim()).filter(Boolean)
+  const num = (v: unknown, d?: number): number | null => (v === '' || v === null || v === undefined) ? (d ?? null) : Number(v)
+  const int = (v: unknown, d: number): number => (v === '' || v === null || v === undefined) ? d : Math.max(0, Math.round(Number(v)))
+  const split = (s: unknown): string[] => String(s || '').split(/[,，;；\s]+/).map(x => x.trim()).filter(Boolean)
   return {
     name: c.name, description: c.description || '', enabled: !!c.enabled,
     timezone: c.timezone || 'Asia/Shanghai', poll_interval: int(c.poll_interval, 300),
-    process_targets: c.process_targets.map((x: any) => ({
+    process_targets: c.process_targets.map((x): PayloadProcess => ({
       id: x.id ?? undefined, name: x.name || '进程', executable: x.executable || null,
       cmdline_filters: split(x.cmdline_filters), cwd: x.cwd || null, port: num(x.port), enabled: !!x.enabled,
     })),
-    log_sources: c.log_sources.map((x: any) => ({
+    log_sources: c.log_sources.map((x): PayloadLog => ({
       id: x.id ?? undefined, path: x.path, encoding: x.encoding || 'utf-8',
       parser_config: x.parser_config || {}, enabled: !!x.enabled,
     })),
-    docker_targets: c.docker_targets.map((x: any) => ({
+    docker_targets: c.docker_targets.map((x): PayloadDocker => ({
       id: x.id ?? undefined, container_ref: x.container_ref, enabled: !!x.enabled,
     })),
-    database_profiles: c.database_profiles.map((x: any) => ({
+    database_profiles: c.database_profiles.map((x): PayloadDb => ({
       id: x.id ?? undefined, type: x.type || 'postgresql', host: x.host || '127.0.0.1',
       port: int(x.port, 5432), database: x.database, username: x.username,
       password: x.password ? String(x.password) : null, sslmode: x.sslmode || 'prefer', enabled: !!x.enabled,
     })),
-    service_endpoints: c.service_endpoints.map((x: any) => ({
+    service_endpoints: c.service_endpoints.map((x): PayloadService => ({
       id: x.id ?? undefined, name: x.name || '健康检查', url: x.url, method: x.method || 'GET',
       expected_status: int(x.expected_status, 200), timeout_ms: int(x.timeout_ms, 3000), enabled: !!x.enabled,
     })),
-    rules: c.rules.map((x: any) => ({
+    rules: c.rules.map((x): PayloadRule => ({
       id: x.id ?? undefined, metric_key: x.metric_key, resource_key: x.resource_key || 'default',
       operator: x.operator || '>', trigger_threshold: num(x.trigger_threshold, 0) as number,
       trigger_for: int(x.trigger_for, 2), recovery_threshold: num(x.recovery_threshold, 0) as number,
@@ -235,20 +284,20 @@ function toPayload(): any {
 // ---------- 校验 ----------
 function validate(): string[] {
   const errs: string[] = []
-  const finite = (value: any) => typeof value === 'number' && Number.isFinite(value)
+  const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value)
   if (!cfg.value.name?.trim()) errs.push('项目名称必填')
   if (!Number.isInteger(Number(cfg.value.poll_interval)) || Number(cfg.value.poll_interval) < 10 || Number(cfg.value.poll_interval) > 86400) errs.push('采集间隔必须是 10～86400 秒的整数')
-  cfg.value.process_targets.forEach((x: any, i: number) => {
+  cfg.value.process_targets.forEach((x: FormProcess, i: number) => {
     if (!x.name?.trim()) errs.push(`进程绑定 #${i + 1}：名称必填`)
     if (!(x.executable?.trim() || x.cmdline_filters?.trim() || x.cwd?.trim())) errs.push(`进程绑定 #${i + 1}：至少填写可执行文件、命令行关键字或工作目录之一`)
     if (x.port !== null && x.port !== undefined && (!Number.isInteger(Number(x.port)) || Number(x.port) < 1 || Number(x.port) > 65535)) errs.push(`进程绑定 #${i + 1}：端口范围为 1～65535`)
   })
-  cfg.value.log_sources.forEach((x: any, i: number) => {
+  cfg.value.log_sources.forEach((x: FormLog, i: number) => {
     if (!x.path?.trim()) errs.push(`日志绑定 #${i + 1}：日志文件路径必填`)
     if (!ENCODINGS.includes(x.encoding)) errs.push(`日志绑定 #${i + 1}：不支持的文件编码`)
   })
-  cfg.value.docker_targets.forEach((x: any, i: number) => { if (!x.container_ref?.trim()) errs.push(`Docker 绑定 #${i + 1}：容器名/ID 必填`) })
-  cfg.value.database_profiles.forEach((x: any, i: number) => {
+  cfg.value.docker_targets.forEach((x: FormDocker, i: number) => { if (!x.container_ref?.trim()) errs.push(`Docker 绑定 #${i + 1}：容器名/ID 必填`) })
+  cfg.value.database_profiles.forEach((x: FormDb, i: number) => {
     if (!x.host?.trim()) errs.push(`数据库 #${i + 1}：主机必填`)
     if (!x.database?.trim()) errs.push(`数据库 #${i + 1}：库名必填`)
     if (!x.username?.trim()) errs.push(`数据库 #${i + 1}：用户名必填`)
@@ -256,7 +305,7 @@ function validate(): string[] {
     if (!SSL_MODES.includes(x.sslmode)) errs.push(`数据库 #${i + 1}：不支持的 SSL 模式`)
     if (!Number.isInteger(Number(x.port)) || Number(x.port) < 1 || Number(x.port) > 65535) errs.push(`数据库 #${i + 1}：端口范围为 1～65535`)
   })
-  cfg.value.service_endpoints.forEach((x: any, i: number) => {
+  cfg.value.service_endpoints.forEach((x: FormService, i: number) => {
     if (!x.url?.trim()) errs.push(`HTTP 服务 #${i + 1}：服务地址必填`)
     else { try { const u = new URL(x.url); if (!['http:', 'https:'].includes(u.protocol) || !u.hostname) throw new Error() } catch { errs.push(`HTTP 服务 #${i + 1}：必须是完整的 http(s) 地址`) } }
     if (!HTTP_METHODS.includes(x.method)) errs.push(`HTTP 服务 #${i + 1}：不支持的请求方式`)
@@ -264,7 +313,7 @@ function validate(): string[] {
     if (!Number.isInteger(Number(x.timeout_ms)) || Number(x.timeout_ms) < 100 || Number(x.timeout_ms) > 60000) errs.push(`HTTP 服务 #${i + 1}：超时范围为 100～60000 毫秒`)
   })
   const seenRules = new Set<string>()
-  cfg.value.rules.forEach((x: any, i: number) => {
+  cfg.value.rules.forEach((x: FormRule, i: number) => {
     if (!x.metric_key) errs.push(`告警规则 #${i + 1}：指标未选择`)
     if (x.metric_key && !KNOWN_METRICS.has(x.metric_key) && !x.metric_key.startsWith('zz.test.')) errs.push(`告警规则 #${i + 1}：指标未注册`)
     if (!x.resource_key?.trim()) errs.push(`告警规则 #${i + 1}：资源标识必填`)
@@ -282,7 +331,7 @@ function validate(): string[] {
     if (['<', '<='].includes(x.operator) && finite(Number(x.trigger_threshold)) && finite(Number(x.recovery_threshold)) && Number(x.recovery_threshold) <= Number(x.trigger_threshold)) errs.push(`告警规则 #${i + 1}：低水位规则的恢复阈值必须高于触发阈值`)
     if (x.operator === '==' && Number(x.trigger_threshold) !== Number(x.recovery_threshold)) errs.push(`告警规则 #${i + 1}：等值规则的触发和恢复阈值必须相同`)
     const targetField = METRIC_TARGETS[x.metric_key?.split('.')[0] + '.'] || Object.entries(METRIC_TARGETS).find(([prefix]) => x.metric_key?.startsWith(prefix))?.[1]
-    if (x.enabled && targetField && !cfg.value[targetField].some((target: any) => target.enabled)) errs.push(`告警规则 #${i + 1}：该指标需要至少一个已启用的数据目标`)
+    if (x.enabled && targetField && !cfg.value[targetField].some(target => target.enabled)) errs.push(`告警规则 #${i + 1}：该指标需要至少一个已启用的数据目标`)
   })
   return errs
 }
@@ -298,7 +347,7 @@ async function save() {
     await api(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(toPayload()) })
     setMessage('已保存 ✓（修改会按采集间隔自动生效，可点「测试采集」立即验证）')
     await load()
-  } catch (e: any) { setMessage('保存失败：' + errorMessage(e), true) }
+  } catch (e) { setMessage('保存失败：' + errorMessage(e), true) }
   finally { saving.value = false }
 }
 
@@ -313,14 +362,14 @@ async function saveFromJson() {
     await api(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(toPayload()) })
     setMessage('已保存 ✓')
     await load()
-  } catch (e: any) { setMessage('保存失败：' + errorMessage(e), true) }
+  } catch (e) { setMessage('保存失败：' + errorMessage(e), true) }
   finally { saving.value = false }
 }
 
 function toJson() { jsonError.value = ''; jsonText.value = JSON.stringify(toPayload(), null, 2); tab.value = 'json' }
 function applyJson() {
   try { applyData(JSON.parse(jsonText.value)); jsonError.value = ''; setMessage('已应用 JSON 到表单（记得点「保存配置」）') }
-  catch (e: any) { jsonError.value = 'JSON 格式错误：' + e.message }
+  catch (e) { jsonError.value = 'JSON 格式错误：' + errorMessage(e) }
 }
 
 // ---------- 采集测试 / 快照 ----------
@@ -330,18 +379,19 @@ async function test() {
   if (errs.length) { setMessage('当前配置不可测试：' + errs.join('；'), true); return }
   testing.value = true; setMessage('采集测试中…')
   try {
-    snapshot.value = await api(`/projects/${id}/test`, { method: 'POST' })
-    const statuses = Object.values(snapshot.value.collector_status || {}) as any[]
-    const missingRules = cfg.value.rules.filter((rule: any) => rule.enabled && !(rule.metric_key in (snapshot.value.signals || {}))).map((rule: any) => rule.metric_key)
+    snapshot.value = await api<SnapshotDTO>(`/projects/${id}/test`, { method: 'POST' })
+    const snap = snapshot.value
+    const statuses = Object.values(snap?.collector_status || {})
+    const missingRules = cfg.value.rules.filter((rule: FormRule) => rule.enabled && !(rule.metric_key in (snap?.signals || {}))).map((rule: FormRule) => rule.metric_key)
     testFeedback.value = { passed: statuses.filter(x => x.ok).length, failed: statuses.filter(x => !x.ok).length, missingRules }
     tab.value = 'snapshot'
     setMessage(testFeedback.value.failed || missingRules.length ? '采集完成，但存在异常，请查看下方反馈' : '采集测试完成（读取的是已保存配置，dry-run 不落库）', Boolean(testFeedback.value.failed || missingRules.length))
-  } catch (e: any) { setMessage('采集失败：' + errorMessage(e), true) }
+  } catch (e) { setMessage('采集失败：' + errorMessage(e), true) }
   finally { testing.value = false }
 }
 async function latest() {
-  try { snapshot.value = await api(`/projects/${id}/snapshot`); tab.value = 'snapshot' }
-  catch (e: any) { setMessage('获取快照失败：' + errorMessage(e), true) }
+  try { snapshot.value = await api<SnapshotDTO>(`/projects/${id}/snapshot`); tab.value = 'snapshot' }
+  catch (e) { setMessage('获取快照失败：' + errorMessage(e), true) }
 }
 
 onMounted(load)

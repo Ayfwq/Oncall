@@ -3,13 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from math import isfinite
 from typing import Any, Literal
-from uuid import UUID
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from oncall.monitoring.signals import BASELINE_SIGNALS
-
 
 SUPPORTED_ENCODINGS = {'utf-8', 'gbk', 'gb2312', 'utf-16', 'latin-1'}
 SUPPORTED_SSL_MODES = {'disable', 'prefer', 'require', 'verify-ca', 'verify-full'}
@@ -65,7 +64,7 @@ class ProcessTargetDTO(BaseModel):
         return [item.strip() for item in value if item and item.strip()]
 
     @model_validator(mode='after')
-    def has_process_selector(self) -> 'ProcessTargetDTO':
+    def has_process_selector(self) -> ProcessTargetDTO:
         if not (self.executable or self.cmdline_filters or self.cwd):
             raise ValueError('process target needs executable, cmdline_filters, or cwd')
         return self
@@ -222,7 +221,7 @@ class MonitoringRuleDTO(BaseModel):
         return value
 
     @model_validator(mode='after')
-    def thresholds_are_consistent(self) -> 'MonitoringRuleDTO':
+    def thresholds_are_consistent(self) -> MonitoringRuleDTO:
         bounds = METRIC_RANGES.get(self.metric_key)
         if bounds:
             low, high = bounds
@@ -269,7 +268,7 @@ class ProjectCreateDTO(BaseModel):
         return value
 
     @model_validator(mode='after')
-    def validate_configuration(self) -> 'ProjectCreateDTO':
+    def validate_configuration(self) -> ProjectCreateDTO:
         errors: list[str] = []
         collections = {
             'process_targets': self.process_targets,
@@ -328,7 +327,7 @@ class PasswordChangeDTO(BaseModel):
     confirm_password: str = Field(min_length=8, max_length=200)
 
     @model_validator(mode='after')
-    def passwords_match(self) -> 'PasswordChangeDTO':
+    def passwords_match(self) -> PasswordChangeDTO:
         if self.new_password != self.confirm_password:
             raise ValueError('new password and confirmation do not match')
         return self

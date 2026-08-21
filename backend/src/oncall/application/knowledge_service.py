@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from oncall.infrastructure.db.models import KnowledgeDocument, KnowledgeDocumentVersion
+
+from oncall.infrastructure.db.models import KnowledgeDocument
 from oncall.jobs.queue import JobQueue
 from oncall.rag.ingestion import KnowledgeIngestor
 from oncall.rag.retrieval import KnowledgeRetriever

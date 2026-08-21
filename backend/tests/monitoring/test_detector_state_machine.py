@@ -11,7 +11,6 @@ metric can fire again.
 from __future__ import annotations
 
 import pytest
-
 from helpers import (
     make_project_with_rule as _project_with_synth_rule,
 )
