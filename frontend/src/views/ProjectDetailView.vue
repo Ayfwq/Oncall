@@ -109,6 +109,16 @@ const METRIC_TARGETS: Record<string, TargetArrayKey> = {
   'process.': 'process_targets', 'log.': 'log_sources', 'container.': 'docker_targets',
   'db.': 'database_profiles', 'service.': 'service_endpoints',
 }
+function resourceOptions(metricKey: string): { value: string, label: string }[] {
+  const targetField = Object.entries(METRIC_TARGETS).find(([prefix]) => metricKey?.startsWith(prefix))?.[1]
+  if (!targetField) return [{ value: 'default', label: '项目级聚合' }]
+  const rows = cfg.value[targetField] as Array<Record<string, unknown>>
+  const labelOf = (row: Record<string, unknown>) => String(row.name || row.container_ref || row.database || row.path || row.url || '目标')
+  return [
+    { value: 'default', label: '项目级聚合（兼容旧规则）' },
+    ...rows.map(row => ({ value: String(row.id || labelOf(row)), label: `${labelOf(row)} · ${String(row.id || '未保存')}` })),
+  ]
+}
 const METRIC_RANGES: Record<string, [number, number]> = {
   'host.cpu.percent': [0, 100], 'host.memory.percent': [0, 100], 'host.disk.usage_percent': [0, 100],
   'process.target.alive': [0, 1], 'container.running': [0, 1], 'container.health': [-1, 1],
@@ -187,8 +197,8 @@ function quickDefaults(): boolean {
       cfg.value.rules.push({ id: null, metric_key, resource_key: 'default', operator, trigger_threshold, trigger_for: 2, recovery_threshold, recovery_for: 2, severity, enabled: true })
     }
   }
-  addRule('process.target.alive', '<', 0.5, 1, 'critical')
-  addRule('service.reachable', '<', 0.5, 1, 'critical')
+  if (quick.value.projectPath) addRule('process.target.alive', '<', 0.5, 1, 'critical')
+  if (quick.value.healthUrl) addRule('service.reachable', '<', 0.5, 1, 'critical')
   if (quick.value.logPath) addRule('log.error.rate_per_min', '>', 5, 1, 'warning')
   cfg.value.poll_interval = Number(quick.value.pollInterval) || 300
   setMessage('已生成配置草稿')
@@ -197,7 +207,19 @@ function quickDefaults(): boolean {
 
 async function quickSetup() {
   if (!quickDefaults()) return
+  // New projects start disabled. Save and dry-run the generated draft first;
+  // activate only after every configured collector and rule has a real result.
+  cfg.value.enabled = false
   await save()
+  if (messageError.value) return
+  await test()
+  if (testFeedback.value?.failed || testFeedback.value?.missingRules.length) {
+    setMessage('草稿已保存但未启用：请先修复采集异常或缺失指标', true)
+    return
+  }
+  cfg.value.enabled = true
+  await save()
+  if (!messageError.value) setMessage('配置验证通过，监控已启用 ✓')
 }
 
 function syncQuickFromConfig() {
@@ -332,6 +354,10 @@ function validate(): string[] {
     if (x.operator === '==' && Number(x.trigger_threshold) !== Number(x.recovery_threshold)) errs.push(`告警规则 #${i + 1}：等值规则的触发和恢复阈值必须相同`)
     const targetField = METRIC_TARGETS[x.metric_key?.split('.')[0] + '.'] || Object.entries(METRIC_TARGETS).find(([prefix]) => x.metric_key?.startsWith(prefix))?.[1]
     if (x.enabled && targetField && !cfg.value[targetField].some(target => target.enabled)) errs.push(`告警规则 #${i + 1}：该指标需要至少一个已启用的数据目标`)
+    if (x.enabled && targetField && x.resource_key !== 'default') {
+      const allowed = new Set(resourceOptions(x.metric_key).map(option => option.value))
+      if (!allowed.has(x.resource_key)) errs.push(`告警规则 #${i + 1}：资源标识不在该指标的目标列表中`)
+    }
   })
   return errs
 }
@@ -379,13 +405,17 @@ async function test() {
   if (errs.length) { setMessage('当前配置不可测试：' + errs.join('；'), true); return }
   testing.value = true; setMessage('采集测试中…')
   try {
-    snapshot.value = await api<SnapshotDTO>(`/projects/${id}/test`, { method: 'POST' })
+    snapshot.value = await api<SnapshotDTO>(`/projects/${id}/test`, { method: 'POST', body: JSON.stringify(toPayload()) })
     const snap = snapshot.value
     const statuses = Object.values(snap?.collector_status || {})
-    const missingRules = cfg.value.rules.filter((rule: FormRule) => rule.enabled && !(rule.metric_key in (snap?.signals || {}))).map((rule: FormRule) => rule.metric_key)
+    const missingRules = cfg.value.rules.filter((rule: FormRule) => {
+      if (!rule.enabled) return false
+      if (rule.resource_key === 'default') return !(rule.metric_key in (snap?.signals || {}))
+      return !(rule.resource_key in (snap?.resource_signals || {}) && rule.metric_key in (snap?.resource_signals?.[rule.resource_key] || {}))
+    }).map((rule: FormRule) => `${rule.metric_key}/${rule.resource_key}`)
     testFeedback.value = { passed: statuses.filter(x => x.ok).length, failed: statuses.filter(x => !x.ok).length, missingRules }
     tab.value = 'snapshot'
-    setMessage(testFeedback.value.failed || missingRules.length ? '采集完成，但存在异常，请查看下方反馈' : '采集测试完成（读取的是已保存配置，dry-run 不落库）', Boolean(testFeedback.value.failed || missingRules.length))
+    setMessage(testFeedback.value.failed || missingRules.length ? '采集完成，但存在异常，请查看下方反馈' : '采集测试完成（使用当前草稿，dry-run 不落库）', Boolean(testFeedback.value.failed || missingRules.length))
   } catch (e) { setMessage('采集失败：' + errorMessage(e), true) }
   finally { testing.value = false }
 }
@@ -648,7 +678,11 @@ onMounted(load)
                     <el-option v-for="s in SEVERITIES" :key="s" :label="s" :value="s" />
                   </el-select>
                 </el-form-item>
-                <el-form-item label="分组标识（一般不用改）"><el-input v-model="row.resource_key" placeholder="default" /></el-form-item>
+                <el-form-item label="目标资源（可选，默认项目聚合）">
+                  <el-select v-model="row.resource_key" filterable allow-create default-first-option style="width: 100%" placeholder="选择具体进程/服务，或使用项目聚合">
+                    <el-option v-for="o in resourceOptions(row.metric_key)" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
+                </el-form-item>
               </div>
             </div>
           </div>

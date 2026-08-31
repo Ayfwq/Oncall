@@ -55,12 +55,19 @@ class MilvusKnowledgeIndex:
     async def delete_version(self,version_id:str)->None:
         await self.ensure();await asyncio.to_thread(self._client().delete,collection_name=self.collection,filter=f'version_id == "{version_id}"')
 
+    @staticmethod
+    def _scope_filter(project_scope: str | None) -> str:
+        # An unbound conversation may use only organization-wide documents. The
+        # previous empty filter accidentally exposed every project-scoped document.
+        return ('project_scope == ""' if not project_scope else
+                f'project_scope == "" or project_scope == "{project_scope}"')
+
     async def dense_search(self,vector:list[float],project_scope:str|None,limit:int=20)->list[dict]:
-        await self.ensure();flt='' if not project_scope else f'project_scope == "" or project_scope == "{project_scope}"'
-        res=await asyncio.to_thread(self._client().search,collection_name=self.collection,data=[vector],anns_field='dense',limit=limit,filter=flt or '',output_fields=['document_id','version_id','project_scope','title','page_range','content'])
+        await self.ensure();flt=self._scope_filter(project_scope)
+        res=await asyncio.to_thread(self._client().search,collection_name=self.collection,data=[vector],anns_field='dense',limit=limit,filter=flt,output_fields=['document_id','version_id','project_scope','title','page_range','content'])
         return [dict(hit.get('entity',{}),id=str(hit.get('id')),score=float(hit.get('distance',0))) for hit in (res[0] if res else [])]
 
     async def bm25_search(self,query:str,project_scope:str|None,limit:int=20)->list[dict]:
-        await self.ensure();flt='' if not project_scope else f'project_scope == "" or project_scope == "{project_scope}"'
-        res=await asyncio.to_thread(self._client().search,collection_name=self.collection,data=[query],anns_field='sparse',limit=limit,filter=flt or '',output_fields=['document_id','version_id','project_scope','title','page_range','content'])
+        await self.ensure();flt=self._scope_filter(project_scope)
+        res=await asyncio.to_thread(self._client().search,collection_name=self.collection,data=[query],anns_field='sparse',limit=limit,filter=flt,output_fields=['document_id','version_id','project_scope','title','page_range','content'])
         return [dict(hit.get('entity',{}),id=str(hit.get('id')),score=float(hit.get('distance',0))) for hit in (res[0] if res else [])]

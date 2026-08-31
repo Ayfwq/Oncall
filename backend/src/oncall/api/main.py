@@ -32,6 +32,7 @@ from oncall.application.dtos import (
     FeishuSettingsDTO,
     PasswordChangeDTO,
     ProjectCreateDTO,
+    ProjectRuntimeConfig,
 )
 from oncall.application.knowledge_service import KnowledgeService
 from oncall.application.project_service import ProjectService
@@ -243,7 +244,7 @@ def _project_runtime_payload(cfg):
 async def project_detail(pid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
     project=await ProjectService(db).get(_uuid(pid),user.id)
     if not project:raise HTTPException(404,'not found')
-    cfg=await ProjectService(db).runtime_config(project.id)
+    cfg=await ProjectService(db).runtime_config(project.id, include_disabled=True)
     return _project_runtime_payload(cfg)
 
 @app.delete('/api/projects/{pid}')
@@ -252,11 +253,14 @@ async def delete_project(pid:str,user=Depends(current_user),db:AsyncSession=Depe
     return {'ok':True}
 
 @app.post('/api/projects/{pid}/test')
-async def test_project(pid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+async def test_project(pid:str,payload:ProjectCreateDTO|None=None,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
     from oncall.monitoring.engine import MonitoringEngine
     project=await ProjectService(db).get(_uuid(pid),user.id)
     if not project:raise HTTPException(404,'not found')
-    snap=await MonitoringEngine(db).collect(project.id,persist_state=False)
+    config = None
+    if payload is not None:
+        config = ProjectRuntimeConfig(id=project.id,user_id=project.user_id,**payload.model_dump())
+    snap=await MonitoringEngine(db).collect(project.id,persist_state=False,config=config)
     return snap.model_dump(mode='json')
 
 @app.get('/api/projects/{pid}/snapshot')

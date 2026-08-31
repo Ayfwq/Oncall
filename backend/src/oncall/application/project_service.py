@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.dtos import (
@@ -80,40 +80,54 @@ class ProjectService:
         return True
 
     async def _replace_children(self, project_id: UUID, dto: ProjectCreateDTO) -> None:
-        # Full replacement keeps the Project API simple, but secrets must survive an
-        # edit where the browser intentionally sends password=null instead of exposing
-        # the stored plaintext. Preserve encrypted DB passwords by child id.
-        existing_db = list((await self.session.scalars(select(ProjectDatabaseProfile).where(ProjectDatabaseProfile.project_id == project_id))).all())
-        encrypted_by_id = {x.id: x.encrypted_password for x in existing_db}
-        for model in (ProjectProcessTarget, ProjectLogSource, ProjectDockerTarget, ProjectDatabaseProfile, ProjectServiceEndpoint, MonitoringRule):
-            await self.session.execute(delete(model).where(model.project_id == project_id))
-        for x in dto.process_targets:
-            self.session.add(ProjectProcessTarget(project_id=project_id, **x.model_dump(exclude={'id'})))
-        for x in dto.log_sources:
-            self.session.add(ProjectLogSource(project_id=project_id, **x.model_dump(exclude={'id'})))
-        for x in dto.docker_targets:
-            self.session.add(ProjectDockerTarget(project_id=project_id, **x.model_dump(exclude={'id'})))
-        for x in dto.database_profiles:
-            data=x.model_dump(exclude={'id','password'})
-            if x.password:
-                data['encrypted_password']=self.box.encrypt(x.password)
-            elif x.id and x.id in encrypted_by_id:
-                data['encrypted_password']=encrypted_by_id[x.id]
-            else:
-                data['encrypted_password']=None
-            self.session.add(ProjectDatabaseProfile(project_id=project_id, **data))
-        for x in dto.service_endpoints:
-            self.session.add(ProjectServiceEndpoint(project_id=project_id, **x.model_dump(exclude={'id'})))
-        for x in dto.rules:
-            data=x.model_dump(exclude={'id'}); data['operator']=data.pop('operator')
-            self.session.add(MonitoringRule(project_id=project_id, **data))
+        # Secrets must survive an edit where the browser intentionally sends
+        # password=null instead of exposing the stored plaintext.
+        # Update rows in place. Recreating every child on each save used to reset
+        # detector hysteresis and change Incident fingerprints even for a harmless
+        # project-name edit. Stable IDs are part of the monitoring contract.
+        async def sync(model, rows, fields):
+            existing = {x.id: x for x in (await self.session.scalars(select(model).where(model.project_id == project_id))).all()}
+            for dto_row in rows:
+                obj = existing.get(dto_row.id) if dto_row.id else None
+                if obj is None:
+                    obj = model(project_id=project_id)
+                    self.session.add(obj)
+                for field in fields:
+                    setattr(obj, field, getattr(dto_row, field))
+            for key, obj in existing.items():
+                if key not in {x.id for x in rows if x.id}:
+                    await self.session.delete(obj)
 
-    async def runtime_config(self, project_id: UUID) -> ProjectRuntimeConfig:
+        await sync(ProjectProcessTarget, dto.process_targets, ('name','executable','cmdline_filters','cwd','port','enabled'))
+        await sync(ProjectLogSource, dto.log_sources, ('path','encoding','parser_config','enabled'))
+        await sync(ProjectDockerTarget, dto.docker_targets, ('container_ref','enabled'))
+
+        existing_db = {x.id: x for x in (await self.session.scalars(select(ProjectDatabaseProfile).where(ProjectDatabaseProfile.project_id == project_id))).all()}
+        for x in dto.database_profiles:
+            obj = existing_db.get(x.id) if x.id else None
+            if obj is None:
+                obj = ProjectDatabaseProfile(project_id=project_id)
+                self.session.add(obj)
+            for field in ('type','host','port','database','username','sslmode','enabled'):
+                setattr(obj, field, getattr(x, field))
+            if x.password:
+                obj.encrypted_password = self.box.encrypt(x.password)
+        for key, obj in existing_db.items():
+            if key not in {x.id for x in dto.database_profiles if x.id}:
+                await self.session.delete(obj)
+
+        await sync(ProjectServiceEndpoint, dto.service_endpoints, ('name','url','method','expected_status','timeout_ms','enabled'))
+        await sync(MonitoringRule, dto.rules, ('metric_key','resource_key','operator','trigger_threshold','trigger_for','recovery_threshold','recovery_for','severity','enabled'))
+
+    async def runtime_config(self, project_id: UUID, *, include_disabled: bool = False) -> ProjectRuntimeConfig:
         p = await self.session.get(Project, project_id)
         if not p:
             raise KeyError(f'project {project_id} not found')
         async def all_for(model):
-            return list((await self.session.scalars(select(model).where(model.project_id == project_id, model.enabled.is_(True)))).all())
+            stmt = select(model).where(model.project_id == project_id)
+            if not include_disabled:
+                stmt = stmt.where(model.enabled.is_(True))
+            return list((await self.session.scalars(stmt)).all())
         processes = await all_for(ProjectProcessTarget)
         logs = await all_for(ProjectLogSource)
         docks = await all_for(ProjectDockerTarget)

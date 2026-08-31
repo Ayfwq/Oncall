@@ -42,7 +42,11 @@ class DockerIntegration:
         except Exception as e:return CollectResult(name=self.name,ok=False,error=str(e))
         first=rows[0] if rows else {'running':True,'health':'unknown','cpu_percent':0,'memory_percent':0,'restart_count':0}
         health={'healthy':1.0,'unhealthy':0.0,'unknown':-1.0}.get(first.get('health'),-1.0)
-        return CollectResult(name=self.name,ok=True,signals={'container.running':1.0 if first.get('running') else 0.0,'container.health':health,'container.cpu_percent':float(first.get('cpu_percent',0)),'container.memory_percent':float(first.get('memory_percent',0)),'container.restart_count':float(first.get('restart_count',0))},resources={'containers':rows})
+        resource_signals={}
+        for target, row in zip(self.targets, rows):
+            state={'healthy':1.0,'unhealthy':0.0,'unknown':-1.0}.get(row.get('health'),-1.0)
+            resource_signals[str(target.id or target.container_ref)]={'container.running':1.0 if row.get('running') else 0.0,'container.health':state,'container.cpu_percent':float(row.get('cpu_percent',0)),'container.memory_percent':float(row.get('memory_percent',0)),'container.restart_count':float(row.get('restart_count',0))}
+        return CollectResult(name=self.name,ok=True,signals={'container.running':1.0 if first.get('running') else 0.0,'container.health':health,'container.cpu_percent':float(first.get('cpu_percent',0)),'container.memory_percent':float(first.get('memory_percent',0)),'container.restart_count':float(first.get('restart_count',0))},resource_signals=resource_signals,resources={'containers':rows})
 
     async def query(self)->ToolResult:
         try: rows=await asyncio.to_thread(self._inspect_rows);return ToolResult(ok=True,summary=f'检查 {len(rows)} 个容器',data=rows)

@@ -27,7 +27,11 @@ class ServiceIntegration:
     async def collect(self)->CollectResult:
         rows=[await self._probe(x) for x in self.endpoints]
         f=rows[0] if rows else {'reachable':True,'status_code':200,'latency_ms':0,'ok':True}
-        return CollectResult(name=self.name,ok=bool(f.get('ok')),signals={'service.reachable':1.0 if f.get('reachable') else 0.0,'service.status_code':float(f.get('status_code',0)),'service.latency_ms':float(f.get('latency_ms',0)),'service.consecutive_failures':0.0 if f.get('ok') else 1.0},resources={'endpoints':rows})
+        resource_signals={}
+        for endpoint, row in zip(self.endpoints, rows):
+            key=str(endpoint.id or endpoint.name)
+            resource_signals[key]={'service.reachable':1.0 if row.get('reachable') else 0.0,'service.status_code':float(row.get('status_code',0)),'service.latency_ms':float(row.get('latency_ms',0)),'service.consecutive_failures':0.0 if row.get('ok') else 1.0}
+        return CollectResult(name=self.name,ok=bool(f.get('ok')),signals={'service.reachable':1.0 if f.get('reachable') else 0.0,'service.status_code':float(f.get('status_code',0)),'service.latency_ms':float(f.get('latency_ms',0)),'service.consecutive_failures':0.0 if f.get('ok') else 1.0},resource_signals=resource_signals,resources={'endpoints':rows})
 
     async def query(self)->ToolResult:
         rows=[await self._probe(x) for x in self.endpoints]

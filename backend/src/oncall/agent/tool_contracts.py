@@ -19,6 +19,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "metric": {"type": "string", "description": "signal key，例如 host.cpu.percent"},
+                "resource_key": {"type": "string", "description": "可选的具体目标资源标识；不填查询项目级聚合"},
                 "hours": {"type": "integer", "minimum": 1, "maximum": 168, "default": 1},
             },
             "required": ["metric"],

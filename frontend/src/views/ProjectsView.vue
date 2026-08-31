@@ -43,7 +43,7 @@ async function add() {
   message.value = ''
   try {
     const r = await api<{ id: string }>('/projects', { method: 'POST', body: JSON.stringify({
-      name: name.value.trim(), description: description.value.trim(), timezone: 'Asia/Shanghai', poll_interval: interval,
+      name: name.value.trim(), description: description.value.trim(), enabled: false, timezone: 'Asia/Shanghai', poll_interval: interval,
       process_targets: [], log_sources: [], docker_targets: [], database_profiles: [], service_endpoints: [], rules: defaultRules,
     }) })
     await load(); router.push(`/projects/${r.id}`)

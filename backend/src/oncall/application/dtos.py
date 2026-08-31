@@ -295,6 +295,13 @@ class ProjectCreateDTO(BaseModel):
                 if metric.startswith(prefix) and rule.enabled and not any(row.enabled for row in getattr(self, target_field)):
                     errors.append(f'rule #{index} requires an enabled {target_field} target')
                     break
+                if metric.startswith(prefix) and rule.enabled and rule.resource_key != 'default':
+                    targets = getattr(self, target_field)
+                    keys = {str(row.id) for row in targets if row.id is not None}
+                    keys.update(str(getattr(row, 'name', '') or getattr(row, 'container_ref', '') or getattr(row, 'database', '') or getattr(row, 'path', '') or getattr(row, 'url', '')) for row in targets)
+                    if rule.resource_key not in keys:
+                        errors.append(f'rule #{index} resource does not match a configured {target_field} target')
+                    break
 
         if errors:
             raise ValueError('; '.join(errors))
@@ -345,5 +352,6 @@ class SnapshotDTO(BaseModel):
     project_id: UUID
     observed_at: datetime
     signals: dict[str, float | bool | str | None] = Field(default_factory=dict)
+    resource_signals: dict[str, dict[str, float | bool | str | None]] = Field(default_factory=dict)
     resources: dict[str, Any] = Field(default_factory=dict)
     collector_status: dict[str, Any] = Field(default_factory=dict)

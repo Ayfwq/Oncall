@@ -34,8 +34,8 @@ class MonitoringEngine:
         from oncall.bootstrap.config import get_settings
         self.session=session;self.detector=Detector();self._host=HostIntegration();self.settings=get_settings()
 
-    async def collect(self,project_id:UUID, *, persist_state:bool=True)->SnapshotDTO:
-        cfg=await ProjectService(self.session).runtime_config(project_id)
+    async def collect(self,project_id:UUID, *, persist_state:bool=True, config=None)->SnapshotDTO:
+        cfg=config or await ProjectService(self.session).runtime_config(project_id)
         integrations=[self._host,ProcessIntegration(cfg.process_targets),DockerIntegration(cfg.docker_targets),DatabaseIntegration(cfg.database_profiles),ServiceIntegration(cfg.service_endpoints)]
         async def one(i):
             try:return await asyncio.wait_for(i.collect(),timeout=8)
@@ -48,9 +48,11 @@ class MonitoringEngine:
         except Exception as e:
             from oncall.integrations.base import CollectResult
             results.append(CollectResult(name='logs',ok=False,error=str(e)))
-        signals={};resources={};status={}
+        signals={};resource_signals={};resources={};status={}
         for r in results:
             signals.update(r.signals);resources[r.name]=r.resources;status[r.name]={'ok':r.ok,'error':r.error}
+            for resource_key, values in r.resource_signals.items():
+                resource_signals.setdefault(str(resource_key), {}).update(values)
         # PostgreSQL exposes a cumulative deadlock counter. Convert it to the V1
         # contract's db.deadlock.delta by comparing against the previous completed
         # snapshot, rather than mislabelling the cumulative total as a delta.
@@ -79,7 +81,7 @@ class MonitoringEngine:
             ok=bool(current_eps[0].get('ok')) if current_eps else True
             previous_failures=float(previous_snapshot.get('signals',{}).get('service.consecutive_failures',0) or 0)
             signals['service.consecutive_failures']=0.0 if ok else previous_failures+1.0
-        return SnapshotDTO(project_id=project_id,observed_at=datetime.now().astimezone(),signals=signals,resources=resources,collector_status=status)
+        return SnapshotDTO(project_id=project_id,observed_at=datetime.now().astimezone(),signals=signals,resource_signals=resource_signals,resources=resources,collector_status=status)
 
     async def _collect_logs_incremental(self,sources,window_seconds:int, *, persist_state:bool=True):
         """Read only bytes appended since the last successful poll.
@@ -118,6 +120,10 @@ class MonitoringEngine:
         if persist_state:
             await self.session.commit()
         result=LogIntegration.summarize(lines_by_source,window_seconds)
+        result.resource_signals={}
+        for source, lines in lines_by_source.items():
+            one=LogIntegration.summarize({source: lines},window_seconds)
+            result.resource_signals[source]=dict(one.signals)
         result.resources['sources']=status
         result.ok=any(x.get('ok') for x in status.values()) if status else True
         return result
@@ -128,6 +134,10 @@ class MonitoringEngine:
         for key,value in snapshot.signals.items():
             if isinstance(value,(int,float,bool)):
                 self.session.add(MetricSample(project_id=project_id,metric_key=key,resource_key='default',ts=snapshot.observed_at,value=float(value)))
+        for resource_key, values in snapshot.resource_signals.items():
+            for key, value in values.items():
+                if isinstance(value,(int,float,bool)):
+                    self.session.add(MetricSample(project_id=project_id,metric_key=key,resource_key=str(resource_key),ts=snapshot.observed_at,value=float(value)))
         await self.session.commit();await self.evaluate_rules(project_id,snapshot)
         return snapshot
 
@@ -135,7 +145,7 @@ class MonitoringEngine:
         rules=list((await self.session.scalars(select(MonitoringRule).where(MonitoringRule.project_id==project_id,MonitoringRule.enabled.is_(True)))).all())
         incident_service=IncidentService(self.session)
         for rule in rules:
-            raw=snapshot.signals.get(rule.metric_key)
+            raw=(snapshot.signals if rule.resource_key == 'default' else snapshot.resource_signals.get(rule.resource_key, {})).get(rule.metric_key)
             if not isinstance(raw,(int,float,bool)):continue
             value=float(raw)
             rs=await self.session.get(MonitoringRuleState,rule.id)
@@ -145,7 +155,7 @@ class MonitoringEngine:
             tr=self.detector.evaluate(RuleConfig(rule.operator,rule.trigger_threshold,rule.trigger_for,rule.recovery_threshold,rule.recovery_for),runtime,value)
             rs.state=runtime.state.value;rs.abnormal_hits=runtime.abnormal_hits;rs.recovery_hits=runtime.recovery_hits;rs.last_value=value
             if tr.changed:
-                self.session.add(AlertEvent(rule_id=rule.id,project_id=project_id,resource_key=rule.resource_key,state_from=tr.before.value,state_to=tr.after.value,payload={'metric_key':rule.metric_key,'value':value,'threshold':rule.trigger_threshold}))
+                self.session.add(AlertEvent(rule_id=rule.id,project_id=project_id,resource_key=rule.resource_key,state_from=tr.before.value,state_to=tr.after.value,payload={'metric_key':rule.metric_key,'value':value,'threshold':rule.trigger_threshold,'observed_at':snapshot.observed_at.isoformat()}))
             await self.session.commit()
             if tr.became_firing:
                 await incident_service.on_firing(project_id,rule.id,rule.resource_key,rule.metric_key,rule.severity,value)

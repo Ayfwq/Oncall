@@ -28,6 +28,13 @@ def _matches(proc: psutil.Process, target: ProcessTargetDTO) -> bool:
     return True
 
 
+def _safe_process(pid: int) -> psutil.Process | None:
+    try:
+        return psutil.Process(pid)
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        return None
+
+
 class ProcessIntegration:
     name='process'
     def __init__(self, targets:list[ProcessTargetDTO]): self.targets=targets
@@ -50,7 +57,7 @@ class ProcessIntegration:
         for p,target in matched:
             try:
                 with p.oneshot():
-                    rows.append({'target':target.name,'pid':p.pid,'name':p.name(),'cpu_percent':float(p.cpu_percent(None)),'rss_bytes':float(p.memory_info().rss),'ppid':p.ppid(),'create_time':p.create_time(),'cmdline':' '.join(p.cmdline())[:2000]})
+                    rows.append({'target':str(target.id or target.name),'pid':p.pid,'name':p.name(),'cpu_percent':float(p.cpu_percent(None)),'rss_bytes':float(p.memory_info().rss),'ppid':p.ppid(),'create_time':p.create_time(),'cmdline':' '.join(p.cmdline())[:2000]})
             except (psutil.AccessDenied,psutil.NoSuchProcess):pass
         return rows
 
@@ -59,13 +66,42 @@ class ProcessIntegration:
         for pid in list(pids):
             try: child_count += len(psutil.Process(pid).children(recursive=False))
             except (psutil.AccessDenied,psutil.NoSuchProcess): pass
-        return CollectResult(name=self.name,ok=True,signals={
+        signals={
             'process.target.alive': 1.0 if rows else 0.0,
             'process.target.count': float(len(rows)),
             'process.target.cpu_percent_sum': float(sum(r['cpu_percent'] for r in rows)),
             'process.target.rss_bytes_sum': float(sum(r['rss_bytes'] for r in rows)),
             'process.target.child_count': float(child_count),
-        },resources={'top':sorted(rows,key=lambda x:x['cpu_percent'],reverse=True)[:5]})
+        }
+        grouped: dict[str, list[dict]] = {}
+        for row in rows:
+            grouped.setdefault(str(row.get('target') or 'default'), []).append(row)
+        resource_signals = {}
+        for key, target_rows in grouped.items():
+            resource_signals[key] = {
+                'process.target.alive': 1.0,
+                'process.target.count': float(len(target_rows)),
+                'process.target.cpu_percent_sum': float(sum(r['cpu_percent'] for r in target_rows)),
+                'process.target.rss_bytes_sum': float(sum(r['rss_bytes'] for r in target_rows)),
+                'process.target.child_count': float(sum(
+                    len(p.children(recursive=False))
+                    for r in target_rows
+                    for p in [_safe_process(r['pid'])]
+                    if p is not None
+                )),
+            }
+        # Emit an explicit zero for configured process targets that currently have
+        # no match, so ``process.target.alive < 1`` can fire per target.
+        for target in self.targets:
+            if target.enabled:
+                resource_signals.setdefault(str(target.id or target.name), {
+                    'process.target.alive': 0.0,
+                    'process.target.count': 0.0,
+                    'process.target.cpu_percent_sum': 0.0,
+                    'process.target.rss_bytes_sum': 0.0,
+                    'process.target.child_count': 0.0,
+                })
+        return CollectResult(name=self.name,ok=True,signals=signals,resource_signals=resource_signals,resources={'top':sorted(rows,key=lambda x:x['cpu_percent'],reverse=True)[:5]})
 
     async def query(self, limit:int=30)->ToolResult:
         rows=await asyncio.to_thread(self._rows); rows=sorted(rows,key=lambda x:(x['cpu_percent'],x['rss_bytes']),reverse=True)[:max(1,min(limit,100))]

@@ -93,6 +93,9 @@ class ToolRegistry:
         if name=='query_service_health':return await ServiceIntegration(cfg.service_endpoints).query()
         if name=='query_metric_history':
             key=str(args.get('metric','host.cpu.percent'));hours=max(1,min(int(args.get('hours',1)),168));since=datetime.now().astimezone()-timedelta(hours=hours)
-            rows=list((await self.session.scalars(select(MetricSample).where(MetricSample.project_id==ctx.project_id,MetricSample.metric_key==key,MetricSample.ts>=since).order_by(MetricSample.ts.asc()).limit(1000))).all())
-            return ToolResult(ok=True,summary=f'{key} 过去 {hours}h 共 {len(rows)} 个采样',data=[{'ts':r.ts.isoformat(),'value':r.value} for r in rows],truncated=len(rows)>=1000)
+            stmt=select(MetricSample).where(MetricSample.project_id==ctx.project_id,MetricSample.metric_key==key,MetricSample.ts>=since)
+            resource_key=str(args.get('resource_key') or 'default')
+            stmt=stmt.where(MetricSample.resource_key==resource_key).order_by(MetricSample.ts.asc()).limit(1000)
+            rows=list((await self.session.scalars(stmt)).all())
+            return ToolResult(ok=True,summary=f'{key}/{resource_key} 过去 {hours}h 共 {len(rows)} 个采样',data=[{'ts':r.ts.isoformat(),'value':r.value,'resource_key':r.resource_key} for r in rows],truncated=len(rows)>=1000)
         raise KeyError(name)

@@ -32,7 +32,10 @@ class DatabaseIntegration:
             try:rows.append(await self._query_one(p))
             except Exception as e:rows.append({'database':p.database,'reachable':False,'error':str(e),'connections_usage_percent':0,'long_query_count':0,'lock_wait_count':0,'deadlocks':0})
         f=rows[0]
-        return CollectResult(name=self.name,ok=bool(f.get('reachable')),signals={'db.reachable':1.0 if f.get('reachable') else 0.0,'db.connections.usage_percent':float(f.get('connections_usage_percent',0)),'db.long_query.count':float(f.get('long_query_count',0)),'db.lock_wait.count':float(f.get('lock_wait_count',0)),'db.deadlock.delta':float(f.get('deadlocks',0))},resources={'databases':rows})
+        resource_signals={}
+        for profile, row in zip(self.profiles, rows):
+            resource_signals[str(profile.id or profile.database)]={'db.reachable':1.0 if row.get('reachable') else 0.0,'db.connections.usage_percent':float(row.get('connections_usage_percent',0)),'db.long_query.count':float(row.get('long_query_count',0)),'db.lock_wait.count':float(row.get('lock_wait_count',0)),'db.deadlock.delta':float(row.get('deadlocks',0))}
+        return CollectResult(name=self.name,ok=bool(f.get('reachable')),signals={'db.reachable':1.0 if f.get('reachable') else 0.0,'db.connections.usage_percent':float(f.get('connections_usage_percent',0)),'db.long_query.count':float(f.get('long_query_count',0)),'db.lock_wait.count':float(f.get('lock_wait_count',0)),'db.deadlock.delta':float(f.get('deadlocks',0))},resource_signals=resource_signals,resources={'databases':rows})
 
     async def query(self)->ToolResult:
         rows=[]

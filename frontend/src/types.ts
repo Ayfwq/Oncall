@@ -115,6 +115,7 @@ export interface SnapshotDTO {
   project_id: string
   observed_at: string
   signals: Record<string, number | boolean | string | null>
+  resource_signals: Record<string, Record<string, number | boolean | string | null>>
   resources: Record<string, unknown>
   collector_status: Record<string, CollectorStatusEntry>
 }

@@ -93,7 +93,9 @@ class OncallGraphRuntime:
         return {**built,'tool_calls_used':0,'tool_budget':tool_budget,'reason_loops':0,'reason_loop_budget':loop_budget,'called_tools':[],'knowledge_refs':[],'knowledge_hits':[],'knowledge_status':'skipped','allowed_tools':[],'tool_plan':[],'answer_sources':[],'pending_tool':None,'current_tool_result':None,'decision':{},'diagnosis':None,'final_response':None,'exhausted':False}
 
     async def route_intent(self,state:OncallState)->dict:
-        route=classify_intent(state.get('user_message',''),project_id=state.get('project_id'),incident_id=state.get('incident_id'),mode=state.get('mode','chat'))
+        current=str(state.get('user_message',''))
+        previous=next((m.get('content','') for m in reversed(state.get('working_messages') or []) if m.get('role')=='user' and m.get('content') and m.get('content') != current), '')
+        route=classify_intent(' '.join(x for x in (previous,current) if x),project_id=state.get('project_id'),incident_id=state.get('incident_id'),mode=state.get('mode','chat'))
         if route.get('requires_realtime'):
             route['allowed_tools']=[x['name'] for x in public_tool_specs()]
         elif route.get('requires_knowledge'):
@@ -111,6 +113,13 @@ class OncallGraphRuntime:
 
     async def retrieve_knowledge(self,state:OncallState)->dict:
         query=str(state.get('user_message','')).strip()
+        # Resolve short follow-ups against the active thread/Incident before RAG;
+        # searching for "那怎么处理" alone is almost always a low-signal query.
+        if len(query) < 24 or any(x in query for x in ('这个','那','它','继续','还有')):
+            ctx=state.get('incident_context') or {}
+            current=str(state.get('user_message',''))
+            previous=next((m.get('content','') for m in reversed(state.get('working_messages') or []) if m.get('role')=='user' and m.get('content') and m.get('content') != current), '')
+            query=' '.join(x for x in (ctx.get('anomaly_type'),ctx.get('summary'),previous,query) if x)[:1000]
         if not query: return {'knowledge_status':'skipped'}
         ctx=ToolExecutionContext(project_id=UUID(state['project_id']) if state.get('project_id') else None,incident_id=UUID(state['incident_id']) if state.get('incident_id') else None,agent_run_id=UUID(state['run_id']))
         self._emit('knowledge_started',{'query':query[:200]})
@@ -138,7 +147,8 @@ class OncallGraphRuntime:
 
     async def guard_tools(self,state:OncallState)->dict:
         d=state.get('decision',{});name=d.get('tool_name');args=d.get('tool_args') or {}
-        if name not in ALLOWED_TOOLS:
+        allowed=set(state.get('allowed_tools') or [])
+        if name not in ALLOWED_TOOLS or name not in allowed:
             return {'pending_tool':None,'decision':{'action':'final','answer':f'工具 {name} 未授权。'},'exhausted':True}
         call_key=f"{name}:{__import__('json').dumps(args,sort_keys=True,ensure_ascii=False)}"
         if call_key in state.get('called_tools',[]):
