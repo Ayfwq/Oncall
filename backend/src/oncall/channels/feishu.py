@@ -57,6 +57,19 @@ class FeishuClient:
         }
         return await self._send(receive_id,'interactive',card,receive_id_type)
 
+    async def send_alert_card(self,receive_id:str,text:str,severity:str='warning',receive_id_type:str='chat_id')->str:
+        """First-stage alert. Deliberately short: it must land within seconds of
+        detection, long before the Agent finishes its investigation."""
+        template='red' if severity=='critical' else 'orange' if severity=='warning' else 'blue'
+        label={'critical':'严重','warning':'警告','info':'提示'}.get(severity,severity)
+        card={
+            'config':{'wide_screen_mode':True},
+            'header':{'template':template,'title':{'tag':'plain_text','content':f'🚨 Oncall 告警 · {label}'}},
+            'elements':[{'tag':'markdown','content':str(text)[:18000]},
+                        {'tag':'note','elements':[{'tag':'plain_text','content':'正在自动调查原因，稍后推送诊断报告'}]}],
+        }
+        return await self._send(receive_id,'interactive',card,receive_id_type)
+
 
 class FeishuOutboxSender:
     def __init__(self,session:AsyncSession):
@@ -131,8 +144,12 @@ class FeishuOutboxSender:
                 n.status='suppressed';n.last_error='notification cooldown';continue
             try:
                 text=n.payload.get('text') or f"Oncall Incident: {n.payload.get('summary','')}"
-                if n.payload.get('kind')=='diagnosis':
-                    message_id=await self.client.send_incident_card(target,text,n.payload.get('severity','warning'),rid_type)
+                kind=n.payload.get('kind')
+                severity=n.payload.get('severity','warning')
+                if kind=='diagnosis':
+                    message_id=await self.client.send_incident_card(target,text,severity,rid_type)
+                elif kind in ('triggered','escalated'):
+                    message_id=await self.client.send_alert_card(target,text,severity,rid_type)
                 else:
                     message_id=await self.client.send_text(target,text,rid_type)
                 n.status='sent';n.sent_at=datetime.now().astimezone();n.last_error=None;n.payload={**n.payload,'message_id':message_id};sent+=1

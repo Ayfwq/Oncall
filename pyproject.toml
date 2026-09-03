@@ -14,6 +14,7 @@ dependencies = [
   "psycopg[binary]>=3.3,<4",
   "alembic>=1.16,<2",
   "httpx>=0.28,<0.29",
+  "prometheus-client>=0.21,<0.22",
   "psutil>=7,<8",
   "docker>=7.1,<8",
   "apscheduler>=3.11,<4",
@@ -33,6 +34,7 @@ dependencies = [
   "structlog>=25,<26",
   "tenacity>=9,<10",
   "python-dotenv>=1.1,<2",
+  "prometheus-client>=0.21,<0.22",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +50,7 @@ dev = [
 oncall-api = "oncall.api.main:run"
 oncall-monitor-worker = "oncall.workers.monitor_worker:run"
 oncall-agent-worker = "oncall.workers.agent_worker:run"
+oncall-notification-worker = "oncall.workers.notification_worker:run"
 oncall-rag-worker = "oncall.workers.rag_worker:run"
 oncall-init-admin = "oncall.cli.init_admin:run"
 oncall-doctor = "oncall.cli.doctor:run"

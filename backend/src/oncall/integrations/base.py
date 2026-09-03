@@ -17,6 +17,11 @@ class CollectResult:
     resources: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     observed_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
+    # Prometheus counters are cumulative, so rate-style metrics (rps, error rate)
+    # need the previous sample to difference against. An integration reports the
+    # values to remember; the engine persists them into metric_cursors.
+    # Key format: f'{resource_key}||{metric_key}'
+    cursor_updates: dict[str, float] = field(default_factory=dict)
 
 
 class MonitoringIntegration(Protocol):

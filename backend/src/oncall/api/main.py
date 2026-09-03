@@ -30,6 +30,8 @@ from oncall.application.dtos import (
     ConversationCreateDTO,
     ConversationPatchDTO,
     FeishuSettingsDTO,
+    MetricsApplyDTO,
+    MetricsDiscoverDTO,
     PasswordChangeDTO,
     ProjectCreateDTO,
     ProjectRuntimeConfig,
@@ -262,6 +264,38 @@ async def test_project(pid:str,payload:ProjectCreateDTO|None=None,user=Depends(c
         config = ProjectRuntimeConfig(id=project.id,user_id=project.user_id,**payload.model_dump())
     snap=await MonitoringEngine(db).collect(project.id,persist_state=False,config=config)
     return snap.model_dump(mode='json')
+
+@app.post('/api/projects/{pid}/metrics/discover')
+async def discover_metrics(pid:str,dto:MetricsDiscoverDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    """Probe a /metrics endpoint and propose a source + starter rules (no DB write)."""
+    project=await ProjectService(db).get(_uuid(pid),user.id)
+    if not project:raise HTTPException(404,'not found')
+    from oncall.monitoring.rule_templates import discover as _discover
+    result=await _discover(dto.url,auth_type=dto.auth_type,token=dto.token,route_label=dto.route_label,scrape_timeout_ms=dto.scrape_timeout_ms)
+    return result
+
+@app.post('/api/projects/{pid}/metrics/apply')
+async def apply_metrics(pid:str,dto:MetricsApplyDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    """Persist a discovered metrics source and its rules, merging with existing config."""
+    project=await ProjectService(db).get(_uuid(pid),user.id)
+    if not project:raise HTTPException(404,'not found')
+    cfg=await ProjectService(db).runtime_config(project.id,include_disabled=True)
+    added_sources=0;added_rules=0
+    src_key=(dto.source.name.strip(),dto.source.url.strip())
+    if src_key not in {(s.name,s.url) for s in cfg.metrics_sources}:
+        cfg.metrics_sources.append(dto.source)
+        added_sources+=1
+    existing_rules={(r.metric_key,r.resource_key) for r in cfg.rules}
+    for r in dto.rules:
+        key=(r.metric_key,r.resource_key)
+        if key in existing_rules:continue
+        cfg.rules.append(r);existing_rules.add(key);added_rules+=1
+    try:
+        await ProjectService(db).update(project.id,user.id,cfg)
+    except ValueError as e:
+        raise HTTPException(400,f'配置校验失败：{e}')
+    return {'ok':True,'added_metrics_sources':added_sources,'added_rules':added_rules}
+
 
 @app.get('/api/projects/{pid}/snapshot')
 async def latest_project_snapshot(pid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):

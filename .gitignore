@@ -16,3 +16,9 @@ work/
 .deploy_tmp/
 backend-local.err.log
 backend-local.log
+.workbuddy/
+diagrams/
+output/
+tmp/
+.venv_test/
+backend/.venv_test/

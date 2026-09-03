@@ -39,6 +39,7 @@ export interface ProcessTarget {
   cmdline_filters: string[]
   cwd: string | null
   port: number | null
+  service_id: string | null
   enabled: boolean
 }
 
@@ -47,12 +48,14 @@ export interface LogSource {
   path: string
   encoding: string
   parser_config: Record<string, unknown>
+  service_id: string | null
   enabled: boolean
 }
 
 export interface DockerTarget {
   id: string | null
   container_ref: string
+  service_id: string | null
   enabled: boolean
 }
 
@@ -65,6 +68,7 @@ export interface DatabaseProfile {
   username: string
   password: string | null
   sslmode: string
+  service_id: string | null
   enabled: boolean
 }
 
@@ -75,6 +79,28 @@ export interface ServiceEndpoint {
   method: string
   expected_status: number
   timeout_ms: number
+  service_id: string | null
+  enabled: boolean
+}
+
+export interface MetricsSource {
+  id: string | null
+  name: string
+  url: string
+  auth_type: 'none' | 'bearer' | 'basic'
+  token: string | null
+  scrape_timeout_ms: number
+  route_label: string
+  service_id: string | null
+  enabled: boolean
+}
+
+// A logical application/component that groups related monitoring targets so
+// incidents can be reasoned about per service rather than per raw target.
+export interface Service {
+  id: string | null
+  name: string
+  description: string
   enabled: boolean
 }
 
@@ -103,6 +129,8 @@ export interface ProjectConfig {
   docker_targets: DockerTarget[]
   database_profiles: DatabaseProfile[]
   service_endpoints: ServiceEndpoint[]
+  metrics_sources: MetricsSource[]
+  services: Service[]
   rules: MonitoringRule[]
 }
 

@@ -25,8 +25,9 @@ from oncall.integrations.docker_integration import DockerIntegration
 from oncall.integrations.host import HostIntegration
 from oncall.integrations.logs import LogIntegration
 from oncall.integrations.process import ProcessIntegration
+from oncall.integrations.prometheus import PrometheusIntegration
 from oncall.integrations.service import ServiceIntegration
-from oncall.monitoring.detector import Detector, RuleConfig, RuleRuntimeState
+from oncall.monitoring.detector import Detector, RuleConfig, RuleRuntimeState, compare
 
 
 class MonitoringEngine:
@@ -36,7 +37,7 @@ class MonitoringEngine:
 
     async def collect(self,project_id:UUID, *, persist_state:bool=True, config=None)->SnapshotDTO:
         cfg=config or await ProjectService(self.session).runtime_config(project_id)
-        integrations=[self._host,ProcessIntegration(cfg.process_targets),DockerIntegration(cfg.docker_targets),DatabaseIntegration(cfg.database_profiles),ServiceIntegration(cfg.service_endpoints)]
+        integrations=[self._host,ProcessIntegration(cfg.process_targets),DockerIntegration(cfg.docker_targets),DatabaseIntegration(cfg.database_profiles),ServiceIntegration(cfg.service_endpoints),PrometheusIntegration(self.session,project_id,cfg.metrics_sources,persist_state=persist_state)]
         async def one(i):
             try:return await asyncio.wait_for(i.collect(),timeout=8)
             except Exception as e:
@@ -141,26 +142,61 @@ class MonitoringEngine:
         await self.session.commit();await self.evaluate_rules(project_id,snapshot)
         return snapshot
 
+    def _condition_holds(self, cond: dict, snapshot: SnapshotDTO) -> bool:
+        mk = str(cond.get('metric_key', ''))
+        rk = str(cond.get('resource_key', 'default') or 'default')
+        raw = (snapshot.signals if rk == 'default' else snapshot.resource_signals.get(rk, {})).get(mk)
+        if not isinstance(raw, (int, float, bool)):
+            return False
+        return compare(float(raw), str(cond.get('operator', '>')), float(cond.get('threshold', 0)))
+
+    def _composite_active(self, conditions: dict, snapshot: SnapshotDTO) -> bool:
+        group = conditions.get('all') or []
+        # AND semantics: every condition must currently hold to be "active".
+        return bool(group) and all(self._condition_holds(c, snapshot) for c in group)
+
+    def _composite_severity(self, conditions: dict, snapshot: SnapshotDTO, base: str) -> str:
+        esc = conditions.get('escalate_at')
+        if esc and self._condition_holds(esc, snapshot):
+            return str(esc.get('escalate_severity', 'critical') or 'critical')
+        return base
+
     async def evaluate_rules(self,project_id:UUID,snapshot:SnapshotDTO)->None:
         rules=list((await self.session.scalars(select(MonitoringRule).where(MonitoringRule.project_id==project_id,MonitoringRule.enabled.is_(True)))).all())
         incident_service=IncidentService(self.session)
         for rule in rules:
-            raw=(snapshot.signals if rule.resource_key == 'default' else snapshot.resource_signals.get(rule.resource_key, {})).get(rule.metric_key)
-            if not isinstance(raw,(int,float,bool)):continue
-            value=float(raw)
+            # ---- resolve effective metric/resource/severity + the boolean "value" ----
+            if rule.conditions:
+                # Composite rule (P4): fire only when ALL conditions hold. The
+                # scalar metric_key/operator/threshold fields are ignored. We feed a
+                # boolean (1.0 active / 0.0 not) into the same hysteresis state machine.
+                eff_metric_key='composite'
+                eff_resource_key='default'
+                active=self._composite_active(rule.conditions, snapshot)
+                eff_severity=self._composite_severity(rule.conditions, snapshot, rule.severity)
+                value=1.0 if active else 0.0
+                cfg=RuleConfig('>',0.5,rule.trigger_for,0.5,rule.recovery_for)
+            else:
+                eff_metric_key=rule.metric_key
+                eff_resource_key=rule.resource_key
+                eff_severity=rule.severity
+                raw=(snapshot.signals if rule.resource_key == 'default' else snapshot.resource_signals.get(rule.resource_key, {})).get(rule.metric_key)
+                if not isinstance(raw,(int,float,bool)):continue
+                value=float(raw)
+                cfg=RuleConfig(rule.operator,rule.trigger_threshold,rule.trigger_for,rule.recovery_threshold,rule.recovery_for)
             rs=await self.session.get(MonitoringRuleState,rule.id)
             if not rs:
                 rs=MonitoringRuleState(rule_id=rule.id);self.session.add(rs);await self.session.flush()
             runtime=RuleRuntimeState(state=__import__('oncall.domain.enums',fromlist=['RuleState']).RuleState(rs.state),abnormal_hits=rs.abnormal_hits,recovery_hits=rs.recovery_hits,last_value=rs.last_value)
-            tr=self.detector.evaluate(RuleConfig(rule.operator,rule.trigger_threshold,rule.trigger_for,rule.recovery_threshold,rule.recovery_for),runtime,value)
+            tr=self.detector.evaluate(cfg,runtime,value)
             rs.state=runtime.state.value;rs.abnormal_hits=runtime.abnormal_hits;rs.recovery_hits=runtime.recovery_hits;rs.last_value=value
             if tr.changed:
-                self.session.add(AlertEvent(rule_id=rule.id,project_id=project_id,resource_key=rule.resource_key,state_from=tr.before.value,state_to=tr.after.value,payload={'metric_key':rule.metric_key,'value':value,'threshold':rule.trigger_threshold,'observed_at':snapshot.observed_at.isoformat()}))
+                self.session.add(AlertEvent(rule_id=rule.id,project_id=project_id,resource_key=eff_resource_key,state_from=tr.before.value,state_to=tr.after.value,payload={'metric_key':eff_metric_key,'value':value,'threshold':(rule.conditions and rule.conditions.get('all')) or rule.trigger_threshold,'composite':bool(rule.conditions),'observed_at':snapshot.observed_at.isoformat()}))
             await self.session.commit()
             if tr.became_firing:
-                await incident_service.on_firing(project_id,rule.id,rule.resource_key,rule.metric_key,rule.severity,value)
+                await incident_service.on_firing(project_id,rule.id,eff_resource_key,eff_metric_key,eff_severity,value)
             elif tr.became_recovered:
-                fp=incident_fingerprint(project_id,rule.id,rule.resource_key,rule.metric_key)
+                fp=incident_fingerprint(project_id,rule.id,eff_resource_key,eff_metric_key)
                 inc=await self.session.scalar(select(Incident).where(Incident.project_id==project_id,Incident.fingerprint==fp,Incident.status!='resolved').order_by(Incident.first_seen.desc()).limit(1))
                 if inc:await incident_service.resolve(inc.id)
             elif runtime.state.value=='firing':
@@ -170,12 +206,12 @@ class MonitoringEngine:
                 from datetime import timedelta
 
                 from oncall.jobs.queue import JobQueue
-                fp=incident_fingerprint(project_id,rule.id,rule.resource_key,rule.metric_key)
+                fp=incident_fingerprint(project_id,rule.id,eff_resource_key,eff_metric_key)
                 inc=await self.session.scalar(select(Incident).where(Incident.project_id==project_id,Incident.fingerprint==fp,Incident.status.in_(['open','investigating','diagnosed'])).order_by(Incident.first_seen.desc()).limit(1))
                 if not inc:
-                    inc=await incident_service.on_firing(project_id,rule.id,rule.resource_key,rule.metric_key,rule.severity,value)
+                    inc=await incident_service.on_firing(project_id,rule.id,eff_resource_key,eff_metric_key,eff_severity,value)
                 else:
-                    await incident_service.touch_firing(inc,rule.severity,value)
+                    await incident_service.touch_firing(inc,eff_severity,value)
                 now=datetime.now().astimezone()
                 if inc and inc.last_investigated_at and now-inc.last_investigated_at>=timedelta(seconds=self.settings.incident_stale_reinvestigate_seconds):
                     conv=await self.session.scalar(select(Conversation).where(Conversation.incident_id==inc.id).order_by(Conversation.created_at.asc()).limit(1))

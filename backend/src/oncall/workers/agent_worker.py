@@ -7,7 +7,6 @@ from uuid import UUID
 from oncall.application.agent_service import AgentService
 from oncall.bootstrap.config import get_settings
 from oncall.bootstrap.logging import configure_logging
-from oncall.channels.feishu import FeishuOutboxSender
 from oncall.domain.enums import AgentMode
 from oncall.infrastructure.db.session import SessionFactory
 from oncall.jobs.queue import JobQueue
@@ -51,13 +50,10 @@ async def loop() -> None:
                         await queue.fail(job_id, str(exc))
                         logger.exception("incident investigation failed job=%s: %s", job_id, exc)
 
-                # Delivery is an outbox operation. Agent completion and Feishu network I/O
-                # are deliberately decoupled so transient Feishu failures do not lose reports.
-                try:
-                    sent = await FeishuOutboxSender(db).send_pending()
-                    did_work = did_work or sent > 0
-                except Exception as exc:
-                    logger.exception("feishu outbox error: %s", exc)
+                # Alert delivery is deliberately NOT done here. It now belongs to
+                # oncall-notification-worker, so an alert queued the moment an Incident
+                # is created goes out in seconds instead of waiting for this
+                # investigation (which calls the LLM repeatedly and can take minutes).
 
             if not did_work:
                 await asyncio.sleep(settings.job_poll_seconds)

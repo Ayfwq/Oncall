@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     session_days: int = 30
     job_lease_seconds: int = 120
     job_poll_seconds: float = 1.0
+    # Alert delivery runs in its own worker. Keep this short so a fresh alert lands
+    # within a second or two of being queued, independent of Agent activity.
+    notification_poll_seconds: float = 1.0
     langgraph_strict_msgpack: bool = True
 
     @model_validator(mode='after')

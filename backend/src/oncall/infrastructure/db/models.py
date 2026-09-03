@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -61,10 +62,29 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class Service(Base):
+    """A logical application/component grouping related monitoring targets.
+
+    Services are an organizational layer on top of the raw targets (processes,
+    logs, containers, databases, HTTP endpoints, metrics sources). Targets may
+    optionally belong to a service; collection still happens per project, but
+    services let an operator reason about "the checkout service" as one unit and
+    group incidents by service.
+    """
+    __tablename__ = 'services'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default='')
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class ProjectProcessTarget(Base):
     __tablename__ = 'project_process_targets'
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200), default='target')
     executable: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cmdline_filters: Mapped[list[str]] = mapped_column(JSONB, default=list)
@@ -77,6 +97,7 @@ class ProjectLogSource(Base):
     __tablename__ = 'project_log_sources'
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
     path: Mapped[str] = mapped_column(Text)
     encoding: Mapped[str] = mapped_column(String(40), default='utf-8')
     parser_config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
@@ -87,6 +108,7 @@ class ProjectDockerTarget(Base):
     __tablename__ = 'project_docker_targets'
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
     container_ref: Mapped[str] = mapped_column(String(255))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -95,6 +117,7 @@ class ProjectDatabaseProfile(Base):
     __tablename__ = 'project_database_profiles'
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
     type: Mapped[str] = mapped_column(String(40), default='postgresql')
     host: Mapped[str] = mapped_column(String(255), default='127.0.0.1')
     port: Mapped[int] = mapped_column(Integer, default=5432)
@@ -109,12 +132,51 @@ class ProjectServiceEndpoint(Base):
     __tablename__ = 'project_service_endpoints'
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200), default='health')
     url: Mapped[str] = mapped_column(Text)
     method: Mapped[str] = mapped_column(String(20), default='GET')
     expected_status: Mapped[int] = mapped_column(Integer, default=200)
     timeout_ms: Mapped[int] = mapped_column(Integer, default=3000)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ProjectMetricsSource(Base):
+    """A Prometheus text-format scrape target (e.g. a FastAPI app exposing /metrics).
+
+    This is the "white box" data source: unlike HTTP probing it reports what the
+    application itself measured — request rate, error rate, latency percentiles.
+    """
+    __tablename__ = 'project_metrics_sources'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default='app')
+    url: Mapped[str] = mapped_column(Text)
+    auth_type: Mapped[str] = mapped_column(String(20), default='none')  # none | bearer | basic
+    encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    scrape_timeout_ms: Mapped[int] = mapped_column(Integer, default=5000)
+    # Label whose values identify individual routes, used for per-route drill-down.
+    # FastAPI instrumentator uses "handler"; Spring Boot uses "uri"; Django uses "view".
+    route_label: Mapped[str] = mapped_column(String(80), default='handler')
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class MetricCursor(Base):
+    """Last observed value of a cumulative counter, used to compute rates.
+
+    Prometheus counters only ever increase (and reset to zero when the process
+    restarts), so rps and error rate must be derived from the delta between two
+    scrapes. Without persisting the previous sample, a restart of the monitoring
+    worker would produce a bogus rate spike.
+    """
+    __tablename__ = 'metric_cursors'
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'))
+    resource_key: Mapped[str] = mapped_column(String(200))
+    metric_key: Mapped[str] = mapped_column(String(160))
+    last_value: Mapped[float] = mapped_column(Float, default=0)
+    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (PrimaryKeyConstraint('project_id', 'resource_key', 'metric_key'),)
 
 
 class MonitoringRule(Base):
@@ -130,6 +192,13 @@ class MonitoringRule(Base):
     recovery_for: Mapped[int] = mapped_column(Integer, default=2)
     severity: Mapped[str] = mapped_column(String(20), default='warning')
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Composite rule definition (P4). When set, the legacy scalar metric_key/
+    # operator/threshold fields are ignored and the rule fires only when EVERY
+    # condition in `conditions['all']` holds simultaneously. Structure:
+    #   {"all": [{"metric_key","resource_key","operator","threshold"}, ...],
+    #    "escalate_at": {"metric_key","resource_key","operator","threshold",
+    #                    "escalate_severity"} (optional)}
+    conditions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class MonitoringRuleState(Base):

@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down migrate api monitor agent rag test lint frontend
+.PHONY: infra-up infra-down migrate api monitor agent notification rag test lint frontend
 infra-up:
 	docker compose up -d
 infra-down:
@@ -13,6 +13,8 @@ agent:
 	uv run oncall-agent-worker
 rag:
 	uv run oncall-rag-worker
+notification:
+	uv run oncall-notification-worker
 test:
 	uv run pytest -q
 lint:

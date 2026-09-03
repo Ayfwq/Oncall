@@ -15,10 +15,35 @@ from oncall.infrastructure.db.models import (
     MonitoringRule,
     MonitoringRuleState,
     Notification,
+    Project,
 )
 from oncall.jobs.queue import JobQueue
 
 _SEVERITY_RANK={'info':0,'warning':1,'critical':2}
+_SEVERITY_LABEL={'info':'提示','warning':'警告','critical':'严重'}
+
+
+def _format_value(value:float)->str:
+    """Keep alert text readable: 0.1234 -> 0.123, 1234567.0 -> 1234567."""
+    if value!=value or value in (float('inf'),float('-inf')):return str(value)
+    if float(value).is_integer():return str(int(value))
+    return f'{value:.3f}'.rstrip('0').rstrip('.')
+
+
+def _alert_text(project_name:str,anomaly_type:str,resource_key:str,severity:str,value:float,now)->str:
+    """First-stage alert body. Intentionally short and factual: what broke, where,
+    how bad. Root-cause analysis arrives later as a separate diagnosis message."""
+    label=_SEVERITY_LABEL.get(severity,severity)
+    lines=[
+        f'**{anomaly_type}**',
+        '',
+        f'**级别**：{label}',
+        f'**项目**：{project_name or "-"}',
+        f'**资源**：{resource_key or "default"}',
+        f'**当前值**：{_format_value(value)}',
+        f'**时间**：{now.strftime("%Y-%m-%d %H:%M:%S")}',
+    ]
+    return '\n'.join(lines)
 
 
 def incident_fingerprint(project_id:UUID,rule_id:UUID,resource_key:str,anomaly_type:str)->str:
@@ -49,13 +74,49 @@ class IncidentService:
         await self.session.commit();await self.session.refresh(inc)
         if is_new:
             # Incident conversation is durable and becomes the Web/Feishu follow-up anchor.
-            project=await self.session.get(__import__('oncall.infrastructure.db.models',fromlist=['Project']).Project,project_id)
-            user_id=project.user_id
-            conv=await ConversationService(self.session).create(user_id,title=f'🚨 {anomaly_type}',project_id=project_id,incident_id=inc.id,type_='incident')
-            await JobQueue(self.session).enqueue('incident_investigate',{'incident_id':str(inc.id),'conversation_id':str(conv.id)},idempotency_key=f'incident_investigate:{inc.id}:initial',priority=20)
+            project=await self.session.get(Project,project_id)
+            project_name=getattr(project,'name','') or ''
+            user_id=project.user_id if project else None
+            if user_id is not None:
+                conv=await ConversationService(self.session).create(user_id,title=f'🚨 {anomaly_type}',project_id=project_id,incident_id=inc.id,type_='incident')
+                conversation_id=str(conv.id)
+            else:
+                conversation_id=None
+            self._queue_alert(inc,anomaly_type,resource_key,severity,value,now,project_name,kind='triggered',dedupe_suffix='triggered')
+            await self.session.commit()
+            if conversation_id:
+                await JobQueue(self.session).enqueue('incident_investigate',{'incident_id':str(inc.id),'conversation_id':conversation_id},idempotency_key=f'incident_investigate:{inc.id}:initial',priority=20)
         elif upgraded:
+            project=await self.session.get(Project,project_id)
+            self._queue_alert(inc,anomaly_type,resource_key,severity,value,now,getattr(project,'name','') or '',kind='escalated',dedupe_suffix=f'escalated:{severity}',prefix='🔺 **告警升级**\n\n')
+            await self.session.commit()
             await self._enqueue_reinvestigation(inc,f'upgrade:{severity}')
         return inc
+
+    def _queue_alert(self,inc:Incident,anomaly_type:str,resource_key:str,severity:str,value:float,now,
+                     project_name:str,kind:str,dedupe_suffix:str,prefix:str='')->None:
+        """Stage-one notification. Written to the outbox table (not sent inline) so a
+        Feishu outage can never lose or delay the alert, and so delivery is decoupled
+        from the Agent investigation which may take minutes.
+
+        Safe to call repeatedly: dedupe_key is unique, so a duplicate insert for the
+        same incident/stage is rejected by the database.
+        """
+        self.session.add(Notification(
+            incident_id=inc.id,
+            channel='feishu',
+            target='default',
+            payload={
+                'kind':kind,
+                'incident_id':str(inc.id),
+                'severity':severity,
+                'anomaly_type':anomaly_type,
+                'resource_key':resource_key,
+                'value':value,
+                'text':prefix+_alert_text(project_name,anomaly_type,resource_key,severity,value,now),
+            },
+            dedupe_key=f'incident:{inc.id}:{dedupe_suffix}',
+        ))
 
     async def touch_firing(self,incident:Incident,severity:str,value:float)->Incident:
         """Refresh an already firing Incident without re-running the Agent every poll."""

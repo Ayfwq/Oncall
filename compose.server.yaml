@@ -175,6 +175,23 @@ services:
           cpus: "1.0"
           memory: 1g
 
+  notification-worker:
+    image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
+    <<: *backend-environment
+    command: /opt/venv/bin/oncall-notification-worker
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env
+      - oncall_data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+        cpus: "0.5"
+        memory: 512m
+
   agent-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment

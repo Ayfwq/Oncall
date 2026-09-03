@@ -3,8 +3,8 @@ import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import type {
-  DatabaseProfile, DockerTarget, LogSource, MonitoringRule, ProcessTarget,
-  ProjectConfig, ServiceEndpoint, SnapshotDTO,
+  DatabaseProfile, DockerTarget, LogSource, MetricsSource, MonitoringRule, ProcessTarget,
+  ProjectConfig, Service, ServiceEndpoint, SnapshotDTO,
 } from '../types'
 
 const route = useRoute()
@@ -27,6 +27,8 @@ type FormLog = LogSource
 type FormDocker = DockerTarget
 type FormService = ServiceEndpoint
 type FormRule = MonitoringRule
+type FormMetricsSource = MetricsSource
+type FormServiceGroup = Service
 
 interface FormConfig {
   name: string
@@ -39,14 +41,16 @@ interface FormConfig {
   docker_targets: FormDocker[]
   database_profiles: FormDb[]
   service_endpoints: FormService[]
+  metrics_sources: FormMetricsSource[]
+  services: FormServiceGroup[]
   rules: FormRule[]
 }
 
-type TargetArrayKey = 'process_targets' | 'log_sources' | 'docker_targets' | 'database_profiles' | 'service_endpoints'
+type TargetArrayKey = 'process_targets' | 'log_sources' | 'docker_targets' | 'database_profiles' | 'service_endpoints' | 'metrics_sources'
 
 const cfg = ref<FormConfig>({
   name: '', description: '', enabled: true, timezone: 'Asia/Shanghai', poll_interval: 300,
-  process_targets: [], log_sources: [], docker_targets: [], database_profiles: [], service_endpoints: [], rules: [],
+  process_targets: [], log_sources: [], docker_targets: [], database_profiles: [], service_endpoints: [], metrics_sources: [], services: [], rules: [],
 })
 const quick = ref({ projectPath: '', healthUrl: '', logPath: '', pollInterval: 300 })
 
@@ -54,6 +58,7 @@ const TIMEZONES = ['Asia/Shanghai', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Hong_K
 const ENCODINGS = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'latin-1']
 const SSL_MODES = ['disable', 'prefer', 'require', 'verify-ca', 'verify-full']
 const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT']
+const AUTH_TYPES = ['none', 'bearer', 'basic']
 const OPERATORS = ['>', '<', '>=', '<=', '==', '!=']
 const SEVERITIES = ['warning', 'critical', 'info']
 
@@ -96,6 +101,14 @@ const METRIC_GROUPS = [
     { value: 'service.latency_ms', label: 'service.latency_ms · 响应延迟 ms' },
     { value: 'service.consecutive_failures', label: 'service.consecutive_failures · 连续失败次数' },
   ] },
+  { label: '白盒应用指标（需配置上方指标源，抓取 /metrics）', options: [
+    { value: 'app.up', label: 'app.up · 应用存活 1/0' },
+    { value: 'app.http.rps', label: 'app.http.rps · 每秒请求数' },
+    { value: 'app.http.error_rate', label: 'app.http.error_rate · 错误率 0~1' },
+    { value: 'app.http.p95_ms', label: 'app.http.p95_ms · P95 延迟 ms' },
+    { value: 'app.http.p99_ms', label: 'app.http.p99_ms · P99 延迟 ms' },
+    { value: 'app.http.availability', label: 'app.http.availability · 可用性 %' },
+  ] },
   { label: '日志（需配置上方日志绑定）', options: [
     { value: 'log.error.count_window', label: 'log.error.count_window · 窗口内错误条数' },
     { value: 'log.warning.count_window', label: 'log.warning.count_window · 窗口内警告条数' },
@@ -107,7 +120,7 @@ const METRIC_GROUPS = [
 const KNOWN_METRICS = new Set(METRIC_GROUPS.flatMap(group => group.options.map(option => option.value)))
 const METRIC_TARGETS: Record<string, TargetArrayKey> = {
   'process.': 'process_targets', 'log.': 'log_sources', 'container.': 'docker_targets',
-  'db.': 'database_profiles', 'service.': 'service_endpoints',
+  'db.': 'database_profiles', 'service.': 'service_endpoints', 'app.': 'metrics_sources',
 }
 function resourceOptions(metricKey: string): { value: string, label: string }[] {
   const targetField = Object.entries(METRIC_TARGETS).find(([prefix]) => metricKey?.startsWith(prefix))?.[1]
@@ -119,26 +132,41 @@ function resourceOptions(metricKey: string): { value: string, label: string }[] 
     ...rows.map(row => ({ value: String(row.id || labelOf(row)), label: `${labelOf(row)} · ${String(row.id || '未保存')}` })),
   ]
 }
+// Services are saved before targets can bind to them, so only list services
+// that already have an id. Empty value means "no service (project-level)".
+function serviceOptions(): { value: string, label: string }[] {
+  const saved = cfg.value.services.filter(s => s.id)
+  return [
+    { value: '', label: '不绑定（项目级）' },
+    ...saved.map(s => ({ value: s.id as string, label: s.name || '服务' })),
+  ]
+}
 const METRIC_RANGES: Record<string, [number, number]> = {
   'host.cpu.percent': [0, 100], 'host.memory.percent': [0, 100], 'host.disk.usage_percent': [0, 100],
   'process.target.alive': [0, 1], 'container.running': [0, 1], 'container.health': [-1, 1],
   'db.reachable': [0, 1], 'service.reachable': [0, 1], 'service.status_code': [0, 599],
+  'app.up': [0, 1], 'app.http.rps': [0, 100000], 'app.http.error_rate': [0, 1],
+  'app.http.p95_ms': [0, 600000], 'app.http.p99_ms': [0, 600000], 'app.http.availability': [0, 100],
 }
 
 // ---------- 行数据工厂（新建空行） ----------
-const blankProcess = (): FormProcess => ({ id: null, name: '进程', executable: '', cmdline_filters: '', cwd: '', port: null, enabled: true })
-const blankLog = (): FormLog => ({ id: null, path: '', encoding: 'utf-8', parser_config: {}, enabled: true })
-const blankDocker = (): FormDocker => ({ id: null, container_ref: '', enabled: true })
-const blankDb = (): FormDb => ({ id: null, type: 'postgresql', host: '127.0.0.1', port: 5432, database: '', username: '', password: '', sslmode: 'prefer', enabled: true })
-const blankService = (): FormService => ({ id: null, name: '健康检查', url: '', method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true })
+const blankProcess = (): FormProcess => ({ id: null, name: '进程', executable: '', cmdline_filters: '', cwd: '', port: null, service_id: null, enabled: true })
+const blankLog = (): FormLog => ({ id: null, path: '', encoding: 'utf-8', parser_config: {}, service_id: null, enabled: true })
+const blankDocker = (): FormDocker => ({ id: null, container_ref: '', service_id: null, enabled: true })
+const blankDb = (): FormDb => ({ id: null, type: 'postgresql', host: '127.0.0.1', port: 5432, database: '', username: '', password: '', sslmode: 'prefer', service_id: null, enabled: true })
+const blankService = (): FormService => ({ id: null, name: '健康检查', url: '', method: 'GET', expected_status: 200, timeout_ms: 3000, service_id: null, enabled: true })
+const blankMetricsSource = (): FormMetricsSource => ({ id: null, name: 'app', url: '', auth_type: 'none', token: '', scrape_timeout_ms: 5000, route_label: 'handler', service_id: null, enabled: true })
 const blankRule = (): FormRule => ({ id: null, metric_key: '', resource_key: 'default', operator: '>', trigger_threshold: null, trigger_for: 2, recovery_threshold: null, recovery_for: 2, severity: 'warning', enabled: true })
+const blankServiceGroup = (): FormServiceGroup => ({ id: null, name: '', description: '', enabled: true })
 
 // ---------- 行数据标准化（API JSON -> 表单行） ----------
-const normProcess = (x: ProcessTarget): FormProcess => ({ id: x.id ?? null, name: x.name || '进程', executable: x.executable ?? '', cmdline_filters: (x.cmdline_filters || []).join(', '), cwd: x.cwd ?? '', port: x.port ?? null, enabled: x.enabled !== false })
-const normLog = (x: LogSource): FormLog => ({ id: x.id ?? null, path: x.path ?? '', encoding: x.encoding || 'utf-8', parser_config: x.parser_config || {}, enabled: x.enabled !== false })
-const normDocker = (x: DockerTarget): FormDocker => ({ id: x.id ?? null, container_ref: x.container_ref ?? '', enabled: x.enabled !== false })
-const normDb = (x: DatabaseProfile): FormDb => ({ id: x.id ?? null, type: x.type || 'postgresql', host: x.host ?? '', port: x.port ?? 5432, database: x.database ?? '', username: x.username ?? '', password: '', sslmode: x.sslmode || 'prefer', enabled: x.enabled !== false })
-const normService = (x: ServiceEndpoint): FormService => ({ id: x.id ?? null, name: x.name || '健康检查', url: x.url ?? '', method: x.method || 'GET', expected_status: x.expected_status ?? 200, timeout_ms: x.timeout_ms ?? 3000, enabled: x.enabled !== false })
+const normProcess = (x: ProcessTarget): FormProcess => ({ id: x.id ?? null, name: x.name || '进程', executable: x.executable ?? '', cmdline_filters: (x.cmdline_filters || []).join(', '), cwd: x.cwd ?? '', port: x.port ?? null, service_id: x.service_id ?? null, enabled: x.enabled !== false })
+const normLog = (x: LogSource): FormLog => ({ id: x.id ?? null, path: x.path ?? '', encoding: x.encoding || 'utf-8', parser_config: x.parser_config || {}, service_id: x.service_id ?? null, enabled: x.enabled !== false })
+const normDocker = (x: DockerTarget): FormDocker => ({ id: x.id ?? null, container_ref: x.container_ref ?? '', service_id: x.service_id ?? null, enabled: x.enabled !== false })
+const normDb = (x: DatabaseProfile): FormDb => ({ id: x.id ?? null, type: x.type || 'postgresql', host: x.host ?? '', port: x.port ?? 5432, database: x.database ?? '', username: x.username ?? '', password: '', sslmode: x.sslmode || 'prefer', service_id: x.service_id ?? null, enabled: x.enabled !== false })
+const normService = (x: ServiceEndpoint): FormService => ({ id: x.id ?? null, name: x.name || '健康检查', url: x.url ?? '', method: x.method || 'GET', expected_status: x.expected_status ?? 200, timeout_ms: x.timeout_ms ?? 3000, service_id: x.service_id ?? null, enabled: x.enabled !== false })
+const normMetricsSource = (x: MetricsSource): FormMetricsSource => ({ id: x.id ?? null, name: x.name || 'app', url: x.url ?? '', auth_type: (x.auth_type || 'none') as FormMetricsSource['auth_type'], token: '', scrape_timeout_ms: x.scrape_timeout_ms ?? 5000, route_label: x.route_label || 'handler', service_id: x.service_id ?? null, enabled: x.enabled !== false })
+const normServiceGroup = (x: Service): FormServiceGroup => ({ id: x.id ?? null, name: x.name || '', description: x.description || '', enabled: x.enabled !== false })
 const normRule = (x: MonitoringRule): FormRule => ({ id: x.id ?? null, metric_key: x.metric_key ?? '', resource_key: x.resource_key || 'default', operator: x.operator || '>', trigger_threshold: x.trigger_threshold ?? null, trigger_for: x.trigger_for ?? 2, recovery_threshold: x.recovery_threshold ?? null, recovery_for: x.recovery_for ?? 2, severity: x.severity || 'warning', enabled: x.enabled !== false })
 
 function errorMessage(error: unknown): string {
@@ -166,6 +194,8 @@ function applyData(data: ProjectConfig) {
     docker_targets: (data?.docker_targets || []).map(normDocker),
     database_profiles: (data?.database_profiles || []).map(normDb),
     service_endpoints: (data?.service_endpoints || []).map(normService),
+    metrics_sources: (data?.metrics_sources || []).map(normMetricsSource),
+    services: (data?.services || []).map(normServiceGroup),
     rules: (data?.rules || []).map(normRule),
   }
 }
@@ -184,13 +214,13 @@ function quickDefaults(): boolean {
     quick.value.logPath = `${quick.value.projectPath.replace(/[\\/]$/, '')}\\backend\\logs\\auto_geo_${today}.log`
   }
   if (quick.value.projectPath && !cfg.value.process_targets.some(x => x.cwd === quick.value.projectPath)) {
-    cfg.value.process_targets.push({ id: null, name: `${name} 后端`, executable: 'python', cmdline_filters: 'backend.main', cwd: quick.value.projectPath, port: 8001, enabled: true })
+    cfg.value.process_targets.push({ id: null, name: `${name} 后端`, executable: 'python', cmdline_filters: 'backend.main', cwd: quick.value.projectPath, port: 8001, service_id: null, enabled: true })
   }
   if (quick.value.healthUrl && !cfg.value.service_endpoints.some(x => x.url === quick.value.healthUrl)) {
-    cfg.value.service_endpoints.push({ id: null, name: `${name} 健康检查`, url: quick.value.healthUrl, method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true })
+    cfg.value.service_endpoints.push({ id: null, name: `${name} 健康检查`, url: quick.value.healthUrl, method: 'GET', expected_status: 200, timeout_ms: 3000, service_id: null, enabled: true })
   }
   if (quick.value.logPath && !cfg.value.log_sources.some(x => x.path === quick.value.logPath)) {
-    cfg.value.log_sources.push({ id: null, path: quick.value.logPath, encoding: 'utf-8', parser_config: {}, enabled: true })
+    cfg.value.log_sources.push({ id: null, path: quick.value.logPath, encoding: 'utf-8', parser_config: {}, service_id: null, enabled: true })
   }
   const addRule = (metric_key: string, operator: string, trigger_threshold: number, recovery_threshold: number, severity = 'warning') => {
     if (!cfg.value.rules.some(x => x.metric_key === metric_key && x.enabled)) {
@@ -250,6 +280,8 @@ interface PayloadLog extends PayloadBase, Omit<LogSource, 'id'> {}
 interface PayloadDocker extends PayloadBase, Omit<DockerTarget, 'id'> {}
 interface PayloadDb extends PayloadBase, Omit<DatabaseProfile, 'id'> {}
 interface PayloadService extends PayloadBase, Omit<ServiceEndpoint, 'id'> {}
+interface PayloadMetricsSource extends PayloadBase, Omit<MetricsSource, 'id'> {}
+interface PayloadServiceGroup extends PayloadBase, Omit<Service, 'id'> {}
 interface PayloadRule extends PayloadBase, Omit<MonitoringRule, 'id'> {}
 
 interface ProjectUpdatePayload {
@@ -263,6 +295,8 @@ interface ProjectUpdatePayload {
   docker_targets: PayloadDocker[]
   database_profiles: PayloadDb[]
   service_endpoints: PayloadService[]
+  metrics_sources: PayloadMetricsSource[]
+  services: PayloadServiceGroup[]
   rules: PayloadRule[]
 }
 
@@ -276,23 +310,31 @@ function toPayload(): ProjectUpdatePayload {
     timezone: c.timezone || 'Asia/Shanghai', poll_interval: int(c.poll_interval, 300),
     process_targets: c.process_targets.map((x): PayloadProcess => ({
       id: x.id ?? undefined, name: x.name || '进程', executable: x.executable || null,
-      cmdline_filters: split(x.cmdline_filters), cwd: x.cwd || null, port: num(x.port), enabled: !!x.enabled,
+      cmdline_filters: split(x.cmdline_filters), cwd: x.cwd || null, port: num(x.port), service_id: x.service_id ?? null, enabled: !!x.enabled,
     })),
     log_sources: c.log_sources.map((x): PayloadLog => ({
       id: x.id ?? undefined, path: x.path, encoding: x.encoding || 'utf-8',
-      parser_config: x.parser_config || {}, enabled: !!x.enabled,
+      parser_config: x.parser_config || {}, service_id: x.service_id ?? null, enabled: !!x.enabled,
     })),
     docker_targets: c.docker_targets.map((x): PayloadDocker => ({
-      id: x.id ?? undefined, container_ref: x.container_ref, enabled: !!x.enabled,
+      id: x.id ?? undefined, container_ref: x.container_ref, service_id: x.service_id ?? null, enabled: !!x.enabled,
     })),
     database_profiles: c.database_profiles.map((x): PayloadDb => ({
       id: x.id ?? undefined, type: x.type || 'postgresql', host: x.host || '127.0.0.1',
       port: int(x.port, 5432), database: x.database, username: x.username,
-      password: x.password ? String(x.password) : null, sslmode: x.sslmode || 'prefer', enabled: !!x.enabled,
+      password: x.password ? String(x.password) : null, sslmode: x.sslmode || 'prefer', service_id: x.service_id ?? null, enabled: !!x.enabled,
     })),
     service_endpoints: c.service_endpoints.map((x): PayloadService => ({
       id: x.id ?? undefined, name: x.name || '健康检查', url: x.url, method: x.method || 'GET',
-      expected_status: int(x.expected_status, 200), timeout_ms: int(x.timeout_ms, 3000), enabled: !!x.enabled,
+      expected_status: int(x.expected_status, 200), timeout_ms: int(x.timeout_ms, 3000), service_id: x.service_id ?? null, enabled: !!x.enabled,
+    })),
+    metrics_sources: c.metrics_sources.map((x): PayloadMetricsSource => ({
+      id: x.id ?? undefined, name: x.name || 'app', url: x.url, auth_type: x.auth_type || 'none',
+      token: x.token ? String(x.token) : null, scrape_timeout_ms: int(x.scrape_timeout_ms, 5000),
+      route_label: x.route_label || 'handler', service_id: x.service_id ?? null, enabled: !!x.enabled,
+    })),
+    services: c.services.map((x): PayloadServiceGroup => ({
+      id: x.id ?? undefined, name: x.name, description: x.description || '', enabled: !!x.enabled,
     })),
     rules: c.rules.map((x): PayloadRule => ({
       id: x.id ?? undefined, metric_key: x.metric_key, resource_key: x.resource_key || 'default',
@@ -319,6 +361,14 @@ function validate(): string[] {
     if (!ENCODINGS.includes(x.encoding)) errs.push(`日志绑定 #${i + 1}：不支持的文件编码`)
   })
   cfg.value.docker_targets.forEach((x: FormDocker, i: number) => { if (!x.container_ref?.trim()) errs.push(`Docker 绑定 #${i + 1}：容器名/ID 必填`) })
+  cfg.value.metrics_sources.forEach((x: FormMetricsSource, i: number) => {
+    if (!x.name?.trim()) errs.push(`指标源 #${i + 1}：名称必填`)
+    if (!x.url?.trim()) errs.push(`指标源 #${i + 1}：/metrics 地址必填`)
+    else { try { const u = new URL(x.url); if (!['http:', 'https:'].includes(u.protocol) || !u.hostname) throw new Error() } catch { errs.push(`指标源 #${i + 1}：必须是完整的 http(s) 地址`) } }
+    if (!AUTH_TYPES.includes(x.auth_type)) errs.push(`指标源 #${i + 1}：不支持的鉴权方式`)
+    if (!Number.isInteger(Number(x.scrape_timeout_ms)) || Number(x.scrape_timeout_ms) < 100 || Number(x.scrape_timeout_ms) > 60000) errs.push(`指标源 #${i + 1}：抓取超时范围为 100～60000 毫秒`)
+    if (!x.route_label?.trim()) errs.push(`指标源 #${i + 1}：路由标签名必填`)
+  })
   cfg.value.database_profiles.forEach((x: FormDb, i: number) => {
     if (!x.host?.trim()) errs.push(`数据库 #${i + 1}：主机必填`)
     if (!x.database?.trim()) errs.push(`数据库 #${i + 1}：库名必填`)
@@ -333,6 +383,9 @@ function validate(): string[] {
     if (!HTTP_METHODS.includes(x.method)) errs.push(`HTTP 服务 #${i + 1}：不支持的请求方式`)
     if (!Number.isInteger(Number(x.expected_status)) || Number(x.expected_status) < 100 || Number(x.expected_status) > 599) errs.push(`HTTP 服务 #${i + 1}：期望状态码范围为 100～599`)
     if (!Number.isInteger(Number(x.timeout_ms)) || Number(x.timeout_ms) < 100 || Number(x.timeout_ms) > 60000) errs.push(`HTTP 服务 #${i + 1}：超时范围为 100～60000 毫秒`)
+  })
+  cfg.value.services.forEach((x: FormServiceGroup, i: number) => {
+    if (!x.name?.trim()) errs.push(`服务 #${i + 1}：名称必填`)
   })
   const seenRules = new Set<string>()
   cfg.value.rules.forEach((x: FormRule, i: number) => {
@@ -397,6 +450,37 @@ function applyJson() {
   try { applyData(JSON.parse(jsonText.value)); jsonError.value = ''; setMessage('已应用 JSON 到表单（记得点「保存配置」）') }
   catch (e) { jsonError.value = 'JSON 格式错误：' + errorMessage(e) }
 }
+
+// ---------- 白盒指标自动探测（P2） ----------
+const discovering = ref(false)
+const discoverResult = ref<any>(null)
+const discoverForm = ref({ url: '', auth_type: 'none', token: '', route_label: 'handler', scrape_timeout_ms: 5000 })
+async function discoverMetrics() {
+  discovering.value = true
+  discoverResult.value = null
+  try {
+    const r = await api<Record<string, unknown>>(`/projects/${id}/metrics/discover`, { method: 'POST', body: JSON.stringify(discoverForm.value) })
+    discoverResult.value = r
+    if (!r?.scrape_ok) setMessage('探测失败：' + String(r?.error || '无法抓取该地址'), true)
+    else setMessage('探测成功：识别为 ' + String(r.framework_label || r.framework) + '，建议添加 ' + ((r.suggested_rules as unknown[])?.length || 0) + ' 条规则')
+  } catch (e) { setMessage('探测失败：' + errorMessage(e), true) }
+  finally { discovering.value = false }
+}
+async function applyDiscovered() {
+  const r = discoverResult.value
+  if (!r?.suggested_source) return
+  saving.value = true
+  try {
+    const res = await api<{ added_metrics_sources: number, added_rules: number }>(`/projects/${id}/metrics/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ source: r.suggested_source, rules: r.suggested_rules || [] }),
+    })
+    setMessage(`已应用：${res.added_metrics_sources} 个指标源、${res.added_rules} 条规则（已自动去重）`)
+    await load()
+  } catch (e) { setMessage('应用失败：' + errorMessage(e), true) }
+  finally { saving.value = false }
+}
+function addManualMetricsSource() { cfg.value.metrics_sources.push(blankMetricsSource()) }
 
 // ---------- 采集测试 / 快照 ----------
 async function test() {
@@ -497,6 +581,31 @@ onMounted(load)
             <el-form-item label="描述（可选）"><el-input v-model="cfg.description" placeholder="给这个项目写一句说明" /></el-form-item>
           </div>
 
+          <!-- 服务分组 -->
+          <div class="card form-card">
+            <div class="sec-head">
+              <div>
+                <h3>服务分组</h3>
+                <p class="muted sec-desc">把进程、容器、数据库、HTTP 服务、指标源归入一个「服务」，告警与事件就能按服务聚合，一眼看清是哪个业务出了问题</p>
+              </div>
+              <el-button type="primary" plain size="small" @click="cfg.services.push(blankServiceGroup())">＋ 添加服务</el-button>
+            </div>
+            <p v-if="!cfg.services.length" class="empty-hint">未配置任何服务分组。点击「添加服务」，给一组监控目标起个名字（如「结算服务」）。</p>
+            <div v-for="(row, i) in cfg.services" :key="i" class="row-card">
+              <div class="row-head">
+                <b>#{{ Number(i) + 1 }} {{ row.name || '服务' }}</b>
+                <span class="grow"></span>
+                <el-switch v-model="row.enabled" active-text="启用" />
+                <el-button text type="danger" @click="cfg.services.splice(i, 1)">删除</el-button>
+              </div>
+              <div class="field-grid">
+                <el-form-item label="服务名称（必填）"><el-input v-model="row.name" placeholder="例如：结算服务" /></el-form-item>
+                <el-form-item label="说明（可选）" class="span-2"><el-input v-model="row.description" placeholder="这个服务负责什么" /></el-form-item>
+              </div>
+            </div>
+            <p v-if="cfg.services.length" class="muted" style="font-size: 12px; margin-top: 6px">提示：保存本页后，下方各监控目标的「所属服务」下拉里即可选择这些服务。</p>
+          </div>
+
           <!-- 进程绑定 -->
           <div class="card form-card">
             <div class="sec-head">
@@ -520,6 +629,11 @@ onMounted(load)
                 <el-form-item label="命令行关键字（逗号分隔）"><el-input v-model="row.cmdline_filters" placeholder="例如：uvicorn, 8000" /></el-form-item>
                 <el-form-item label="工作目录（可留空）"><el-input v-model="row.cwd" placeholder="例如：D:\app" /></el-form-item>
                 <el-form-item label="端口（可留空）"><el-input-number v-model="row.port" :min="1" :max="65535" style="width: 100%" /></el-form-item>
+                <el-form-item label="所属服务">
+                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
+                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
+                </el-form-item>
               </div>
             </div>
           </div>
@@ -548,6 +662,11 @@ onMounted(load)
                     <el-option v-for="e in ENCODINGS" :key="e" :label="e" :value="e" />
                   </el-select>
                 </el-form-item>
+                <el-form-item label="所属服务">
+                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
+                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
+                </el-form-item>
               </div>
             </div>
           </div>
@@ -571,6 +690,11 @@ onMounted(load)
               </div>
               <div class="field-grid">
                 <el-form-item label="容器名 / 容器 ID（必填）" class="span-2"><el-input v-model="row.container_ref" placeholder="例如：postgres" /></el-form-item>
+                <el-form-item label="所属服务">
+                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
+                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
+                </el-form-item>
               </div>
             </div>
           </div>
@@ -604,6 +728,11 @@ onMounted(load)
                     <el-option v-for="s in SSL_MODES" :key="s" :label="s" :value="s" />
                   </el-select>
                 </el-form-item>
+                <el-form-item label="所属服务">
+                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
+                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
+                </el-form-item>
               </div>
             </div>
           </div>
@@ -635,6 +764,90 @@ onMounted(load)
                 </el-form-item>
                 <el-form-item label="期望状态码"><el-input-number v-model="row.expected_status" :min="100" :max="599" style="width: 100%" /></el-form-item>
                 <el-form-item label="超时（毫秒）"><el-input-number v-model="row.timeout_ms" :min="100" :max="60000" style="width: 100%" /></el-form-item>
+                <el-form-item label="所属服务">
+                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
+                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
+                </el-form-item>
+              </div>
+            </div>
+          </div>
+
+          <!-- 白盒应用指标（Prometheus /metrics） -->
+          <div class="card form-card">
+            <div class="sec-head">
+              <div>
+                <h3>白盒应用指标（Prometheus /metrics）</h3>
+                <p class="muted sec-desc">抓取应用自身暴露的指标（请求速率、错误率、延迟分位），比外部探活更贴近真实用户体验。支持 FastAPI / Starlette / Django / Flask 等主流埋点库。</p>
+              </div>
+              <el-button type="primary" plain size="small" @click="addManualMetricsSource()">＋ 手动添加指标源</el-button>
+            </div>
+
+            <div class="discover-box">
+              <div class="discover-form">
+                <el-form-item label="/metrics 地址" class="span-2">
+                  <el-input v-model="discoverForm.url" placeholder="例如：http://127.0.0.1:8000/metrics" />
+                </el-form-item>
+                <el-form-item label="鉴权方式">
+                  <el-select v-model="discoverForm.auth_type" style="width: 100%">
+                    <el-option v-for="a in AUTH_TYPES" :key="a" :label="a" :value="a" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="Token" v-if="discoverForm.auth_type !== 'none'">
+                  <el-input v-model="discoverForm.token" placeholder="Bearer / Basic 凭证" />
+                </el-form-item>
+                <el-form-item label="路由标签">
+                  <el-input v-model="discoverForm.route_label" placeholder="handler / uri / view" />
+                </el-form-item>
+                <el-form-item label="抓取超时(ms)">
+                  <el-input-number v-model="discoverForm.scrape_timeout_ms" :min="100" :max="60000" style="width: 100%" />
+                </el-form-item>
+              </div>
+              <div class="discover-actions">
+                <el-button type="primary" :loading="discovering" @click="discoverMetrics()">自动探测</el-button>
+                <span class="muted">填入地址后一键识别框架并生成建议规则</span>
+              </div>
+
+              <div v-if="discoverResult" class="discover-result">
+                <template v-if="discoverResult.scrape_ok">
+                  <p><b>识别框架：</b>{{ discoverResult.framework_label }}</p>
+                  <p v-if="(discoverResult.discovered_routes || []).length"><b>已发现路由：</b>{{ discoverResult.discovered_routes.join('、') }}</p>
+                  <p><b>建议规则（{{ (discoverResult.suggested_rules || []).length }} 条）：</b></p>
+                  <ul class="rule-preview">
+                    <li v-for="(r, ri) in discoverResult.suggested_rules" :key="ri">
+                      {{ r.metric_key }} · {{ r.resource_key }} · {{ r.operator }} {{ r.trigger_threshold }}（恢复 {{ r.recovery_threshold }}） · {{ r.severity }}
+                    </li>
+                  </ul>
+                  <el-button type="success" size="small" @click="applyDiscovered()">应用建议</el-button>
+                </template>
+                <p v-else class="error-text">探测失败：{{ discoverResult.error }}</p>
+              </div>
+            </div>
+
+            <p v-if="!cfg.metrics_sources.length" class="empty-hint">尚未配置指标源。可点「自动探测」或「手动添加指标源」。</p>
+            <div v-for="(row, i) in cfg.metrics_sources" :key="i" class="row-card">
+              <div class="row-head">
+                <b>#{{ Number(i) + 1 }} {{ row.name || '指标源' }}</b>
+                <span class="grow"></span>
+                <el-switch v-model="row.enabled" active-text="启用" />
+                <el-button text type="danger" @click="cfg.metrics_sources.splice(i, 1)">删除</el-button>
+              </div>
+              <div class="field-grid">
+                <el-form-item label="名称"><el-input v-model="row.name" placeholder="例如：app" /></el-form-item>
+                <el-form-item label="/metrics 地址（必填）" class="span-2"><el-input v-model="row.url" placeholder="例如：http://127.0.0.1:8000/metrics" /></el-form-item>
+                <el-form-item label="鉴权方式">
+                  <el-select v-model="row.auth_type" style="width: 100%">
+                    <el-option v-for="a in AUTH_TYPES" :key="a" :label="a" :value="a" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="Token" v-if="row.auth_type !== 'none'"><el-input v-model="row.token" placeholder="Bearer / Basic 凭证" /></el-form-item>
+                <el-form-item label="路由标签"><el-input v-model="row.route_label" placeholder="handler" /></el-form-item>
+                <el-form-item label="抓取超时(ms)"><el-input-number v-model="row.scrape_timeout_ms" :min="100" :max="60000" style="width: 100%" /></el-form-item>
+                <el-form-item label="所属服务">
+                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
+                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
+                </el-form-item>
               </div>
             </div>
           </div>
@@ -760,8 +973,18 @@ onMounted(load)
 }
 .collector-chip.ok { background: #e6f7ec; color: #17823f; }
 .collector-chip.err { background: #fdeceb; color: #c22c34; }
+.discover-box { background: var(--accent-soft); border-radius: var(--r-sm); padding: 14px; margin-bottom: 14px; }
+.discover-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); column-gap: 14px; row-gap: 0; }
+.discover-form .span-2 { grid-column: span 2; }
+.discover-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 4px; }
+.discover-result { margin-top: 10px; border-top: 1px solid var(--border, #eee); padding-top: 10px; font-size: 13px; }
+.discover-result p { margin: 4px 0; }
+.rule-preview { margin: 6px 0 10px; padding-left: 18px; max-height: 220px; overflow: auto; }
+.rule-preview li { margin: 2px 0; color: var(--text-2); }
+.error-text { color: #c22c34; }
 @media (max-width: 760px) {
   .quick-grid { grid-template-columns: 1fr; }
   .quick-grid .span-2 { grid-column: auto; }
+  .discover-form .span-2 { grid-column: auto; }
 }
 </style>
