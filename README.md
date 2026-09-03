@@ -1,6 +1,6 @@
-# Oncall AI SRE V1.0
+# Oncall AI SRE
 
-Oncall 是一个本地优先的 AI SRE / 智能 Oncall 平台，按 2026-08-18 定稿的架构基线实现。当前为 **V1.0 Release**：真实 LLM、RAG、Monitoring、PostgreSQL、Milvus、前端、流式输出、上下文压缩与重启持久化均已在本地真实环境验收通过（见 `RELEASE_VALIDATION.md`）。真实飞书与 AutoGEO 实机采集依赖外部凭证/应用，属显式阻塞项（见 `IMPLEMENTATION_STATUS.md`）。
+Oncall 是一个本地优先的 AI SRE / 智能 Oncall 平台，按 2026-08-18 定稿的架构基线实现。当前实现包含真实 LLM、RAG、Monitoring、PostgreSQL、Milvus、前端、流式输出、上下文压缩与重启持久化（见 `RELEASE_VALIDATION.md`）。真实飞书与 AutoGEO 实机采集依赖外部凭证/应用，属显式阻塞项（见 `IMPLEMENTATION_STATUS.md`）。
 
 > 验收口径：本仓库只把「真实执行过」的项记为通过；未执行的外部联调（飞书、AutoGEO、生产 Embedding/Rerank）单列标注，不做推断。
 
@@ -8,13 +8,13 @@ Oncall 是一个本地优先的 AI SRE / 智能 Oncall 平台，按 2026-08-18 �
 
 - **模块化单体 + 多运行进程**：`api` / `monitor-worker` / `agent-worker` / `rag-worker`。
 - **统一 OncallAgent**：LangGraph StateGraph；`CHAT / INVESTIGATE / FOLLOW_UP / DEEP` 共用同一套 RAG、Tools、Memory 和模型网关。
-- **确定性 Monitoring Engine**：32 个 V1 signal、6 类 Integration、滞回 Detector、Incident 生命周期、PostgreSQL 持久规则状态。
+- **确定性 Monitoring Engine**：32 个基线 signal、6 类 Integration、滞回 Detector、Incident 生命周期、PostgreSQL 持久规则状态。
 - **8 个只读 Agent Tool**：Host / History / Process / Logs / Docker / PostgreSQL / HTTP / Knowledge。
 - **完整 RAG 主链**：Docling → Canonical JSON/Markdown → HybridChunker → Dense + Milvus BM25 → RRF → Rerank → Citation；Milvus 只是可重建索引。
 - **持久化**：PostgreSQL 保存业务事实、会话、消息、Incident、Evidence、Diagnosis、Tool/RAG Trace、durable jobs/outbox；LangGraph 使用 PostgreSQL checkpointer。
 - **飞书**：自建应用机器人 + WebSocket 入站 + PostgreSQL Outbox 出站；主动 Incident 报告可绑定 Incident Conversation，用户回复后进入 `FOLLOW_UP`。
 - **Web**：Vue 3 + Vite + TypeScript，ChatGPT 式多会话；服务重启后由 PostgreSQL 恢复历史会话。
-- **V1 安全边界**：只读调查，不提供 restart/kill/write-SQL 等破坏性 Action Tool；未来动作必须显式人工确认。
+- **安全边界**：只读调查，不提供 restart/kill/write-SQL 等破坏性 Action Tool；未来动作必须显式人工确认。
 
 ## 运行拓扑
 
@@ -149,13 +149,13 @@ ONCALL_FEISHU_DEFAULT_RECEIVE_ID=<chat-or-open-id>
 - `PROJECT_CONFIGURATION_PLAN.md`：项目创建、配置校验与后续版本化规划。
 - `examples/autogeo-project.json`：AutoGEO 示例 Project 配置。
 
-## 不可违反的 V1 规则
+## 不可违反的运行规则
 
 1. Monitoring 基础检测必须确定性执行，不能让 LLM 每 5 分钟判断是否异常。
 2. PostgreSQL 是业务事实源；Milvus 是可重建 RAG 索引。
 3. Conversation 与 Incident Memory 必须独立持久化；LangGraph checkpoint 不是业务事实库。
 4. Agent 结论必须基于 Evidence；RAG 文档不是实时系统事实。
-5. V1 不允许 destructive tool；未来 Action Tool 必须分级并人工确认。
+5. 当前实现不允许 destructive tool；未来 Action Tool 必须分级并人工确认。
 6. Project scope 由 runtime 注入 Tool，不能让模型任意指定目标 Project。
 7. 真实 Release 必须通过 `LOCAL_HANDOFF.md` 的目标机器验收门禁。
 

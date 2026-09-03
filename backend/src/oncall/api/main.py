@@ -442,9 +442,9 @@ async def dev_recover_incident(iid:str,user=Depends(current_user),db:AsyncSessio
 async def settings_readiness(user=Depends(current_user)):
     return {
         'environment':s.env,
-        'llm':{'provider':s.model_provider,'model':s.model_name,'configured':s.model_provider=='mock' or bool(s.model_api_key),'development_fallback':s.model_provider=='mock'},
-        'embedding':{'model':s.embedding_model,'configured':bool(s.embedding_api_key),'development_fallback':not bool(s.embedding_api_key)},
-        'rerank':{'model':s.rerank_model or None,'configured':bool(s.rerank_base_url and s.rerank_api_key and s.rerank_model),'development_fallback':not bool(s.rerank_base_url and s.rerank_api_key and s.rerank_model)},
+        'llm':{'provider':s.model_provider,'model':s.model_name,'configured':s.model_provider=='mock' or bool(s.model_api_key)},
+        'embedding':{'model':s.embedding_model,'configured':bool(s.embedding_base_url and s.embedding_api_key)},
+        'rerank':{'model':s.rerank_model or None,'configured':bool(s.rerank_base_url and s.rerank_api_key and s.rerank_model)},
         # A default receive_id is optional: inbound messages auto-bind the
         # latest Feishu chat for proactive delivery. Requiring it here made a
         # working bot appear unconfigured in the Settings page.

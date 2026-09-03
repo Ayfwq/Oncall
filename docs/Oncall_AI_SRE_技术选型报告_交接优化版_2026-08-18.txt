@@ -366,7 +366,7 @@ Postgres migration + 服务重启恢复 E2E
 当前构建环境无法访问 PyPI/npm registry，不能生成真实 uv.lock/package-lock.json；禁止伪造锁文件。目标机器首次成功安装后必须生成。
 真实 LLM API、Embedding、Rerank、飞书 Secret 只放目标机器 .env，不写入源码或文档。
 Milvus collection 名包含 knowledge index version + embedding dimension。Embedding 模型、维度或 schema 语义变化时创建新索引并从 canonical source 重建，不自动 drop 旧索引。
-开发 Hash Embedding/lexical rerank 仅用于无 Key 的工程联调，不作为生产检索质量承诺。
+Embedding 与 Rerank 统一使用配置的远端 API；无远端配置时不启动 RAG 检索，避免隐式回退到本地 CPU 实现。
 V1 继续维持 read-only Agent；任何 restart/kill/write-SQL 等 Action Tool 必须进入后续 ADR + human approval。
 16.2 本地 Release Gate
 docker compose up -duv sync --all-extrasuv run alembic -c backend/alembic.ini upgrade headuv run oncall-init-admincd frontend; npm install; npm run buildcd ...\scripts\validate-local.ps1.\scripts\start-all.ps1.\scripts\e2e-local.ps1.\scripts\validate-local.ps1 -External

@@ -74,7 +74,7 @@ class MockProvider(ModelProvider):
                 args={'query':f"{anomaly} 运维处理方案"} if name=='search_knowledge' else {'level':'error','limit':80} if name=='query_logs' else {'limit':30} if name=='query_processes' else {}
                 return AgentDecision(action='tool',rationale=f'收集 {name} 证据',tool_name=name,tool_args=args)
         evidence=context.get('evidence',[]);summaries=[x.get('summary','') for x in evidence if x.get('summary')]
-        report=DiagnosisReport(summary=f"检测到 {anomaly or '运行异常'}",severity=incident.get('severity','warning'),affected_service=incident.get('project_name'),symptoms=[incident.get('summary','异常触发')],evidence=summaries[-8:],root_cause='当前证据显示存在运行异常；Mock 模型不会虚构更具体根因，配置真实 LLM 后将基于 Evidence 进行因果判断。',confidence=0.55 if summaries else 0.2,remediation=['按照报告中的 Evidence 逐项确认异常资源','参考知识库命中的 SOP 进行人工处置','V1 不自动执行有副作用操作'],verification=['重新检查触发指标已越过 recovery threshold','确认服务健康检查恢复并持续两个监测周期正常'],risks=['执行任何重启/终止进程前先确认业务任务状态'],knowledge_refs=context.get('knowledge_refs',[]),unknowns=[] if summaries else ['缺少有效工具证据'])
+        report=DiagnosisReport(summary=f"检测到 {anomaly or '运行异常'}",severity=incident.get('severity','warning'),affected_service=incident.get('project_name'),symptoms=[incident.get('summary','异常触发')],evidence=summaries[-8:],root_cause='当前证据显示存在运行异常；Mock 模型不会虚构更具体根因，配置真实 LLM 后将基于 Evidence 进行因果判断。',confidence=0.55 if summaries else 0.2,remediation=['按照报告中的 Evidence 逐项确认异常资源','参考知识库命中的 SOP 进行人工处置','当前不自动执行有副作用操作'],verification=['重新检查触发指标已越过 recovery threshold','确认服务健康检查恢复并持续两个监测周期正常'],risks=['执行任何重启/终止进程前先确认业务任务状态'],knowledge_refs=context.get('knowledge_refs',[]),unknowns=[] if summaries else ['缺少有效工具证据'])
         return AgentDecision(action='final',diagnosis=report)
 
 

@@ -224,14 +224,13 @@ export interface ComponentReadiness {
   provider: string
   model: string | null
   configured: boolean
-  development_fallback?: boolean
 }
 
 export interface Readiness {
   environment: string
   llm: ComponentReadiness
-  embedding: { model: string; configured: boolean; development_fallback: boolean }
-  rerank: { model: string | null; configured: boolean; development_fallback: boolean }
+  embedding: { model: string; configured: boolean }
+  rerank: { model: string | null; configured: boolean }
   feishu: {
     enabled: boolean
     configured: boolean

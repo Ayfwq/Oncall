@@ -1,7 +1,7 @@
 """Shared fixtures for the RAG integration test suite.
 
 These tests exercise the full RAG pipeline against the real local dev stack
-(PostgreSQL + Milvus + docling + hash embeddings).  They are skipped
+(PostgreSQL + Milvus + docling + remote embedding/reranker APIs).  They are skipped
 automatically when PostgreSQL or Milvus is unreachable, and every run ingests
 the three SOP fixtures under a dedicated throwaway user so the suite is
 self-contained and idempotent (upload is deduplicated by checksum).

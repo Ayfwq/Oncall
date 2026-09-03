@@ -1,4 +1,4 @@
-# Oncall V1.0 Release 实现状态矩阵
+# Oncall 实现状态矩阵
 
 生成日期：2026-08-19
 
@@ -26,7 +26,7 @@
 | ToolRun / RetrievalTrace | DONE（Real E2E） | trace 持久化 + RAG citation refs |
 | Docling Ingestion | DONE（Real E2E） | 3 份 .md 真实解析入库 |
 | Milvus Dense + BM25 | DONE（Real E2E） | collection 33 entities + BM25 函数 + drop→reindex 恢复 |
-| RRF / fallback rerank | DONE（Real E2E） | RRF 单元 + 词法 rerank + 7/7 章节命中 |
+| RRF + remote rerank | DONE（Real API） | RRF 单元 + 硅基流动 rerank API 通过 |
 | Knowledge API | DONE（Real E2E） | 上传→Job→Index→检索→删除 E2E |
 | Feishu WebSocket 入站 | DONE（Code + Offline） | parser/contract + import OK |
 | Feishu Outbox 出站 | DONE（Code + Offline） | retry/cooldown/message-link 单测 |
@@ -40,17 +40,17 @@
 | Real LLM E2E | DONE（Real E2E） | 见 RELEASE_VALIDATION.md |
 | Real Feishu E2E | **BLOCKED** | 无飞书 App ID/Secret/receive_id |
 | AutoGEO 实机采集 | **BLOCKED** | 本机不存在 `D:\GEO` 应用 |
-| 生产 Embedding / Rerank | **BLOCKED** | 当前 LLM 端点无 embedding/rerank 模型；RAG 走 hash fallback + BM25 + 词法 rerank |
+| 生产 Embedding / Rerank | DONE（Real API） | 硅基流动 BGE-M3 + bge-reranker-v2-m3 API 通过；待服务启动后重建唯一索引 |
 
 ## 结论
 
-所有在**本仓库/本机可单方面完成**的实现与验收均已 DONE；剩余 3 项 BLOCKED 全部依赖外部条件（飞书凭证、AutoGEO 应用、带 embedding/rerank 能力的模型端点），属显式剩余项而非遗漏实现。
+所有在**本仓库/本机可单方面完成**的实现与验收均已 DONE；剩余 2 项 BLOCKED 依赖外部条件（飞书凭证、AutoGEO 应用），属显式剩余项而非遗漏实现。
 
-版本定级：**Oncall V1.0 Release**。
+当前实现状态：**可运行**。
 
 ## 2026-08-19 增量实现
 
 - 项目配置：增加后端 DTO 约束、指标/目标依赖校验、阈值方向与范围校验、前端 JSON/表单统一校验及采集反馈。
 - 飞书 Outbox：增加 `sending` 租约、过期租约回收和数据库并发抢占，降低多 Worker 重复发送风险。
 - 验收工程：新增 `offline/local/integration/rag` 测试分层、严格 marker、外部检查超时和 `--required` 发布门禁。
-- 仍需外部联调：飞书真实消息闭环、AutoGEO 实机采集、生产 Embedding/Rerank；这些不能仅靠本地源码单方面完成。
+- 仍需外部联调：飞书真实消息闭环、AutoGEO 实机采集；Embedding/Rerank 已通过真实 API，服务启动后需重建新索引。

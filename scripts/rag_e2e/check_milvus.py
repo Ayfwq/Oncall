@@ -2,7 +2,7 @@ import json
 from pymilvus import MilvusClient
 
 c = MilvusClient(uri='http://127.0.0.1:19530', token='root:Milvus')
-name = 'oncall_knowledge_v1_1536'
+name = 'oncall_knowledge'
 desc = c.describe_collection(name)
 print('fields:', [f['name'] for f in desc['fields']])
 print('num_entities:', desc.get('num_entities'), '| stats:', c.get_collection_stats(name))

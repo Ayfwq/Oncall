@@ -53,7 +53,7 @@ class MonitoringEngine:
             signals.update(r.signals);resources[r.name]=r.resources;status[r.name]={'ok':r.ok,'error':r.error}
             for resource_key, values in r.resource_signals.items():
                 resource_signals.setdefault(str(resource_key), {}).update(values)
-        # PostgreSQL exposes a cumulative deadlock counter. Convert it to the V1
+        # PostgreSQL exposes a cumulative deadlock counter. Convert it to the
         # contract's db.deadlock.delta by comparing against the previous completed
         # snapshot, rather than mislabelling the cumulative total as a delta.
         db_rows=(resources.get('database') or {}).get('databases') or []

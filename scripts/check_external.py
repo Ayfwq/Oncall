@@ -70,10 +70,10 @@ async def check_llm(s, timeout: float = DEFAULT_TIMEOUT):
 
 
 async def check_embedding(s, timeout: float = DEFAULT_TIMEOUT):
-    key = s.embedding_api_key or s.model_api_key
-    base = (s.embedding_base_url or s.model_base_url).rstrip('/')
+    key = s.embedding_api_key
+    base = s.embedding_base_url.rstrip('/')
     if not key or not base or not s.embedding_model:
-        return "SKIP (hash fallback or missing endpoint/key)"
+        return "SKIP (missing remote embedding endpoint/key/model)"
     async with _client(timeout) as c:
         r = await c.post(
             f"{base}/embeddings",
@@ -91,7 +91,7 @@ async def check_embedding(s, timeout: float = DEFAULT_TIMEOUT):
 
 async def check_rerank(s, timeout: float = DEFAULT_TIMEOUT):
     if not (s.rerank_base_url and s.rerank_api_key and s.rerank_model):
-        return "SKIP (local fallback or incomplete configuration)"
+        return "SKIP (missing remote rerank endpoint/key/model)"
     async with _client(timeout) as c:
         r = await c.post(
             s.rerank_base_url,

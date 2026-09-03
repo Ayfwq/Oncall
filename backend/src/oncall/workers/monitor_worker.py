@@ -34,7 +34,7 @@ async def _cleanup_metric_retention(db,days:int)->None:
 async def _acquire_leader_lock():
     """Keep a PostgreSQL session-level advisory lock for the whole worker lifetime.
 
-    V1 is single-host. This prevents accidentally starting two monitor workers and
+    The worker is single-host. This prevents accidentally starting two monitor workers and
     duplicating collection/Incident transitions. Non-PostgreSQL test databases skip it.
     """
     if not get_settings().database_url.startswith('postgresql'):

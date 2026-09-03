@@ -1080,7 +1080,7 @@ Secret 不需要回填到文档，也不应提交 Git；全部进入目标机器
 重新启动后，旧 Conversation、Message、Incident、Evidence、Diagnosis、Trace 必须全部恢复。
 在旧 Conversation 再发一条消息，确认能够继续对话，而不是因为内存丢失创建新 thread。
 30.8 RAG 本地硬验收
-至少准备 CPU 高、PostgreSQL connection refused、Playwright/Chromium 异常三份运维手册，跑完整 ingestion/retrieval；再维护不少于 10 条固定 query 回归集。每个结果检查 document/version/chunk/page_range Citation 和 RetrievalTrace。Embedding 模型/维度改变时提升 `ONCALL_KNOWLEDGE_INDEX_VERSION` 并重建，不复用旧索引。
+至少准备 CPU 高、PostgreSQL connection refused、Playwright/Chromium 异常三份运维手册，跑完整 ingestion/retrieval；再维护不少于 10 条固定 query 回归集。每个结果检查 document/version/chunk/page_range Citation 和 RetrievalTrace。当前只维护一个 `oncall_knowledge` 索引，Embedding 模型/维度改变时直接重建。
 30.9 真实 Agent / Feishu 硬验收
 普通 SOP 问题应优先合理使用 search_knowledge；实时状态问题应选择实时 Tool。
 Incident 报告必须包含故障概况、Evidence、root cause、confidence、具体 remediation、verification、risks、knowledge refs/unknowns。

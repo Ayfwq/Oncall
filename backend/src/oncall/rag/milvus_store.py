@@ -9,7 +9,7 @@ from oncall.bootstrap.config import get_settings
 
 class MilvusKnowledgeIndex:
     def __init__(self):
-        self.settings=get_settings();self.collection=f'oncall_knowledge_{self.settings.knowledge_index_version}_{self.settings.embedding_dimension}'
+        self.settings=get_settings();self.collection='oncall_knowledge'
         self._client_conn:Any=None;self._client_lock=threading.Lock();self._ensure_lock=threading.Lock();self._ensure_done=False
 
     def _client(self):

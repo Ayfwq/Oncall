@@ -3,12 +3,12 @@ from oncall.channels.feishu_events import parse_lark_message
 from oncall.monitoring.signals import BASELINE_SIGNALS
 
 
-def test_v1_has_exactly_32_baseline_signals():
+def test_has_exactly_32_baseline_signals():
     assert len(BASELINE_SIGNALS) == 32
     assert len(set(BASELINE_SIGNALS)) == 32
 
 
-def test_v1_has_exactly_8_read_tools():
+def test_has_exactly_8_read_tools():
     assert ALLOWED_TOOLS == {
         'query_host_metrics','query_metric_history','query_processes','query_logs',
         'query_containers','query_database','query_service_health','search_knowledge'

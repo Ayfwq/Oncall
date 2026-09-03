@@ -1,4 +1,4 @@
-"""Stable V1 read-only tool surface exposed to the language model.
+"""Stable read-only tool surface exposed to the language model.
 
 The language model receives the complete JSON argument contract on every decision
 turn. Project/incident scope is injected by the runtime and is intentionally not
@@ -84,10 +84,10 @@ def public_tool_specs() -> list[dict[str, Any]]:
 
 
 def validate_tool_args(name: str, args: Any) -> tuple[bool, str | None]:
-    """Small dependency-free validator for the stable V1 top-level JSON tool schemas.
+    """Small dependency-free validator for the stable top-level JSON tool schemas.
 
     The public schemas are intentionally simple (object + string/integer properties),
-    so a full jsonschema runtime is unnecessary in V1. Runtime scope fields are not
+    so a full jsonschema runtime is unnecessary here. Runtime scope fields are not
     accepted from the model.
     """
     if name not in TOOL_SPECS:

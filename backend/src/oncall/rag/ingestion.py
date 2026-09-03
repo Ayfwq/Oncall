@@ -51,13 +51,13 @@ class KnowledgeIngestor:
         ver=KnowledgeDocumentVersion(document_id=doc.id,checksum=cs,original_filename=source.name,raw_path=str(raw),status='uploaded');self.session.add(ver);doc.status='uploaded';await self.session.commit();await self.session.refresh(ver);return ver
 
     async def ingest_version(self,version_id:UUID)->None:
-        # Atomically claim the version: only 'uploaded' (first ingest) or 'failed'
-        # (retry) states may transition to 'processing'. A concurrent worker that
+        # Atomically claim the version: uploaded, failed, or ready versions may
+        # transition to processing. A concurrent worker that
         # already claimed it (status already 'processing'/'ready') makes the UPDATE
         # match zero rows and we no-op instead of double-processing.
         claimed=await self.session.execute(
             update(KnowledgeDocumentVersion)
-            .where(KnowledgeDocumentVersion.id==version_id,KnowledgeDocumentVersion.status.in_(['uploaded','failed']))
+            .where(KnowledgeDocumentVersion.id==version_id,KnowledgeDocumentVersion.status.in_(['uploaded','failed','ready']))
             .values(status='processing')
             .returning(KnowledgeDocumentVersion.id)
         )

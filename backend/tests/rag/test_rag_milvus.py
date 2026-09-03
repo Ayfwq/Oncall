@@ -1,7 +1,7 @@
 """RAG integration regression tests against the live local dev stack.
 
-Covered chain: docling HybridChunker -> hash embedding -> Milvus dense + BM25
--> RRF fusion -> lexical rerank -> citation-shaped hits -> RetrievalTrace.
+Covered chain: docling HybridChunker -> remote embedding -> Milvus dense + BM25
+-> RRF fusion -> remote rerank -> citation-shaped hits -> RetrievalTrace.
 Uses the three SOP fixtures ingested by the `rag_kb` session fixture, so the
 fixed queries below are deterministic regression fixtures.
 
@@ -13,7 +13,6 @@ import uuid
 
 import pytest
 from oncall.infrastructure.db.models import AgentRun, Conversation, RetrievalTrace
-from oncall.rag.embedding import HashEmbeddingProvider, get_embedding_provider
 from oncall.rag.milvus_store import MilvusKnowledgeIndex
 from oncall.rag.retrieval import KnowledgeRetriever, rrf
 from sqlalchemy import delete, select
@@ -116,7 +115,7 @@ async def test_search_knowledge_tool_writes_retrieval_trace(rag_kb, db):
 @pytest.mark.rag
 async def test_collection_exists_with_entities(rag_kb):
     idx = MilvusKnowledgeIndex()
-    assert idx.collection == "oncall_knowledge_v1_1536"
+    assert idx.collection == "oncall_knowledge"
     client = idx._client()
     assert client.has_collection(idx.collection)
     rows = client.query(collection_name=idx.collection, filter="", output_fields=["title"], limit=1000)
@@ -137,15 +136,3 @@ def test_rrf_merges_rankings():
     assert by_id["a"]["rrf_score"] > by_id["c"]["rrf_score"]
     # original fields are preserved on the merged item
     assert by_id["b"]["score"] == 0.8
-
-
-def test_embedding_hash_fallback_contract():
-    """Without a dedicated embedding base URL the provider must be the offline
-    deterministic hash embedder (dev fallback), never a remote call."""
-    from oncall.bootstrap.config import get_settings
-
-    s = get_settings()
-    provider = get_embedding_provider()
-    if not s.embedding_base_url:
-        assert isinstance(provider, HashEmbeddingProvider)
-    assert isinstance(provider, HashEmbeddingProvider)

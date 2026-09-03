@@ -1,11 +1,10 @@
 # Oncall AI SRE - CodeX 本地联调与 Release 收口手册
 
-版本：v1.0.0-rc1  
 日期：2026-08-18
 
 ## 1. CodeX 的任务边界
 
-不要重新设计架构。除非遇到当前设计在真实依赖上不可运行，否则应保持：统一 OncallAgent、独立 Monitoring Engine、PostgreSQL 事实源、Milvus 可重建索引、8 个 V1 只读 Tool、飞书 Incident Follow-up、多会话持久化。
+不要重新设计架构。除非遇到当前设计在真实依赖上不可运行，否则应保持：统一 OncallAgent、独立 Monitoring Engine、PostgreSQL 事实源、Milvus 可重建索引、8 个只读 Tool、飞书 Incident Follow-up、多会话持久化。
 
 CodeX 的主要职责是：在用户真实 Windows 开发机安装依赖、启动基础设施、执行 migration/build/test、根据实际 SDK/API 报错做兼容修正、接入用户真实模型/飞书配置、对 AutoGEO 做实机监测配置，并把所有 Release Gate 跑绿。
 
@@ -123,7 +122,7 @@ ONCALL_MODEL_PROVIDER=mock
 → search_knowledge → Citation(page_range/version/chunk) → RetrievalTrace
 ```
 
-至少做 10 个固定 query 的回归集合；检查专有词、错误码和自然语言均能合理命中。Embedding 模型或维度变化时，不要复用旧索引；提升 `ONCALL_KNOWLEDGE_INDEX_VERSION` 后重建。
+至少做 10 个固定 query 的回归集合；检查专有词、错误码和自然语言均能合理命中。当前仅维护一个 `oncall_knowledge` 索引，Embedding 模型或维度变化时直接重建该索引。
 
 ## 8. 真实 LLM E2E（Release Gate）
 

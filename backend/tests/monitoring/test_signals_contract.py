@@ -1,4 +1,4 @@
-"""Baseline signals contract: 32 unique V1 signals and their producers.
+"""Baseline signals contract: 32 unique signals and their producers.
 
 "Windows 上无法可靠获取的 signal 被正确标记/处理（不产假数据）" is enforced
 here in two ways:
@@ -46,7 +46,7 @@ SIGNAL_FAMILIES: dict[str, list[str]] = {
 }
 
 
-def test_v1_has_exactly_32_unique_baseline_signals():
+def test_has_exactly_32_unique_baseline_signals():
     assert len(BASELINE_SIGNALS) == 32
     assert len(set(BASELINE_SIGNALS)) == 32
 

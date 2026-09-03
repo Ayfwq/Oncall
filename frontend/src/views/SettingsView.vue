@@ -67,7 +67,7 @@ async function saveFeishu() {
   finally { savingFeishu.value = false }
 }
 
-function badge(ok: boolean, fallback = false) { return ok ? 'ok' : fallback ? 'neutral' : 'err' }
+function badge(ok: boolean) { return ok ? 'ok' : 'err' }
 onMounted(load)
 </script>
 
@@ -107,8 +107,8 @@ onMounted(load)
     </div>
 
     <div class="grid" v-if="readiness">
-      <div class="card"><h3>模型</h3><p class="muted" style="margin: 0">{{ readiness.llm.provider }} · {{ readiness.llm.model }}</p><div style="margin-top: 12px"><span class="badge" :class="badge(readiness.llm.configured, true)">{{ readiness.llm.configured ? '已连接' : '未配置' }}</span></div></div>
-      <div class="card"><h3>知识检索</h3><p class="muted" style="margin: 0">Embedding · {{ readiness.embedding.model }}</p><div style="margin-top: 12px"><span class="badge" :class="badge(readiness.embedding.configured, true)">{{ readiness.embedding.configured ? '语义向量' : 'BM25 混合' }}</span><span class="badge neutral" style="margin-left: 6px">Rerank · {{ readiness.rerank.configured ? '已配置' : '本地' }}</span></div></div>
+      <div class="card"><h3>模型</h3><p class="muted" style="margin: 0">{{ readiness.llm.provider }} · {{ readiness.llm.model }}</p><div style="margin-top: 12px"><span class="badge" :class="badge(readiness.llm.configured)">{{ readiness.llm.configured ? '已连接' : '未配置' }}</span></div></div>
+      <div class="card"><h3>知识检索</h3><p class="muted" style="margin: 0">Embedding · {{ readiness.embedding.model }}</p><div style="margin-top: 12px"><span class="badge" :class="badge(readiness.embedding.configured)">{{ readiness.embedding.configured ? '已配置' : '未配置' }}</span><span class="badge" :class="badge(readiness.rerank.configured)" style="margin-left: 6px">Rerank · {{ readiness.rerank.configured ? '已配置' : '未配置' }}</span></div></div>
       <div class="card"><h3>飞书状态</h3><p class="muted" style="margin: 0">{{ readiness.feishu.enabled ? '已启用' : '未启用' }}</p><div style="margin-top: 12px"><span class="badge" :class="readiness.feishu.configured ? 'ok' : 'neutral'">{{ readiness.feishu.configured ? '凭证完整' : '未接入' }}</span></div></div>
       <div class="card"><h3>数据存储</h3><div class="kv"><span>PostgreSQL</span><span class="badge ok">已连接</span></div><div class="kv"><span>Milvus</span><span class="badge ok">已连接</span></div></div>
     </div>

@@ -1,4 +1,4 @@
-# Local Deployment — Oncall AI SRE V1.0
+# Local Deployment — Oncall AI SRE
 
 本指南覆盖在 Windows 本机从零部署 Oncall 的完整步骤。架构为**模块化单体 + 多进程**：PostgreSQL/Milvus 等基础设施跑在 Docker，Oncall 的 4 个 Python 进程跑在 Windows 宿主机（以便直接观测本机进程、日志与 Docker）。
 
@@ -131,6 +131,6 @@ API  http://127.0.0.1:9900
 
 ## 9. 已知边界
 
-- V1 为只读诊断：Agent 的 8 个工具均为只读，不提供 restart/kill/write 等破坏性 Action。
+- 当前实现为只读诊断：Agent 的 8 个工具均为只读，不提供 restart/kill/write 等破坏性 Action。
 - 真实飞书与 AutoGEO 实机采集依赖外部凭证/应用，见 `IMPLEMENTATION_STATUS.md`。
-- 生产语义 Embedding/Rerank 需配支持 embedding/rerank 的模型端点；否则 RAG 使用 hash fallback + BM25 + 词法 rerank。
+- 生产语义 Embedding/Rerank 需配置远端 embedding/rerank 模型端点；未配置时 RAG 会明确报配置错误。

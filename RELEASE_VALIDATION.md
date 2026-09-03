@@ -1,4 +1,4 @@
-# Release Validation — Oncall AI SRE V1.0
+# Release Validation — Oncall AI SRE
 
 生成时间：2026-08-19
 环境：Windows 本地开发机（Docker Desktop / WSL2 Linux 容器）
@@ -67,7 +67,7 @@ uv run --no-sync python scripts/rag_e2e/reindex_recovery.py
 # → drop collection → reindex ×3 → 33 entities 恢复，检索正常
 ```
 
-说明：Dense 向量当前为**确定性 hash fallback**（该 LLM 端点只提供 chat/speech/image，没有 embedding/rerank 模型）；BM25 全文召回 + RRF + 词法 rerank 是真实机制，实测 7/7 章节命中。
+历史说明：本节记录的是旧端点时期的本地回退验证；当前代码已删除 hash embedding 和词法 rerank，改为硅基流动 BGE-M3 + bge-reranker-v2-m3，详见当前配置与外部检查结果。
 
 ## 5. Agent 流式输出（Token + 结构化事件）
 
@@ -106,11 +106,10 @@ Vite dev server（`http://localhost:5173`）代理 `/api` → `http://127.0.0.1:
 |---|---|---|
 | 真实飞书 E2E（WebSocket 入站 + 出站卡片） | 代码已实现、import 通过，**未真实联调** | 未提供飞书 App ID / Secret / receive_id |
 | AutoGEO 实机采集 | 代码路径就绪，**未真实联调** | 本机不存在 `D:\GEO`（AutoGEO 应用未安装） |
-| 生产 Embedding / Rerank | **不可用** | 当前 LLM 端点无 embedding/rerank 模型；RAG 走 hash fallback + BM25 + 词法 rerank |
-| Settings readiness 的 embedding `configured` 判定 | 与 hash fallback 事实不一致 | 仅按 `embedding_api_key` 判定；记录为已知小缺口 |
+| 生产 Embedding / Rerank | 已切换 | 硅基流动 BGE-M3 + bge-reranker-v2-m3 真实 API 已通过；唯一索引需在服务启动后重建 |
 
 ## 10. 结论
 
 - 真实 LLM / RAG / Monitoring / PostgreSQL / Milvus / 前端 / 流式 / 记忆压缩 / 重启持久化 **均已在本地真实环境跑通**。
 - 真实飞书与 AutoGEO 实机采集需要外部凭证/应用，属显式阻塞项，已在 `IMPLEMENTATION_STATUS.md` 标注。
-- 版本定级：**Oncall V1.0 Release**（真实飞书/AutoGEO 为后续增量联调，非本仓库内可单方面完成的验收）。
+- 当前实现可运行；真实飞书/AutoGEO 为后续外部联调，非本仓库内可单方面完成的验收。
