@@ -6,7 +6,7 @@ from datetime import datetime
 from oncall.application.dtos import MonitoringRuleDTO, ProjectCreateDTO, SnapshotDTO
 from oncall.application.incident_service import incident_fingerprint
 from oncall.application.project_service import ProjectService
-from oncall.infrastructure.db.models import Incident, MonitoringRule
+from oncall.infrastructure.db.models import Incident, MonitoredServer, MonitoringRule
 from sqlalchemy import select
 
 SYNTH = "zz.test.synthetic"
@@ -16,8 +16,17 @@ async def make_project_with_rule(db, user, *, trigger_for=2, recovery_for=2,
                                  trigger_threshold=-1.0, recovery_threshold=-2.0,
                                  severity="warning", metric_key=SYNTH):
     """A disabled project (kept away from the live monitor-worker) with one rule."""
+    server = MonitoredServer(
+        user_id=user.id,
+        name=f"server-{user.username}",
+        node_metrics_url="http://127.0.0.1:9100/metrics",
+        enabled=False,
+    )
+    db.add(server)
+    await db.flush()
     dto = ProjectCreateDTO(
         name=f"proj-{user.username}",
+        server_id=server.id,
         enabled=False,
         poll_interval=30,
         rules=[

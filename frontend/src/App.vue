@@ -65,11 +65,14 @@ async function logout() {
       </nav>
       <div class="sidebar-footer">
         <div class="avatar">A</div>
-        <div class="who"><b>{{ me.username }}</b><span>本地管理员</span></div>
-        <button class="logout" @click="logout">退出</button>
+        <div class="who">
+          <b>{{ me.username }}</b>
+          <span>本地管理员</span>
+          <button class="logout" @click="logout">退出</button>
+        </div>
       </div>
     </aside>
-    <main class="main">
+    <main class="main" :class="{ 'chat-main': route.path === '/' }">
       <header v-if="$route.path !== '/login'" class="topbar">
         <button class="mobile-menu" aria-label="打开菜单" @click="navOpen = !navOpen">☰</button>
         <div class="topbar-title"><span>{{ pageTitle }}</span><small>本地智能运维控制台</small></div>

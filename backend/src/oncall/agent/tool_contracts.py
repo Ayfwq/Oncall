@@ -9,8 +9,8 @@ from __future__ import annotations
 from typing import Any
 
 TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "query_host_metrics": {
-        "description": "读取当前宿主机 CPU、内存、磁盘、网络与 IO 摘要。只读。",
+    "query_current_metrics": {
+        "description": "读取当前远程 Python 项目的服务器、健康检查、Prometheus 与可选 GPU 指标。只读。",
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     "query_metric_history": {
@@ -25,34 +25,6 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
             "required": ["metric"],
             "additionalProperties": False,
         },
-    },
-    "query_processes": {
-        "description": "读取被监控项目相关进程及 CPU/内存/PID/父进程/命令行等诊断信息。只读。",
-        "parameters": {
-            "type": "object",
-            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30}},
-            "additionalProperties": False,
-        },
-    },
-    "query_logs": {
-        "description": "从项目配置的日志源按关键词/级别读取最近日志明细。只读。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "keyword": {"type": "string", "default": ""},
-                "level": {"type": "string", "description": "error/warning/info/debug 或空字符串", "default": ""},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
-            },
-            "additionalProperties": False,
-        },
-    },
-    "query_containers": {
-        "description": "读取项目配置的 Docker 容器状态、health、CPU/内存、重启次数。只读。",
-        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-    },
-    "query_database": {
-        "description": "读取项目 PostgreSQL 健康、连接、长/慢查询、锁和死锁信息。只读。",
-        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     "query_service_health": {
         "description": "主动请求项目配置的 HTTP health/service endpoint，返回状态码和延迟。只读。",

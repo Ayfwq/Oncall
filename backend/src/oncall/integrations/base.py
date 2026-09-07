@@ -10,9 +10,8 @@ class CollectResult:
     name: str
     ok: bool
     signals: dict[str, float | bool | str | None] = field(default_factory=dict)
-    # Per-resource signals keep the legacy project-level ``signals`` contract while
-    # allowing rules to target an individual process, endpoint, container, database,
-    # or log source. Keys are stable resource identifiers.
+    # Project-level signals are aggregates; per-resource signals preserve the
+    # identity of each route or GPU device for targeted rules.
     resource_signals: dict[str, dict[str, float | bool | str | None]] = field(default_factory=dict)
     resources: dict[str, Any] = field(default_factory=dict)
     error: str | None = None

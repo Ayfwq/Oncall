@@ -1,11 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
-import type {
-  DatabaseProfile, DockerTarget, LogSource, MetricsSource, MonitoringRule, ProcessTarget,
-  ProjectConfig, Service, ServiceEndpoint, SnapshotDTO,
-} from '../types'
+import type { MetricsSource, MonitoringRule, ProjectConfig, ServiceEndpoint, SnapshotDTO } from '../types'
 
 const route = useRoute()
 const id = String(route.params.id)
@@ -13,978 +10,171 @@ const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 const message = ref('')
-const messageError = ref(false)
-const tab = ref('form')
-const advancedMode = ref(false)
+const error = ref(false)
 const snapshot = ref<SnapshotDTO | null>(null)
-const testFeedback = ref<{ passed: number, failed: number, missingRules: string[] } | null>(null)
-const jsonText = ref('')
-const jsonError = ref('')
+const testSummary = ref<{ passed: number; failed: number; missing: string[] } | null>(null)
 
-type FormProcess = Omit<ProcessTarget, 'cmdline_filters'> & { cmdline_filters: string }
-type FormDb = Omit<DatabaseProfile, 'password'> & { password: string }
-type FormLog = LogSource
-type FormDocker = DockerTarget
-type FormService = ServiceEndpoint
+type FormEndpoint = ServiceEndpoint
+type FormMetrics = MetricsSource
 type FormRule = MonitoringRule
-type FormMetricsSource = MetricsSource
-type FormServiceGroup = Service
-
 interface FormConfig {
   name: string
+  server_id: string | null
   description: string
   enabled: boolean
-  timezone: string
   poll_interval: number
-  process_targets: FormProcess[]
-  log_sources: FormLog[]
-  docker_targets: FormDocker[]
-  database_profiles: FormDb[]
-  service_endpoints: FormService[]
-  metrics_sources: FormMetricsSource[]
-  services: FormServiceGroup[]
+  service_endpoints: FormEndpoint[]
+  metrics_sources: FormMetrics[]
   rules: FormRule[]
+  server?: ProjectConfig['server']
 }
 
-type TargetArrayKey = 'process_targets' | 'log_sources' | 'docker_targets' | 'database_profiles' | 'service_endpoints' | 'metrics_sources'
+const cfg = ref<FormConfig>({ name: '', server_id: null, description: '', enabled: true, poll_interval: 30, service_endpoints: [], metrics_sources: [], rules: [] })
+const quick = ref({ healthUrl: '', metricsUrl: '', pollInterval: 30 })
 
-const cfg = ref<FormConfig>({
-  name: '', description: '', enabled: true, timezone: 'Asia/Shanghai', poll_interval: 300,
-  process_targets: [], log_sources: [], docker_targets: [], database_profiles: [], service_endpoints: [], metrics_sources: [], services: [], rules: [],
-})
-const quick = ref({ projectPath: '', healthUrl: '', logPath: '', pollInterval: 300 })
-
-const TIMEZONES = ['Asia/Shanghai', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Hong_Kong', 'UTC', 'America/Los_Angeles', 'Europe/London']
-const ENCODINGS = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'latin-1']
-const SSL_MODES = ['disable', 'prefer', 'require', 'verify-ca', 'verify-full']
-const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT']
-const AUTH_TYPES = ['none', 'bearer', 'basic']
-const OPERATORS = ['>', '<', '>=', '<=', '==', '!=']
-const SEVERITIES = ['warning', 'critical', 'info']
-
-const METRIC_GROUPS = [
-  { label: '主机（无需绑定，默认采集）', options: [
-    { value: 'host.cpu.percent', label: 'host.cpu.percent · CPU 使用率 %' },
-    { value: 'host.memory.percent', label: 'host.memory.percent · 内存使用率 %' },
-    { value: 'host.memory.available_bytes', label: 'host.memory.available_bytes · 可用内存（字节）' },
-    { value: 'host.disk.usage_percent', label: 'host.disk.usage_percent · 磁盘使用率 %' },
-    { value: 'host.disk.free_bytes', label: 'host.disk.free_bytes · 磁盘剩余（字节）' },
-    { value: 'host.disk.read_bytes_per_sec', label: 'host.disk.read_bytes_per_sec · 磁盘读速率' },
-    { value: 'host.disk.write_bytes_per_sec', label: 'host.disk.write_bytes_per_sec · 磁盘写速率' },
-    { value: 'host.net.rx_bytes_per_sec', label: 'host.net.rx_bytes_per_sec · 网络接收速率' },
-    { value: 'host.net.tx_bytes_per_sec', label: 'host.net.tx_bytes_per_sec · 网络发送速率' },
-  ] },
-  { label: '进程（需配置上方进程绑定）', options: [
-    { value: 'process.target.alive', label: 'process.target.alive · 进程存活 1/0' },
-    { value: 'process.target.count', label: 'process.target.count · 匹配进程数' },
-    { value: 'process.target.cpu_percent_sum', label: 'process.target.cpu_percent_sum · 进程 CPU 总和 %' },
-    { value: 'process.target.rss_bytes_sum', label: 'process.target.rss_bytes_sum · 进程内存总和（字节）' },
-    { value: 'process.target.child_count', label: 'process.target.child_count · 子进程数' },
-  ] },
-  { label: 'Docker 容器（需配置上方容器绑定）', options: [
-    { value: 'container.running', label: 'container.running · 容器运行 1/0' },
-    { value: 'container.health', label: 'container.health · 健康状态 1/0/-1' },
-    { value: 'container.cpu_percent', label: 'container.cpu_percent · 容器 CPU %' },
-    { value: 'container.memory_percent', label: 'container.memory_percent · 容器内存 %' },
-    { value: 'container.restart_count', label: 'container.restart_count · 重启次数' },
-  ] },
-  { label: '数据库（需配置上方数据库绑定，仅 PostgreSQL）', options: [
-    { value: 'db.reachable', label: 'db.reachable · 数据库可达 1/0' },
-    { value: 'db.connections.usage_percent', label: 'db.connections.usage_percent · 连接使用率 %' },
-    { value: 'db.long_query.count', label: 'db.long_query.count · 长查询数' },
-    { value: 'db.lock_wait.count', label: 'db.lock_wait.count · 锁等待数' },
-    { value: 'db.deadlock.delta', label: 'db.deadlock.delta · 死锁增量' },
-  ] },
-  { label: 'HTTP 服务（需配置上方服务绑定）', options: [
-    { value: 'service.reachable', label: 'service.reachable · 服务可达 1/0' },
-    { value: 'service.status_code', label: 'service.status_code · HTTP 状态码' },
-    { value: 'service.latency_ms', label: 'service.latency_ms · 响应延迟 ms' },
-    { value: 'service.consecutive_failures', label: 'service.consecutive_failures · 连续失败次数' },
-  ] },
-  { label: '白盒应用指标（需配置上方指标源，抓取 /metrics）', options: [
-    { value: 'app.up', label: 'app.up · 应用存活 1/0' },
-    { value: 'app.http.rps', label: 'app.http.rps · 每秒请求数' },
-    { value: 'app.http.error_rate', label: 'app.http.error_rate · 错误率 0~1' },
-    { value: 'app.http.p95_ms', label: 'app.http.p95_ms · P95 延迟 ms' },
-    { value: 'app.http.p99_ms', label: 'app.http.p99_ms · P99 延迟 ms' },
-    { value: 'app.http.availability', label: 'app.http.availability · 可用性 %' },
-  ] },
-  { label: '日志（需配置上方日志绑定）', options: [
-    { value: 'log.error.count_window', label: 'log.error.count_window · 窗口内错误条数' },
-    { value: 'log.warning.count_window', label: 'log.warning.count_window · 窗口内警告条数' },
-    { value: 'log.error.rate_per_min', label: 'log.error.rate_per_min · 错误速率 条/分' },
-    { value: 'log.top_signature.count', label: 'log.top_signature.count · 最常见错误出现次数' },
-  ] },
+const HOST_METRICS = [
+  ['host.exporter.up', '系统采集器可用'], ['host.cpu.percent', 'CPU 使用率'], ['host.memory.percent', '内存使用率'],
+  ['host.memory.available_bytes', '可用内存'], ['host.disk.usage_percent', '磁盘使用率'], ['host.disk.free_bytes', '磁盘剩余空间'],
+  ['host.disk.read_bytes_per_sec', '磁盘读取速率'], ['host.disk.write_bytes_per_sec', '磁盘写入速率'],
+  ['host.net.rx_bytes_per_sec', '网络接收速率'], ['host.net.tx_bytes_per_sec', '网络发送速率'], ['host.load.1m', '系统 1 分钟负载'],
 ]
+const GPU_METRICS = [
+  ['host.gpu.exporter.up', 'GPU 采集器可用'], ['host.gpu.utilization_percent', 'GPU 利用率'], ['host.gpu.memory_percent', '显存使用率'],
+  ['host.gpu.temperature_celsius', 'GPU 温度'], ['host.gpu.power_watts', 'GPU 功耗'], ['host.gpu.available', 'GPU 可用性'],
+]
+const SERVICE_METRICS = [['service.reachable', '服务可达'], ['service.status_code', 'HTTP 状态码'], ['service.latency_ms', '响应延迟'], ['service.consecutive_failures', '连续失败次数']]
+const APP_METRICS = [['app.up', '应用指标端点可用'], ['app.http.rps', '请求速率'], ['app.http.error_rate', '错误率'], ['app.http.p95_ms', 'P95 延迟'], ['app.http.p99_ms', 'P99 延迟'], ['app.http.availability', '应用可用性']]
+const PROCESS_METRICS = [['process.target.alive', '进程指标可用'], ['process.target.count', '进程数量'], ['process.target.cpu_percent_sum', '进程 CPU'], ['process.target.rss_bytes_sum', '进程内存'], ['process.target.virtual_memory_bytes_sum', '进程虚拟内存'], ['process.target.open_fds_sum', '打开文件数'], ['process.target.uptime_seconds', '进程运行时长']]
+const metricCount = computed(() => HOST_METRICS.length + SERVICE_METRICS.length + APP_METRICS.length + PROCESS_METRICS.length + (cfg.value.server?.gpu_metrics_url ? GPU_METRICS.length : 0))
 
-const KNOWN_METRICS = new Set(METRIC_GROUPS.flatMap(group => group.options.map(option => option.value)))
-const METRIC_TARGETS: Record<string, TargetArrayKey> = {
-  'process.': 'process_targets', 'log.': 'log_sources', 'container.': 'docker_targets',
-  'db.': 'database_profiles', 'service.': 'service_endpoints', 'app.': 'metrics_sources',
+function setMessage(text: string, isError = false) { message.value = text; error.value = isError }
+function failText(e: unknown) {
+  const raw = e instanceof Error ? e.message : String(e || '未知错误')
+  try { const body = JSON.parse(raw); return body.detail || body.message || raw } catch { return raw.replace(/^\s*"|"\s*$/g, '') }
 }
-function resourceOptions(metricKey: string): { value: string, label: string }[] {
-  const targetField = Object.entries(METRIC_TARGETS).find(([prefix]) => metricKey?.startsWith(prefix))?.[1]
-  if (!targetField) return [{ value: 'default', label: '项目级聚合' }]
-  const rows = cfg.value[targetField] as Array<Record<string, unknown>>
-  const labelOf = (row: Record<string, unknown>) => String(row.name || row.container_ref || row.database || row.path || row.url || '目标')
-  return [
-    { value: 'default', label: '项目级聚合（兼容旧规则）' },
-    ...rows.map(row => ({ value: String(row.id || labelOf(row)), label: `${labelOf(row)} · ${String(row.id || '未保存')}` })),
+function blankEndpoint(url = ''): FormEndpoint { return { id: null, service_id: null, name: '健康检查', url, method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true } }
+function blankMetrics(url = ''): FormMetrics { return { id: null, service_id: null, name: 'app', url, auth_type: 'none', token: '', scrape_timeout_ms: 5000, route_label: 'handler', enabled: true } }
+function blankRule(metric_key: string, operator: string, trigger_threshold: number, recovery_threshold: number, severity = 'warning', detection_mode: FormRule['detection_mode'] = 'threshold'): FormRule {
+  return { id: null, metric_key, resource_key: 'default', operator, trigger_threshold, trigger_for: 2, recovery_threshold, recovery_for: 2, severity, enabled: true, detection_mode, baseline_window: 60, baseline_min_samples: 12, baseline_z_score: 3, baseline_recovery_z_score: 2, conditions: null }
+}
+function starterRules(): FormRule[] {
+  const rules = [
+    blankRule('host.exporter.up', '==', 0, 0, 'critical'), blankRule('host.cpu.percent', '>', 90, 80), blankRule('host.memory.percent', '>', 90, 80), blankRule('host.disk.usage_percent', '>', 90, 85),
+    blankRule('service.consecutive_failures', '>=', 1, 0.5, 'critical'), blankRule('service.latency_ms', '>', 1000, 700, 'warning', 'hybrid'), blankRule('app.up', '==', 0, 0, 'critical'),
+    blankRule('app.http.p95_ms', '>', 800, 500, 'warning', 'hybrid'), blankRule('app.http.p99_ms', '>', 2000, 1000, 'critical', 'hybrid'), blankRule('app.http.availability', '<', 95, 99),
+    blankRule('process.target.cpu_percent_sum', '>', 10000, 9000, 'warning', 'baseline'), blankRule('process.target.rss_bytes_sum', '>', 1e15, 9e14, 'warning', 'baseline'),
   ]
+  const errorRule = blankRule('app.http.error_rate', '>', 0.1, 0.05)
+  errorRule.conditions = { all: [{ metric_key: 'app.http.rps', resource_key: 'default', operator: '>', threshold: 1 }, { metric_key: 'app.http.error_rate', resource_key: 'default', operator: '>', threshold: 0.1 }] }
+  rules.splice(7, 0, errorRule)
+  if (cfg.value.server?.gpu_metrics_url) rules.splice(4, 0, blankRule('host.gpu.exporter.up', '==', 0, 0, 'warning'), blankRule('host.gpu.memory_percent', '>', 90, 80), blankRule('host.gpu.temperature_celsius', '>', 85, 75, 'critical'))
+  return rules
 }
-// Services are saved before targets can bind to them, so only list services
-// that already have an id. Empty value means "no service (project-level)".
-function serviceOptions(): { value: string, label: string }[] {
-  const saved = cfg.value.services.filter(s => s.id)
-  return [
-    { value: '', label: '不绑定（项目级）' },
-    ...saved.map(s => ({ value: s.id as string, label: s.name || '服务' })),
-  ]
-}
-const METRIC_RANGES: Record<string, [number, number]> = {
-  'host.cpu.percent': [0, 100], 'host.memory.percent': [0, 100], 'host.disk.usage_percent': [0, 100],
-  'process.target.alive': [0, 1], 'container.running': [0, 1], 'container.health': [-1, 1],
-  'db.reachable': [0, 1], 'service.reachable': [0, 1], 'service.status_code': [0, 599],
-  'app.up': [0, 1], 'app.http.rps': [0, 100000], 'app.http.error_rate': [0, 1],
-  'app.http.p95_ms': [0, 600000], 'app.http.p99_ms': [0, 600000], 'app.http.availability': [0, 100],
-}
-
-// ---------- 行数据工厂（新建空行） ----------
-const blankProcess = (): FormProcess => ({ id: null, name: '进程', executable: '', cmdline_filters: '', cwd: '', port: null, service_id: null, enabled: true })
-const blankLog = (): FormLog => ({ id: null, path: '', encoding: 'utf-8', parser_config: {}, service_id: null, enabled: true })
-const blankDocker = (): FormDocker => ({ id: null, container_ref: '', service_id: null, enabled: true })
-const blankDb = (): FormDb => ({ id: null, type: 'postgresql', host: '127.0.0.1', port: 5432, database: '', username: '', password: '', sslmode: 'prefer', service_id: null, enabled: true })
-const blankService = (): FormService => ({ id: null, name: '健康检查', url: '', method: 'GET', expected_status: 200, timeout_ms: 3000, service_id: null, enabled: true })
-const blankMetricsSource = (): FormMetricsSource => ({ id: null, name: 'app', url: '', auth_type: 'none', token: '', scrape_timeout_ms: 5000, route_label: 'handler', service_id: null, enabled: true })
-const blankRule = (): FormRule => ({ id: null, metric_key: '', resource_key: 'default', operator: '>', trigger_threshold: null, trigger_for: 2, recovery_threshold: null, recovery_for: 2, severity: 'warning', enabled: true })
-const blankServiceGroup = (): FormServiceGroup => ({ id: null, name: '', description: '', enabled: true })
-
-// ---------- 行数据标准化（API JSON -> 表单行） ----------
-const normProcess = (x: ProcessTarget): FormProcess => ({ id: x.id ?? null, name: x.name || '进程', executable: x.executable ?? '', cmdline_filters: (x.cmdline_filters || []).join(', '), cwd: x.cwd ?? '', port: x.port ?? null, service_id: x.service_id ?? null, enabled: x.enabled !== false })
-const normLog = (x: LogSource): FormLog => ({ id: x.id ?? null, path: x.path ?? '', encoding: x.encoding || 'utf-8', parser_config: x.parser_config || {}, service_id: x.service_id ?? null, enabled: x.enabled !== false })
-const normDocker = (x: DockerTarget): FormDocker => ({ id: x.id ?? null, container_ref: x.container_ref ?? '', service_id: x.service_id ?? null, enabled: x.enabled !== false })
-const normDb = (x: DatabaseProfile): FormDb => ({ id: x.id ?? null, type: x.type || 'postgresql', host: x.host ?? '', port: x.port ?? 5432, database: x.database ?? '', username: x.username ?? '', password: '', sslmode: x.sslmode || 'prefer', service_id: x.service_id ?? null, enabled: x.enabled !== false })
-const normService = (x: ServiceEndpoint): FormService => ({ id: x.id ?? null, name: x.name || '健康检查', url: x.url ?? '', method: x.method || 'GET', expected_status: x.expected_status ?? 200, timeout_ms: x.timeout_ms ?? 3000, service_id: x.service_id ?? null, enabled: x.enabled !== false })
-const normMetricsSource = (x: MetricsSource): FormMetricsSource => ({ id: x.id ?? null, name: x.name || 'app', url: x.url ?? '', auth_type: (x.auth_type || 'none') as FormMetricsSource['auth_type'], token: '', scrape_timeout_ms: x.scrape_timeout_ms ?? 5000, route_label: x.route_label || 'handler', service_id: x.service_id ?? null, enabled: x.enabled !== false })
-const normServiceGroup = (x: Service): FormServiceGroup => ({ id: x.id ?? null, name: x.name || '', description: x.description || '', enabled: x.enabled !== false })
-const normRule = (x: MonitoringRule): FormRule => ({ id: x.id ?? null, metric_key: x.metric_key ?? '', resource_key: x.resource_key || 'default', operator: x.operator || '>', trigger_threshold: x.trigger_threshold ?? null, trigger_for: x.trigger_for ?? 2, recovery_threshold: x.recovery_threshold ?? null, recovery_for: x.recovery_for ?? 2, severity: x.severity || 'warning', enabled: x.enabled !== false })
-
-function errorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error || '未知错误')
-  try {
-    const body = JSON.parse(raw)
-    if (Array.isArray(body?.detail)) return body.detail.map((x: { msg?: string }) => x.msg || '参数错误').join('；')
-    if (typeof body?.detail === 'string') return body.detail
-    if (typeof body?.message === 'string') return body.message
-  } catch { /* api may return plain text */ }
-  return raw.replace(/^\s*"|"\s*$/g, '')
-}
-
-function setMessage(text: string, isError = false) {
-  messageError.value = isError
-  message.value = text
-}
-
-function applyData(data: ProjectConfig) {
+function normalize(data: ProjectConfig) {
   cfg.value = {
-    name: data?.name ?? '', description: data?.description ?? '', enabled: data?.enabled !== false,
-    timezone: data?.timezone ?? 'Asia/Shanghai', poll_interval: data?.poll_interval ?? 300,
-    process_targets: (data?.process_targets || []).map(normProcess),
-    log_sources: (data?.log_sources || []).map(normLog),
-    docker_targets: (data?.docker_targets || []).map(normDocker),
-    database_profiles: (data?.database_profiles || []).map(normDb),
-    service_endpoints: (data?.service_endpoints || []).map(normService),
-    metrics_sources: (data?.metrics_sources || []).map(normMetricsSource),
-    services: (data?.services || []).map(normServiceGroup),
-    rules: (data?.rules || []).map(normRule),
+    name: data.name || '', server_id: data.server_id, description: data.description || '', enabled: data.enabled !== false, poll_interval: data.poll_interval || 30,
+    server: data.server,
+    service_endpoints: (data.service_endpoints || []).map(x => ({ ...x, name: x.name || '健康检查' })),
+    metrics_sources: (data.metrics_sources || []).map(x => ({ ...x, name: x.name || 'app', token: '' })),
+    rules: (data.rules || []).map(x => ({ ...x })),
   }
+  quick.value = { healthUrl: cfg.value.service_endpoints.find(x => x.enabled)?.url || '', metricsUrl: cfg.value.metrics_sources.find(x => x.enabled)?.url || '', pollInterval: cfg.value.poll_interval }
 }
-
-function quickDefaults(): boolean {
-  if (!quick.value.projectPath && !quick.value.healthUrl && !quick.value.logPath) {
-    setMessage('至少填写项目目录、健康检查地址或日志文件中的一项', true)
-    return false
-  }
-  const name = cfg.value.name || '项目'
-  if (!quick.value.healthUrl && quick.value.projectPath.toLowerCase().includes('auto_geo')) {
-    quick.value.healthUrl = 'http://127.0.0.1:8001/api/health'
-  }
-  if (!quick.value.logPath && quick.value.projectPath.toLowerCase().includes('auto_geo')) {
-    const today = new Intl.DateTimeFormat('en-CA', { timeZone: cfg.value.timezone || 'Asia/Shanghai' }).format(new Date())
-    quick.value.logPath = `${quick.value.projectPath.replace(/[\\/]$/, '')}\\backend\\logs\\auto_geo_${today}.log`
-  }
-  if (quick.value.projectPath && !cfg.value.process_targets.some(x => x.cwd === quick.value.projectPath)) {
-    cfg.value.process_targets.push({ id: null, name: `${name} 后端`, executable: 'python', cmdline_filters: 'backend.main', cwd: quick.value.projectPath, port: 8001, service_id: null, enabled: true })
-  }
-  if (quick.value.healthUrl && !cfg.value.service_endpoints.some(x => x.url === quick.value.healthUrl)) {
-    cfg.value.service_endpoints.push({ id: null, name: `${name} 健康检查`, url: quick.value.healthUrl, method: 'GET', expected_status: 200, timeout_ms: 3000, service_id: null, enabled: true })
-  }
-  if (quick.value.logPath && !cfg.value.log_sources.some(x => x.path === quick.value.logPath)) {
-    cfg.value.log_sources.push({ id: null, path: quick.value.logPath, encoding: 'utf-8', parser_config: {}, service_id: null, enabled: true })
-  }
-  const addRule = (metric_key: string, operator: string, trigger_threshold: number, recovery_threshold: number, severity = 'warning') => {
-    if (!cfg.value.rules.some(x => x.metric_key === metric_key && x.enabled)) {
-      cfg.value.rules.push({ id: null, metric_key, resource_key: 'default', operator, trigger_threshold, trigger_for: 2, recovery_threshold, recovery_for: 2, severity, enabled: true })
-    }
-  }
-  if (quick.value.projectPath) addRule('process.target.alive', '<', 0.5, 1, 'critical')
-  if (quick.value.healthUrl) addRule('service.reachable', '<', 0.5, 1, 'critical')
-  if (quick.value.logPath) addRule('log.error.rate_per_min', '>', 5, 1, 'warning')
-  cfg.value.poll_interval = Number(quick.value.pollInterval) || 300
-  setMessage('已生成配置草稿')
-  return true
-}
-
-async function quickSetup() {
-  if (!quickDefaults()) return
-  // New projects start disabled. Save and dry-run the generated draft first;
-  // activate only after every configured collector and rule has a real result.
-  cfg.value.enabled = false
-  await save()
-  if (messageError.value) return
-  await test()
-  if (testFeedback.value?.failed || testFeedback.value?.missingRules.length) {
-    setMessage('草稿已保存但未启用：请先修复采集异常或缺失指标', true)
-    return
-  }
-  cfg.value.enabled = true
-  await save()
-  if (!messageError.value) setMessage('配置验证通过，监控已启用 ✓')
-}
-
-function syncQuickFromConfig() {
-  const process = cfg.value.process_targets.find(x => x.enabled)
-  const service = cfg.value.service_endpoints.find(x => x.enabled)
-  const log = cfg.value.log_sources.find(x => x.enabled)
-  quick.value.projectPath = process?.cwd || quick.value.projectPath
-  quick.value.healthUrl = service?.url || quick.value.healthUrl
-  quick.value.logPath = log?.path || quick.value.logPath
-  quick.value.pollInterval = cfg.value.poll_interval
-}
-
 async function load() {
   loading.value = true
-  try {
-    const data = await api<ProjectConfig>(`/projects/${id}`)
-    applyData(data)
-    syncQuickFromConfig()
-    jsonText.value = JSON.stringify(data, null, 2)
-  } catch (e) { setMessage('加载失败：' + errorMessage(e), true) }
-  finally { loading.value = false }
+  try { normalize(await api<ProjectConfig>(`/projects/${id}`)) } catch (e) { setMessage('加载失败：' + failText(e), true) } finally { loading.value = false }
 }
-
-// ---------- 表单 -> 提交 payload ----------
-interface PayloadBase { id?: string | null }
-interface PayloadProcess extends PayloadBase, Omit<ProcessTarget, 'id'> {}
-interface PayloadLog extends PayloadBase, Omit<LogSource, 'id'> {}
-interface PayloadDocker extends PayloadBase, Omit<DockerTarget, 'id'> {}
-interface PayloadDb extends PayloadBase, Omit<DatabaseProfile, 'id'> {}
-interface PayloadService extends PayloadBase, Omit<ServiceEndpoint, 'id'> {}
-interface PayloadMetricsSource extends PayloadBase, Omit<MetricsSource, 'id'> {}
-interface PayloadServiceGroup extends PayloadBase, Omit<Service, 'id'> {}
-interface PayloadRule extends PayloadBase, Omit<MonitoringRule, 'id'> {}
-
-interface ProjectUpdatePayload {
-  name: string
-  description: string
-  enabled: boolean
-  timezone: string
-  poll_interval: number
-  process_targets: PayloadProcess[]
-  log_sources: PayloadLog[]
-  docker_targets: PayloadDocker[]
-  database_profiles: PayloadDb[]
-  service_endpoints: PayloadService[]
-  metrics_sources: PayloadMetricsSource[]
-  services: PayloadServiceGroup[]
-  rules: PayloadRule[]
+function prepareQuick() {
+  if (!quick.value.healthUrl.trim() || !quick.value.metricsUrl.trim()) { setMessage('健康检查地址和 Prometheus /metrics 地址都必填', true); return false }
+  const endpoint = cfg.value.service_endpoints.find(x => x.enabled) || blankEndpoint()
+  Object.assign(endpoint, { url: quick.value.healthUrl.trim(), enabled: true })
+  if (!cfg.value.service_endpoints.includes(endpoint)) cfg.value.service_endpoints = [endpoint]
+  const source = cfg.value.metrics_sources.find(x => x.enabled) || blankMetrics()
+  Object.assign(source, { url: quick.value.metricsUrl.trim(), enabled: true })
+  if (!cfg.value.metrics_sources.includes(source)) cfg.value.metrics_sources = [source]
+  cfg.value.poll_interval = Number(quick.value.pollInterval) || 30
+  if (!cfg.value.rules.length) cfg.value.rules = starterRules()
+  return true
 }
-
-function toPayload(): ProjectUpdatePayload {
-  const c = cfg.value
-  const num = (v: unknown, d?: number): number | null => (v === '' || v === null || v === undefined) ? (d ?? null) : Number(v)
-  const int = (v: unknown, d: number): number => (v === '' || v === null || v === undefined) ? d : Math.max(0, Math.round(Number(v)))
-  const split = (s: unknown): string[] => String(s || '').split(/[,，;；\s]+/).map(x => x.trim()).filter(Boolean)
-  return {
-    name: c.name, description: c.description || '', enabled: !!c.enabled,
-    timezone: c.timezone || 'Asia/Shanghai', poll_interval: int(c.poll_interval, 300),
-    process_targets: c.process_targets.map((x): PayloadProcess => ({
-      id: x.id ?? undefined, name: x.name || '进程', executable: x.executable || null,
-      cmdline_filters: split(x.cmdline_filters), cwd: x.cwd || null, port: num(x.port), service_id: x.service_id ?? null, enabled: !!x.enabled,
-    })),
-    log_sources: c.log_sources.map((x): PayloadLog => ({
-      id: x.id ?? undefined, path: x.path, encoding: x.encoding || 'utf-8',
-      parser_config: x.parser_config || {}, service_id: x.service_id ?? null, enabled: !!x.enabled,
-    })),
-    docker_targets: c.docker_targets.map((x): PayloadDocker => ({
-      id: x.id ?? undefined, container_ref: x.container_ref, service_id: x.service_id ?? null, enabled: !!x.enabled,
-    })),
-    database_profiles: c.database_profiles.map((x): PayloadDb => ({
-      id: x.id ?? undefined, type: x.type || 'postgresql', host: x.host || '127.0.0.1',
-      port: int(x.port, 5432), database: x.database, username: x.username,
-      password: x.password ? String(x.password) : null, sslmode: x.sslmode || 'prefer', service_id: x.service_id ?? null, enabled: !!x.enabled,
-    })),
-    service_endpoints: c.service_endpoints.map((x): PayloadService => ({
-      id: x.id ?? undefined, name: x.name || '健康检查', url: x.url, method: x.method || 'GET',
-      expected_status: int(x.expected_status, 200), timeout_ms: int(x.timeout_ms, 3000), service_id: x.service_id ?? null, enabled: !!x.enabled,
-    })),
-    metrics_sources: c.metrics_sources.map((x): PayloadMetricsSource => ({
-      id: x.id ?? undefined, name: x.name || 'app', url: x.url, auth_type: x.auth_type || 'none',
-      token: x.token ? String(x.token) : null, scrape_timeout_ms: int(x.scrape_timeout_ms, 5000),
-      route_label: x.route_label || 'handler', service_id: x.service_id ?? null, enabled: !!x.enabled,
-    })),
-    services: c.services.map((x): PayloadServiceGroup => ({
-      id: x.id ?? undefined, name: x.name, description: x.description || '', enabled: !!x.enabled,
-    })),
-    rules: c.rules.map((x): PayloadRule => ({
-      id: x.id ?? undefined, metric_key: x.metric_key, resource_key: x.resource_key || 'default',
-      operator: x.operator || '>', trigger_threshold: num(x.trigger_threshold, 0) as number,
-      trigger_for: int(x.trigger_for, 2), recovery_threshold: num(x.recovery_threshold, 0) as number,
-      recovery_for: int(x.recovery_for, 2), severity: x.severity || 'warning', enabled: !!x.enabled,
-    })),
-  }
-}
-
-// ---------- 校验 ----------
-function validate(): string[] {
+function validUrl(value: string) { try { const u = new URL(value); return ['http:', 'https:'].includes(u.protocol) && !!u.hostname } catch { return false } }
+function validate() {
   const errs: string[] = []
-  const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value)
-  if (!cfg.value.name?.trim()) errs.push('项目名称必填')
-  if (!Number.isInteger(Number(cfg.value.poll_interval)) || Number(cfg.value.poll_interval) < 10 || Number(cfg.value.poll_interval) > 86400) errs.push('采集间隔必须是 10～86400 秒的整数')
-  cfg.value.process_targets.forEach((x: FormProcess, i: number) => {
-    if (!x.name?.trim()) errs.push(`进程绑定 #${i + 1}：名称必填`)
-    if (!(x.executable?.trim() || x.cmdline_filters?.trim() || x.cwd?.trim())) errs.push(`进程绑定 #${i + 1}：至少填写可执行文件、命令行关键字或工作目录之一`)
-    if (x.port !== null && x.port !== undefined && (!Number.isInteger(Number(x.port)) || Number(x.port) < 1 || Number(x.port) > 65535)) errs.push(`进程绑定 #${i + 1}：端口范围为 1～65535`)
-  })
-  cfg.value.log_sources.forEach((x: FormLog, i: number) => {
-    if (!x.path?.trim()) errs.push(`日志绑定 #${i + 1}：日志文件路径必填`)
-    if (!ENCODINGS.includes(x.encoding)) errs.push(`日志绑定 #${i + 1}：不支持的文件编码`)
-  })
-  cfg.value.docker_targets.forEach((x: FormDocker, i: number) => { if (!x.container_ref?.trim()) errs.push(`Docker 绑定 #${i + 1}：容器名/ID 必填`) })
-  cfg.value.metrics_sources.forEach((x: FormMetricsSource, i: number) => {
-    if (!x.name?.trim()) errs.push(`指标源 #${i + 1}：名称必填`)
-    if (!x.url?.trim()) errs.push(`指标源 #${i + 1}：/metrics 地址必填`)
-    else { try { const u = new URL(x.url); if (!['http:', 'https:'].includes(u.protocol) || !u.hostname) throw new Error() } catch { errs.push(`指标源 #${i + 1}：必须是完整的 http(s) 地址`) } }
-    if (!AUTH_TYPES.includes(x.auth_type)) errs.push(`指标源 #${i + 1}：不支持的鉴权方式`)
-    if (!Number.isInteger(Number(x.scrape_timeout_ms)) || Number(x.scrape_timeout_ms) < 100 || Number(x.scrape_timeout_ms) > 60000) errs.push(`指标源 #${i + 1}：抓取超时范围为 100～60000 毫秒`)
-    if (!x.route_label?.trim()) errs.push(`指标源 #${i + 1}：路由标签名必填`)
-  })
-  cfg.value.database_profiles.forEach((x: FormDb, i: number) => {
-    if (!x.host?.trim()) errs.push(`数据库 #${i + 1}：主机必填`)
-    if (!x.database?.trim()) errs.push(`数据库 #${i + 1}：库名必填`)
-    if (!x.username?.trim()) errs.push(`数据库 #${i + 1}：用户名必填`)
-    if (x.type !== 'postgresql') errs.push(`数据库 #${i + 1}：当前仅支持 PostgreSQL`)
-    if (!SSL_MODES.includes(x.sslmode)) errs.push(`数据库 #${i + 1}：不支持的 SSL 模式`)
-    if (!Number.isInteger(Number(x.port)) || Number(x.port) < 1 || Number(x.port) > 65535) errs.push(`数据库 #${i + 1}：端口范围为 1～65535`)
-  })
-  cfg.value.service_endpoints.forEach((x: FormService, i: number) => {
-    if (!x.url?.trim()) errs.push(`HTTP 服务 #${i + 1}：服务地址必填`)
-    else { try { const u = new URL(x.url); if (!['http:', 'https:'].includes(u.protocol) || !u.hostname) throw new Error() } catch { errs.push(`HTTP 服务 #${i + 1}：必须是完整的 http(s) 地址`) } }
-    if (!HTTP_METHODS.includes(x.method)) errs.push(`HTTP 服务 #${i + 1}：不支持的请求方式`)
-    if (!Number.isInteger(Number(x.expected_status)) || Number(x.expected_status) < 100 || Number(x.expected_status) > 599) errs.push(`HTTP 服务 #${i + 1}：期望状态码范围为 100～599`)
-    if (!Number.isInteger(Number(x.timeout_ms)) || Number(x.timeout_ms) < 100 || Number(x.timeout_ms) > 60000) errs.push(`HTTP 服务 #${i + 1}：超时范围为 100～60000 毫秒`)
-  })
-  cfg.value.services.forEach((x: FormServiceGroup, i: number) => {
-    if (!x.name?.trim()) errs.push(`服务 #${i + 1}：名称必填`)
-  })
-  const seenRules = new Set<string>()
-  cfg.value.rules.forEach((x: FormRule, i: number) => {
-    if (!x.metric_key) errs.push(`告警规则 #${i + 1}：指标未选择`)
-    if (x.metric_key && !KNOWN_METRICS.has(x.metric_key) && !x.metric_key.startsWith('zz.test.')) errs.push(`告警规则 #${i + 1}：指标未注册`)
-    if (!x.resource_key?.trim()) errs.push(`告警规则 #${i + 1}：资源标识必填`)
-    const duplicateKey = `${x.metric_key}/${x.resource_key || ''}`
-    if (seenRules.has(duplicateKey)) errs.push(`告警规则 #${i + 1}：指标与资源标识重复`)
-    seenRules.add(duplicateKey)
-    if (!finite(Number(x.trigger_threshold))) errs.push(`告警规则 #${i + 1}：触发阈值必须是有限数字`)
-    if (!finite(Number(x.recovery_threshold))) errs.push(`告警规则 #${i + 1}：恢复阈值必须是有限数字`)
-    if (!Number.isInteger(Number(x.trigger_for)) || Number(x.trigger_for) < 1 || Number(x.trigger_for) > 100) errs.push(`告警规则 #${i + 1}：触发持续次数范围为 1～100`)
-    if (!Number.isInteger(Number(x.recovery_for)) || Number(x.recovery_for) < 1 || Number(x.recovery_for) > 100) errs.push(`告警规则 #${i + 1}：恢复持续次数范围为 1～100`)
-    const bounds = METRIC_RANGES[x.metric_key]
-    if (bounds && finite(Number(x.trigger_threshold)) && (Number(x.trigger_threshold) < bounds[0] || Number(x.trigger_threshold) > bounds[1])) errs.push(`告警规则 #${i + 1}：触发阈值应在 ${bounds[0]}～${bounds[1]} 范围内`)
-    if (bounds && finite(Number(x.recovery_threshold)) && (Number(x.recovery_threshold) < bounds[0] || Number(x.recovery_threshold) > bounds[1])) errs.push(`告警规则 #${i + 1}：恢复阈值应在 ${bounds[0]}～${bounds[1]} 范围内`)
-    if (['>', '>='].includes(x.operator) && finite(Number(x.trigger_threshold)) && finite(Number(x.recovery_threshold)) && Number(x.recovery_threshold) >= Number(x.trigger_threshold)) errs.push(`告警规则 #${i + 1}：高水位规则的恢复阈值必须低于触发阈值`)
-    if (['<', '<='].includes(x.operator) && finite(Number(x.trigger_threshold)) && finite(Number(x.recovery_threshold)) && Number(x.recovery_threshold) <= Number(x.trigger_threshold)) errs.push(`告警规则 #${i + 1}：低水位规则的恢复阈值必须高于触发阈值`)
-    if (x.operator === '==' && Number(x.trigger_threshold) !== Number(x.recovery_threshold)) errs.push(`告警规则 #${i + 1}：等值规则的触发和恢复阈值必须相同`)
-    const targetField = METRIC_TARGETS[x.metric_key?.split('.')[0] + '.'] || Object.entries(METRIC_TARGETS).find(([prefix]) => x.metric_key?.startsWith(prefix))?.[1]
-    if (x.enabled && targetField && !cfg.value[targetField].some(target => target.enabled)) errs.push(`告警规则 #${i + 1}：该指标需要至少一个已启用的数据目标`)
-    if (x.enabled && targetField && x.resource_key !== 'default') {
-      const allowed = new Set(resourceOptions(x.metric_key).map(option => option.value))
-      if (!allowed.has(x.resource_key)) errs.push(`告警规则 #${i + 1}：资源标识不在该指标的目标列表中`)
-    }
-  })
+  if (!cfg.value.name.trim()) errs.push('项目名称必填')
+  if (!cfg.value.server_id) errs.push('未绑定服务器')
+  if (!validUrl(quick.value.healthUrl)) errs.push('健康检查地址必须是完整的 http(s) URL')
+  if (!validUrl(quick.value.metricsUrl)) errs.push('Prometheus /metrics 地址必须是完整的 http(s) URL')
+  if (!Number.isInteger(Number(cfg.value.poll_interval)) || Number(cfg.value.poll_interval) < 10) errs.push('采集间隔至少为 10 秒')
   return errs
 }
-
-// ---------- 保存 ----------
+function toPayload() {
+  return {
+    name: cfg.value.name.trim(), server_id: cfg.value.server_id, description: cfg.value.description || '', environment: 'production', enabled: cfg.value.enabled, timezone: 'Asia/Shanghai', poll_interval: Number(cfg.value.poll_interval),
+    service_endpoints: cfg.value.service_endpoints.map(x => ({ ...x, token: undefined })),
+    metrics_sources: cfg.value.metrics_sources.map(x => ({ ...x, token: x.token || null })),
+    rules: cfg.value.rules,
+  }
+}
 async function save() {
-  if (saving.value) return
-  if (tab.value === 'json') return saveFromJson()
-  const errs = validate()
-  if (errs.length) { setMessage('请完善后再保存：' + errs.join('；'), true); return }
+  if (saving.value || !prepareQuick()) return
+  const errs = validate(); if (errs.length) { setMessage(errs.join('；'), true); return }
   saving.value = true; setMessage('保存中…')
-  try {
-    await api(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(toPayload()) })
-    setMessage('已保存 ✓（修改会按采集间隔自动生效，可点「测试采集」立即验证）')
-    await load()
-  } catch (e) { setMessage('保存失败：' + errorMessage(e), true) }
-  finally { saving.value = false }
+  try { await api(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(toPayload()) }); setMessage('配置已保存'); await load() } catch (e) { setMessage('保存失败：' + failText(e), true) } finally { saving.value = false }
 }
-
-async function saveFromJson() {
-  saving.value = true; setMessage('保存中…')
-  try {
-    const parsed = JSON.parse(jsonText.value)
-    delete parsed.id; delete parsed.user_id
-    applyData(parsed)
-    const errs = validate()
-    if (errs.length) { setMessage('请完善后再保存：' + errs.join('；'), true); return }
-    await api(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(toPayload()) })
-    setMessage('已保存 ✓')
-    await load()
-  } catch (e) { setMessage('保存失败：' + errorMessage(e), true) }
-  finally { saving.value = false }
-}
-
-function toJson() { jsonError.value = ''; jsonText.value = JSON.stringify(toPayload(), null, 2); tab.value = 'json' }
-function applyJson() {
-  try { applyData(JSON.parse(jsonText.value)); jsonError.value = ''; setMessage('已应用 JSON 到表单（记得点「保存配置」）') }
-  catch (e) { jsonError.value = 'JSON 格式错误：' + errorMessage(e) }
-}
-
-// ---------- 白盒指标自动探测（P2） ----------
-const discovering = ref(false)
-const discoverResult = ref<any>(null)
-const discoverForm = ref({ url: '', auth_type: 'none', token: '', route_label: 'handler', scrape_timeout_ms: 5000 })
-async function discoverMetrics() {
-  discovering.value = true
-  discoverResult.value = null
-  try {
-    const r = await api<Record<string, unknown>>(`/projects/${id}/metrics/discover`, { method: 'POST', body: JSON.stringify(discoverForm.value) })
-    discoverResult.value = r
-    if (!r?.scrape_ok) setMessage('探测失败：' + String(r?.error || '无法抓取该地址'), true)
-    else setMessage('探测成功：识别为 ' + String(r.framework_label || r.framework) + '，建议添加 ' + ((r.suggested_rules as unknown[])?.length || 0) + ' 条规则')
-  } catch (e) { setMessage('探测失败：' + errorMessage(e), true) }
-  finally { discovering.value = false }
-}
-async function applyDiscovered() {
-  const r = discoverResult.value
-  if (!r?.suggested_source) return
-  saving.value = true
-  try {
-    const res = await api<{ added_metrics_sources: number, added_rules: number }>(`/projects/${id}/metrics/apply`, {
-      method: 'POST',
-      body: JSON.stringify({ source: r.suggested_source, rules: r.suggested_rules || [] }),
-    })
-    setMessage(`已应用：${res.added_metrics_sources} 个指标源、${res.added_rules} 条规则（已自动去重）`)
-    await load()
-  } catch (e) { setMessage('应用失败：' + errorMessage(e), true) }
-  finally { saving.value = false }
-}
-function addManualMetricsSource() { cfg.value.metrics_sources.push(blankMetricsSource()) }
-
-// ---------- 采集测试 / 快照 ----------
 async function test() {
-  if (testing.value) return
-  const errs = validate()
-  if (errs.length) { setMessage('当前配置不可测试：' + errs.join('；'), true); return }
-  testing.value = true; setMessage('采集测试中…')
+  if (testing.value || !prepareQuick()) return
+  const errs = validate(); if (errs.length) { setMessage(errs.join('；'), true); return }
+  testing.value = true; setMessage('正在测试三个采集入口…')
   try {
     snapshot.value = await api<SnapshotDTO>(`/projects/${id}/test`, { method: 'POST', body: JSON.stringify(toPayload()) })
-    const snap = snapshot.value
-    const statuses = Object.values(snap?.collector_status || {})
-    const missingRules = cfg.value.rules.filter((rule: FormRule) => {
-      if (!rule.enabled) return false
-      if (rule.resource_key === 'default') return !(rule.metric_key in (snap?.signals || {}))
-      return !(rule.resource_key in (snap?.resource_signals || {}) && rule.metric_key in (snap?.resource_signals?.[rule.resource_key] || {}))
-    }).map((rule: FormRule) => `${rule.metric_key}/${rule.resource_key}`)
-    testFeedback.value = { passed: statuses.filter(x => x.ok).length, failed: statuses.filter(x => !x.ok).length, missingRules }
-    tab.value = 'snapshot'
-    setMessage(testFeedback.value.failed || missingRules.length ? '采集完成，但存在异常，请查看下方反馈' : '采集测试完成（使用当前草稿，dry-run 不落库）', Boolean(testFeedback.value.failed || missingRules.length))
-  } catch (e) { setMessage('采集失败：' + errorMessage(e), true) }
-  finally { testing.value = false }
+    const statuses = Object.values(snapshot.value.collector_status || {})
+    const missing = cfg.value.rules.filter(x => x.enabled && !(x.metric_key in (snapshot.value?.signals || {}))).map(x => x.metric_key)
+    testSummary.value = { passed: statuses.filter(x => x.ok).length, failed: statuses.filter(x => !x.ok).length, missing }
+    setMessage(testSummary.value.failed || missing.length ? '测试完成，但有采集器或指标异常' : `测试通过，已收到 ${Object.keys(snapshot.value.signals || {}).length} 个指标` , !!(testSummary.value.failed || missing.length))
+  } catch (e) { setMessage('测试失败：' + failText(e), true) } finally { testing.value = false }
 }
-async function latest() {
-  try { snapshot.value = await api<SnapshotDTO>(`/projects/${id}/snapshot`); tab.value = 'snapshot' }
-  catch (e) { setMessage('获取快照失败：' + errorMessage(e), true) }
-}
-
+async function latest() { try { snapshot.value = await api<SnapshotDTO>(`/projects/${id}/snapshot`) } catch (e) { setMessage('读取快照失败：' + failText(e), true) } }
 onMounted(load)
 </script>
 
 <template>
-  <div class="page">
+  <div class="page project-detail">
     <div class="page-head">
-      <div><h1>{{ cfg.name || '项目' }}</h1><p class="sub">监控项目配置 · 表单填写即可，无需手写 JSON；数据库密码不回传，留空即保留已存密码</p></div>
-      <div style="display: flex; gap: 8px">
-        <el-button :loading="testing" @click="test">测试采集</el-button>
-        <el-button @click="latest">最近快照</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
-      </div>
+      <div><div class="eyebrow">REMOTE PYTHON MONITOR</div><h1>{{ cfg.name || '项目监控' }}</h1><p class="sub">绑定一台服务器，再填写健康检查和 Prometheus 地址即可开始监控。</p></div>
+      <div class="head-actions"><el-button :loading="testing" @click="test">测试采集</el-button><el-button @click="latest">最近快照</el-button><el-button type="primary" :loading="saving" @click="save">保存配置</el-button></div>
     </div>
-    <p v-if="message" class="msg" :class="messageError ? 'err' : ''">{{ message }}</p>
-    <div v-if="testFeedback" class="test-feedback">
-      <span>采集器：{{ testFeedback.passed }} 正常<span v-if="testFeedback.failed">，{{ testFeedback.failed }} 异常</span></span>
-      <span v-if="testFeedback.missingRules.length" class="err-text">未返回规则指标：{{ testFeedback.missingRules.join('、') }}</span>
+    <el-alert v-if="message" :title="message" :type="error ? 'error' : 'success'" show-icon :closable="false" class="notice" />
+
+    <div class="layout">
+      <main>
+        <section class="card setup-card">
+          <div class="section-title"><div><span class="step">1</span><div><h2>项目基本信息</h2><p>这部分只描述你要监控的 Python 服务。</p></div></div><el-tag :type="cfg.enabled ? 'success' : 'info'">{{ cfg.enabled ? '监控中' : '已停用' }}</el-tag></div>
+          <div class="form-grid"><el-form-item label="项目名称（必填）"><el-input v-model="cfg.name" placeholder="例如：股票行情 API" /></el-form-item><el-form-item label="采集间隔（秒）"><el-input-number v-model="cfg.poll_interval" :min="10" :max="86400" style="width:100%" /></el-form-item><el-form-item label="项目说明" class="full"><el-input v-model="cfg.description" placeholder="可选，例如：生产环境股票服务" /></el-form-item></div>
+          <div class="server-banner"><div class="server-icon">⌁</div><div><b>{{ cfg.server?.name || '未绑定服务器' }}</b><p>服务器采集器：{{ cfg.server?.node_metrics_url || '未配置' }}<span v-if="cfg.server?.gpu_metrics_url"> · 已配置 GPU</span></p></div><el-switch v-model="cfg.enabled" active-text="启用监控" /></div>
+        </section>
+
+        <section class="card setup-card"><div class="section-title"><div><span class="step">2</span><div><h2>服务采集入口</h2><p>Oncall 会定时请求这两个地址；不用填写进程、日志或数据库信息。</p></div></div></div>
+          <el-form-item label="健康检查地址（必填）"><el-input v-model="quick.healthUrl" placeholder="例如：https://stock.example.com/health" /></el-form-item><p class="hint">返回 2xx 且响应时间正常，代表服务探活通过；连续失败会触发告警。</p>
+          <el-form-item label="Prometheus /metrics 地址（必填）"><el-input v-model="quick.metricsUrl" placeholder="例如：https://stock.example.com/metrics" /></el-form-item><p class="hint">必须能返回标准 Prometheus 文本格式；系统会从实际返回内容识别应用请求、延迟和 Python 进程指标。</p>
+        </section>
+
+        <section class="card setup-card"><div class="section-title"><div><span class="step">3</span><div><h2>告警规则</h2><p>系统只依据当前可采集指标判断异常；保存后可以在快照中验证。</p></div></div><el-button plain size="small" @click="cfg.rules = starterRules()">恢复默认规则</el-button></div>
+          <div class="rule-summary"><div><b>{{ cfg.rules.filter(x => x.enabled).length }}</b><span>条启用规则</span></div><div><b>{{ metricCount }}</b><span>个标准指标{{ cfg.server?.gpu_metrics_url ? '（含 GPU）' : '' }}</span></div><div><b>3</b><span>个采集入口</span></div></div>
+          <div class="rule-list"><div v-for="rule in cfg.rules.filter(x => x.enabled)" :key="rule.id || rule.metric_key" class="rule-row"><span class="rule-dot" :class="rule.severity"></span><span class="rule-name">{{ rule.metric_key }}</span><span class="rule-condition">{{ rule.operator }} {{ rule.trigger_threshold }} · 连续 {{ rule.trigger_for }} 次</span><el-tag size="small" effect="plain">{{ rule.detection_mode === 'threshold' ? '阈值' : '阈值 + 基线' }}</el-tag></div></div>
+        </section>
+        <section v-if="snapshot" class="card setup-card"><div class="section-title"><div><h2>最近采集快照</h2><p>{{ snapshot.observed_at }}</p></div></div><div class="collector-status"><span v-for="(v,k) in snapshot.collector_status" :key="k" :class="v.ok ? 'ok' : 'bad'">{{ k }} · {{ v.ok ? '正常' : '失败' }}</span></div><pre>{{ JSON.stringify(snapshot.signals, null, 2) }}</pre></section>
+      </main>
+      <aside>
+        <section class="card side-card"><div class="side-label">监控范围</div><div class="metric-total">{{ metricCount }}<small> 项</small></div><p>从服务器采集器、健康检查和应用 `/metrics` 汇总而来。</p><div class="metric-group"><b>服务器 · {{ HOST_METRICS.length }} 项</b><span v-for="m in HOST_METRICS" :key="m[0]">{{ m[1] }}</span></div><div v-if="cfg.server?.gpu_metrics_url" class="metric-group gpu"><b>GPU · {{ GPU_METRICS.length }} 项</b><span v-for="m in GPU_METRICS" :key="m[0]">{{ m[1] }}</span></div><div class="metric-group"><b>服务 · {{ SERVICE_METRICS.length }} 项</b><span v-for="m in SERVICE_METRICS" :key="m[0]">{{ m[1] }}</span></div><div class="metric-group"><b>应用 · {{ APP_METRICS.length + PROCESS_METRICS.length }} 项</b><span>请求、错误率、P95/P99、可用性</span><span>Python 进程 CPU、内存、句柄、存活</span></div></section>
+        <section class="card side-card tip-card"><b>配置顺序</b><ol><li>先在服务器页面配置 Node Exporter（可选 GPU Exporter）。</li><li>选择服务器并填写本项目两个 URL。</li><li>点击“测试采集”，通过后保存并启用。</li></ol></section>
+      </aside>
     </div>
-
-    <el-tabs v-model="tab">
-      <el-tab-pane label="表单配置" name="form">
-        <el-form label-position="top" size="default">
-          <div class="card quick-card">
-            <div class="quick-head">
-              <div>
-                <h3>快速配置</h3>
-                <p class="muted quick-desc">输入项目目录和一个健康检查地址，系统会自动生成进程、服务、日志和基础告警配置。</p>
-              </div>
-              <el-tag type="success" effect="plain">推荐</el-tag>
-            </div>
-            <div class="quick-grid">
-              <el-form-item label="项目目录（可选）" class="span-2">
-                <el-input v-model="quick.projectPath" placeholder="例如：D:\\GEO\\Auto_GEO-main" />
-                <small class="field-help">用于识别本机进程和工作目录；如果只监控 HTTP 服务可以留空。</small>
-              </el-form-item>
-              <el-form-item label="健康检查地址（可选）" class="span-2">
-                <el-input v-model="quick.healthUrl" placeholder="例如：http://127.0.0.1:8001/api/health" />
-                <small class="field-help">返回 200 表示服务正常。</small>
-              </el-form-item>
-              <el-form-item label="日志文件（可选）" class="span-2">
-                <el-input v-model="quick.logPath" placeholder="例如：D:\\GEO\\Auto_GEO-main\\backend\\logs\\app.log" />
-                <small class="field-help">填写正在写入的日志文件；暂不需要日志监控可以留空。</small>
-              </el-form-item>
-              <el-form-item label="检查间隔（秒）">
-                <el-input-number v-model="quick.pollInterval" :min="10" :max="86400" style="width: 100%" />
-              </el-form-item>
-            </div>
-            <div class="quick-actions">
-              <el-button type="primary" :loading="saving" @click="quickSetup">生成并保存</el-button>
-              <el-button text @click="advancedMode = !advancedMode">{{ advancedMode ? '收起高级配置' : '打开高级配置' }}</el-button>
-              <span class="muted quick-note">保存后可点击右上角“测试采集”验证。</span>
-            </div>
-          </div>
-
-          <div v-if="advancedMode" class="advanced-config">
-          <!-- 基本信息 -->
-          <div class="card form-card">
-            <h3>基本信息</h3>
-            <div class="field-grid">
-              <el-form-item label="项目名称（必填）" class="span-2"><el-input v-model="cfg.name" placeholder="例如：本机监控" /></el-form-item>
-              <el-form-item label="采集间隔（秒）">
-                <el-input-number v-model="cfg.poll_interval" :min="10" :max="86400" style="width: 100%" />
-              </el-form-item>
-              <el-form-item label="时区">
-                <el-select v-model="cfg.timezone" filterable allow-create default-first-option style="width: 100%">
-                  <el-option v-for="t in TIMEZONES" :key="t" :label="t" :value="t" />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="启用监控"><el-switch v-model="cfg.enabled" active-text="启用" /></el-form-item>
-            </div>
-            <el-form-item label="描述（可选）"><el-input v-model="cfg.description" placeholder="给这个项目写一句说明" /></el-form-item>
-          </div>
-
-          <!-- 服务分组 -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>服务分组</h3>
-                <p class="muted sec-desc">把进程、容器、数据库、HTTP 服务、指标源归入一个「服务」，告警与事件就能按服务聚合，一眼看清是哪个业务出了问题</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="cfg.services.push(blankServiceGroup())">＋ 添加服务</el-button>
-            </div>
-            <p v-if="!cfg.services.length" class="empty-hint">未配置任何服务分组。点击「添加服务」，给一组监控目标起个名字（如「结算服务」）。</p>
-            <div v-for="(row, i) in cfg.services" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} {{ row.name || '服务' }}</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.services.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="服务名称（必填）"><el-input v-model="row.name" placeholder="例如：结算服务" /></el-form-item>
-                <el-form-item label="说明（可选）" class="span-2"><el-input v-model="row.description" placeholder="这个服务负责什么" /></el-form-item>
-              </div>
-            </div>
-            <p v-if="cfg.services.length" class="muted" style="font-size: 12px; margin-top: 6px">提示：保存本页后，下方各监控目标的「所属服务」下拉里即可选择这些服务。</p>
-          </div>
-
-          <!-- 进程绑定 -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>进程监控</h3>
-                <p class="muted sec-desc">按「可执行文件名」或「命令行关键字」匹配本机进程，采集其 CPU、内存、存活状态</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="cfg.process_targets.push(blankProcess())">＋ 添加进程</el-button>
-            </div>
-            <p v-if="!cfg.process_targets.length" class="empty-hint">未配置任何进程。点击「添加进程」，填上进程名（如 python）即可开始监控。</p>
-            <div v-for="(row, i) in cfg.process_targets" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} {{ row.name || '进程' }}</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.process_targets.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="名称"><el-input v-model="row.name" placeholder="例如：后端服务" /></el-form-item>
-                <el-form-item label="可执行文件名（可留空）"><el-input v-model="row.executable" placeholder="例如：python" /></el-form-item>
-                <el-form-item label="命令行关键字（逗号分隔）"><el-input v-model="row.cmdline_filters" placeholder="例如：uvicorn, 8000" /></el-form-item>
-                <el-form-item label="工作目录（可留空）"><el-input v-model="row.cwd" placeholder="例如：D:\app" /></el-form-item>
-                <el-form-item label="端口（可留空）"><el-input-number v-model="row.port" :min="1" :max="65535" style="width: 100%" /></el-form-item>
-                <el-form-item label="所属服务">
-                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
-                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </div>
-          </div>
-
-          <!-- 日志绑定 -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>日志监控</h3>
-                <p class="muted sec-desc">监控日志文件的错误/警告，自动统计窗口内条数与速率；只读新增内容，不重复扫描</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="cfg.log_sources.push(blankLog())">＋ 添加日志</el-button>
-            </div>
-            <p v-if="!cfg.log_sources.length" class="empty-hint">未配置任何日志。点击「添加日志」，填入日志文件的完整路径（如 D:\app\logs\app.log）。</p>
-            <div v-for="(row, i) in cfg.log_sources" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} 日志</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.log_sources.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="日志文件完整路径（必填）" class="span-2"><el-input v-model="row.path" placeholder="例如：D:\app\logs\app.log" /></el-form-item>
-                <el-form-item label="文件编码">
-                  <el-select v-model="row.encoding" style="width: 100%">
-                    <el-option v-for="e in ENCODINGS" :key="e" :label="e" :value="e" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="所属服务">
-                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
-                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </div>
-          </div>
-
-          <!-- Docker 绑定 -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>Docker 容器监控</h3>
-                <p class="muted sec-desc">按容器名或容器 ID 监控容器的运行状态、健康、CPU、内存、重启次数</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="cfg.docker_targets.push(blankDocker())">＋ 添加容器</el-button>
-            </div>
-            <p v-if="!cfg.docker_targets.length" class="empty-hint">未配置任何容器。点击「添加容器」，填容器名（如 postgres）或容器 ID。</p>
-            <div v-for="(row, i) in cfg.docker_targets" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} 容器</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.docker_targets.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="容器名 / 容器 ID（必填）" class="span-2"><el-input v-model="row.container_ref" placeholder="例如：postgres" /></el-form-item>
-                <el-form-item label="所属服务">
-                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
-                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </div>
-          </div>
-
-          <!-- 数据库绑定 -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>数据库监控</h3>
-                <p class="muted sec-desc">连接 PostgreSQL 采集连接数、长查询、锁等待、死锁。密码加密存储，回显为空属正常</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="cfg.database_profiles.push(blankDb())">＋ 添加数据库</el-button>
-            </div>
-            <p v-if="!cfg.database_profiles.length" class="empty-hint">未配置任何数据库。点击「添加数据库」，填写连接信息；建议使用只读账号。</p>
-            <div v-for="(row, i) in cfg.database_profiles" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} {{ row.database || '数据库' }}</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.database_profiles.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="类型"><el-select v-model="row.type" style="width: 100%"><el-option label="postgresql" value="postgresql" /></el-select></el-form-item>
-                <el-form-item label="主机（必填）"><el-input v-model="row.host" placeholder="例如：127.0.0.1" /></el-form-item>
-                <el-form-item label="端口"><el-input-number v-model="row.port" :min="1" :max="65535" style="width: 100%" /></el-form-item>
-                <el-form-item label="数据库名（必填）"><el-input v-model="row.database" placeholder="例如：autogeo" /></el-form-item>
-                <el-form-item label="用户名（必填）"><el-input v-model="row.username" placeholder="例如：oncall_readonly" /></el-form-item>
-                <el-form-item label="密码（留空=保留已存密码）"><el-input v-model="row.password" type="password" show-password placeholder="首次配置请填写" /></el-form-item>
-                <el-form-item label="SSL 模式">
-                  <el-select v-model="row.sslmode" style="width: 100%">
-                    <el-option v-for="s in SSL_MODES" :key="s" :label="s" :value="s" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="所属服务">
-                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
-                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </div>
-          </div>
-
-          <!-- 服务绑定 -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>HTTP 服务探活</h3>
-                <p class="muted sec-desc">定时请求服务地址，监控可达性、状态码、响应延迟、连续失败次数</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="cfg.service_endpoints.push(blankService())">＋ 添加服务</el-button>
-            </div>
-            <p v-if="!cfg.service_endpoints.length" class="empty-hint">未配置任何服务。点击「添加服务」，填入健康检查地址（如 http://127.0.0.1:8000/health）。</p>
-            <div v-for="(row, i) in cfg.service_endpoints" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} {{ row.name || '服务' }}</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.service_endpoints.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="名称"><el-input v-model="row.name" placeholder="例如：健康检查" /></el-form-item>
-                <el-form-item label="服务地址（必填）" class="span-2"><el-input v-model="row.url" placeholder="例如：http://127.0.0.1:8000/health" /></el-form-item>
-                <el-form-item label="请求方式">
-                  <el-select v-model="row.method" style="width: 100%">
-                    <el-option v-for="m in HTTP_METHODS" :key="m" :label="m" :value="m" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="期望状态码"><el-input-number v-model="row.expected_status" :min="100" :max="599" style="width: 100%" /></el-form-item>
-                <el-form-item label="超时（毫秒）"><el-input-number v-model="row.timeout_ms" :min="100" :max="60000" style="width: 100%" /></el-form-item>
-                <el-form-item label="所属服务">
-                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
-                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </div>
-          </div>
-
-          <!-- 白盒应用指标（Prometheus /metrics） -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>白盒应用指标（Prometheus /metrics）</h3>
-                <p class="muted sec-desc">抓取应用自身暴露的指标（请求速率、错误率、延迟分位），比外部探活更贴近真实用户体验。支持 FastAPI / Starlette / Django / Flask 等主流埋点库。</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="addManualMetricsSource()">＋ 手动添加指标源</el-button>
-            </div>
-
-            <div class="discover-box">
-              <div class="discover-form">
-                <el-form-item label="/metrics 地址" class="span-2">
-                  <el-input v-model="discoverForm.url" placeholder="例如：http://127.0.0.1:8000/metrics" />
-                </el-form-item>
-                <el-form-item label="鉴权方式">
-                  <el-select v-model="discoverForm.auth_type" style="width: 100%">
-                    <el-option v-for="a in AUTH_TYPES" :key="a" :label="a" :value="a" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="Token" v-if="discoverForm.auth_type !== 'none'">
-                  <el-input v-model="discoverForm.token" placeholder="Bearer / Basic 凭证" />
-                </el-form-item>
-                <el-form-item label="路由标签">
-                  <el-input v-model="discoverForm.route_label" placeholder="handler / uri / view" />
-                </el-form-item>
-                <el-form-item label="抓取超时(ms)">
-                  <el-input-number v-model="discoverForm.scrape_timeout_ms" :min="100" :max="60000" style="width: 100%" />
-                </el-form-item>
-              </div>
-              <div class="discover-actions">
-                <el-button type="primary" :loading="discovering" @click="discoverMetrics()">自动探测</el-button>
-                <span class="muted">填入地址后一键识别框架并生成建议规则</span>
-              </div>
-
-              <div v-if="discoverResult" class="discover-result">
-                <template v-if="discoverResult.scrape_ok">
-                  <p><b>识别框架：</b>{{ discoverResult.framework_label }}</p>
-                  <p v-if="(discoverResult.discovered_routes || []).length"><b>已发现路由：</b>{{ discoverResult.discovered_routes.join('、') }}</p>
-                  <p><b>建议规则（{{ (discoverResult.suggested_rules || []).length }} 条）：</b></p>
-                  <ul class="rule-preview">
-                    <li v-for="(r, ri) in discoverResult.suggested_rules" :key="ri">
-                      {{ r.metric_key }} · {{ r.resource_key }} · {{ r.operator }} {{ r.trigger_threshold }}（恢复 {{ r.recovery_threshold }}） · {{ r.severity }}
-                    </li>
-                  </ul>
-                  <el-button type="success" size="small" @click="applyDiscovered()">应用建议</el-button>
-                </template>
-                <p v-else class="error-text">探测失败：{{ discoverResult.error }}</p>
-              </div>
-            </div>
-
-            <p v-if="!cfg.metrics_sources.length" class="empty-hint">尚未配置指标源。可点「自动探测」或「手动添加指标源」。</p>
-            <div v-for="(row, i) in cfg.metrics_sources" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} {{ row.name || '指标源' }}</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.metrics_sources.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="名称"><el-input v-model="row.name" placeholder="例如：app" /></el-form-item>
-                <el-form-item label="/metrics 地址（必填）" class="span-2"><el-input v-model="row.url" placeholder="例如：http://127.0.0.1:8000/metrics" /></el-form-item>
-                <el-form-item label="鉴权方式">
-                  <el-select v-model="row.auth_type" style="width: 100%">
-                    <el-option v-for="a in AUTH_TYPES" :key="a" :label="a" :value="a" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="Token" v-if="row.auth_type !== 'none'"><el-input v-model="row.token" placeholder="Bearer / Basic 凭证" /></el-form-item>
-                <el-form-item label="路由标签"><el-input v-model="row.route_label" placeholder="handler" /></el-form-item>
-                <el-form-item label="抓取超时(ms)"><el-input-number v-model="row.scrape_timeout_ms" :min="100" :max="60000" style="width: 100%" /></el-form-item>
-                <el-form-item label="所属服务">
-                  <el-select v-model="row.service_id" clearable style="width: 100%" placeholder="不绑定（项目级）">
-                    <el-option v-for="o in serviceOptions()" :key="o.value" :label="o.label" :value="o.value" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </div>
-          </div>
-
-          <!-- 告警规则 -->
-          <div class="card form-card">
-            <div class="sec-head">
-              <div>
-                <h3>告警规则</h3>
-                <p class="muted sec-desc">指标超过「触发阈值」并持续「持续次数」次 → 告警；回落到「恢复阈值」并持续 → 恢复。指标可直接从下拉选择</p>
-              </div>
-              <el-button type="primary" plain size="small" @click="cfg.rules.push(blankRule())">＋ 添加规则</el-button>
-            </div>
-            <p v-if="!cfg.rules.length" class="empty-hint">没有告警规则，项目仍会采集数据但不会产生告警。点击「添加规则」开始。</p>
-            <div v-for="(row, i) in cfg.rules" :key="i" class="row-card">
-              <div class="row-head">
-                <b>#{{ Number(i) + 1 }} {{ row.metric_key || '未选择指标' }}</b>
-                <span class="grow"></span>
-                <el-switch v-model="row.enabled" active-text="启用" />
-                <el-button text type="danger" @click="cfg.rules.splice(i, 1)">删除</el-button>
-              </div>
-              <div class="field-grid">
-                <el-form-item label="监控指标（必选）" class="span-2">
-                  <el-select v-model="row.metric_key" filterable style="width: 100%" placeholder="选择要监控的指标">
-                    <el-option-group v-for="g in METRIC_GROUPS" :key="g.label" :label="g.label">
-                      <el-option v-for="o in g.options" :key="o.value" :label="o.label" :value="o.value" />
-                    </el-option-group>
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="条件">
-                  <el-select v-model="row.operator" style="width: 100%">
-                    <el-option v-for="o in OPERATORS" :key="o" :label="o" :value="o" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="触发阈值（必填）"><el-input-number v-model="row.trigger_threshold" style="width: 100%" /></el-form-item>
-                <el-form-item label="持续次数"><el-input-number v-model="row.trigger_for" :min="1" :max="100" style="width: 100%" /></el-form-item>
-                <el-form-item label="恢复阈值（必填）"><el-input-number v-model="row.recovery_threshold" style="width: 100%" /></el-form-item>
-                <el-form-item label="恢复持续次数"><el-input-number v-model="row.recovery_for" :min="1" :max="100" style="width: 100%" /></el-form-item>
-                <el-form-item label="级别">
-                  <el-select v-model="row.severity" style="width: 100%">
-                    <el-option v-for="s in SEVERITIES" :key="s" :label="s" :value="s" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="目标资源（可选，默认项目聚合）">
-                  <el-select v-model="row.resource_key" filterable allow-create default-first-option style="width: 100%" placeholder="选择具体进程/服务，或使用项目聚合">
-                    <el-option v-for="o in resourceOptions(row.metric_key)" :key="o.value" :label="o.label" :value="o.value" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </div>
-          </div>
-          </div>
-        </el-form>
-      </el-tab-pane>
-
-      <el-tab-pane label="JSON 高级编辑" name="json">
-        <div class="card">
-          <div class="toolbar-row">
-            <el-button size="small" @click="toJson">从表单生成 JSON</el-button>
-            <el-button size="small" @click="applyJson">应用 JSON 到表单</el-button>
-            <span class="muted" style="font-size: 12px">数据库密码填 null = 保留已存密码；想改密码请填新值</span>
-          </div>
-          <textarea class="json-editor" v-model="jsonText" spellcheck="false"></textarea>
-          <p v-if="jsonError" style="color: var(--danger); font-size: 13px; margin-top: 8px">{{ jsonError }}</p>
-        </div>
-      </el-tab-pane>
-
-      <el-tab-pane label="采集快照" name="snapshot">
-        <div class="card">
-          <template v-if="snapshot">
-            <div v-if="snapshot.collector_status" class="collector-grid">
-              <div v-for="(v, k) in snapshot.collector_status" :key="k" class="collector-chip" :class="v.ok ? 'ok' : 'err'">
-                <b>{{ k }}</b>
-                <span>{{ v.ok ? '正常' : (v.error || '异常') }}</span>
-              </div>
-            </div>
-            <p v-if="snapshot.observed_at" class="muted" style="font-size: 12px">采集时间：{{ snapshot.observed_at }}</p>
-            <pre class="snapshot">{{ JSON.stringify(snapshot, null, 2) }}</pre>
-          </template>
-          <p v-else class="muted">尚未采集，点击上方「测试采集」或「最近快照」</p>
-        </div>
-      </el-tab-pane>
-    </el-tabs>
   </div>
 </template>
 
 <style scoped>
-.msg { font-size: 13px; color: var(--success); margin: -8px 0 14px; }
-.msg.err { color: var(--danger); }
-.quick-card { margin-bottom: 16px; border: 1px solid #dfe0ff; background: linear-gradient(135deg, #fbfbff, #fff); }
-.quick-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
-.quick-head h3 { margin: 0 0 4px; }
-.quick-desc { margin: 0; font-size: 13px; }
-.quick-grid { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 0 14px; }
-.quick-grid .span-2 { grid-column: span 2; }
-.field-help { display: block; margin-top: 4px; color: var(--text-3); font-size: 12px; line-height: 1.35; }
-.quick-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
-.quick-note { font-size: 12px; }
-.advanced-config { border-top: 1px dashed var(--border); padding-top: 16px; }
-.test-feedback { display: flex; flex-wrap: wrap; gap: 12px; margin: -6px 0 14px; font-size: 13px; color: var(--text-2); }
-.err-text { color: var(--danger); }
-.form-card { margin-bottom: 16px; }
-.sec-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.sec-head h3 { margin-bottom: 2px; }
-.sec-desc { font-size: 12.5px; margin: 0; }
-.field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); column-gap: 14px; }
-.field-grid .span-2 { grid-column: span 2; }
-.row-card {
-  border: 1px solid var(--border); border-left: 3px solid var(--accent);
-  border-radius: var(--r-md); background: #fbfbfc; padding: 12px 16px; margin-bottom: 12px;
-}
-.row-head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
-.row-head b { font-size: 14px; }
-.grow { flex: 1; }
-.empty-hint {
-  background: var(--accent-soft); color: var(--text-2); border-radius: var(--r-sm);
-  padding: 10px 14px; font-size: 13px; margin: 0 0 12px;
-}
-.toolbar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-.collector-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.collector-chip {
-  border-radius: 999px; padding: 4px 12px; font-size: 12px; display: inline-flex; gap: 6px; align-items: center;
-}
-.collector-chip.ok { background: #e6f7ec; color: #17823f; }
-.collector-chip.err { background: #fdeceb; color: #c22c34; }
-.discover-box { background: var(--accent-soft); border-radius: var(--r-sm); padding: 14px; margin-bottom: 14px; }
-.discover-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); column-gap: 14px; row-gap: 0; }
-.discover-form .span-2 { grid-column: span 2; }
-.discover-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 4px; }
-.discover-result { margin-top: 10px; border-top: 1px solid var(--border, #eee); padding-top: 10px; font-size: 13px; }
-.discover-result p { margin: 4px 0; }
-.rule-preview { margin: 6px 0 10px; padding-left: 18px; max-height: 220px; overflow: auto; }
-.rule-preview li { margin: 2px 0; color: var(--text-2); }
-.error-text { color: #c22c34; }
-@media (max-width: 760px) {
-  .quick-grid { grid-template-columns: 1fr; }
-  .quick-grid .span-2 { grid-column: auto; }
-  .discover-form .span-2 { grid-column: auto; }
-}
+.project-detail { --green: #18a77a; --ink: #18352d; --muted: #6e817b; max-width: 1240px; }
+.page-head { align-items: flex-end; }.eyebrow { color: var(--green); font-size: 11px; font-weight: 800; letter-spacing: .14em; margin-bottom: 8px; }.head-actions { display:flex; gap:8px; flex-wrap:wrap; }.notice { margin: 0 0 16px; }
+.layout { display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:18px; }.card { border:1px solid #e1ebe7; box-shadow:0 8px 24px rgba(35,89,71,.05); }.setup-card { margin-bottom:16px; padding:22px; }.section-title { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:20px; }.section-title > div:first-child { display:flex; gap:12px; }.section-title h2 { color:var(--ink); margin:0 0 4px; font-size:18px; }.section-title p { color:var(--muted); margin:0; font-size:13px; }.step { width:28px; height:28px; display:grid; place-items:center; border-radius:9px; color:#fff; background:var(--green); font-weight:800; }.form-grid { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }.form-grid .full { grid-column:1/-1; }.hint { color:var(--muted); font-size:12px; margin:-8px 0 14px; }.server-banner { background:#f1fbf7; border:1px solid #cdeee1; border-radius:12px; padding:13px 15px; display:flex; gap:12px; align-items:center; margin-top:8px; }.server-icon { width:32px; height:32px; border-radius:10px; display:grid; place-items:center; color:#fff; background:var(--green); font-size:22px; }.server-banner b { color:var(--ink); }.server-banner p { color:var(--muted); margin:3px 0 0; font-size:12px; }.server-banner .el-switch { margin-left:auto; }.rule-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:16px; }.rule-summary > div { background:#f6faf8; border-radius:11px; padding:12px; }.rule-summary b { display:block; color:var(--green); font-size:22px; }.rule-summary span { color:var(--muted); font-size:12px; }.rule-row { display:flex; align-items:center; gap:9px; padding:10px 0; border-top:1px solid #edf2ef; font-size:12px; }.rule-dot { width:7px; height:7px; border-radius:50%; background:#f0a43c; }.rule-dot.critical { background:#e45a62; }.rule-dot.info { background:#5e9bd5; }.rule-name { color:var(--ink); font-family:ui-monospace,monospace; flex:1; }.rule-condition { color:var(--muted); }.side-card { padding:20px; margin-bottom:16px; }.side-label { color:var(--muted); font-size:12px; }.metric-total { color:var(--green); font-size:40px; font-weight:800; line-height:1.2; }.metric-total small { font-size:14px; }.side-card > p { color:var(--muted); font-size:12px; line-height:1.6; }.metric-group { border-top:1px solid #edf2ef; padding:13px 0 2px; display:flex; flex-direction:column; gap:5px; }.metric-group b { color:var(--ink); font-size:13px; margin-bottom:3px; }.metric-group span { color:var(--muted); font-size:12px; }.metric-group.gpu b { color:#8e6a16; }.tip-card { background:#f5fbf8; }.tip-card > b { color:var(--ink); }.tip-card ol { margin:10px 0 0; padding-left:18px; color:var(--muted); font-size:12px; line-height:1.8; }.collector-status { display:flex; gap:8px; flex-wrap:wrap; }.collector-status span { border-radius:999px; padding:5px 10px; font-size:12px; }.collector-status .ok { color:#137b58; background:#e5f7ef; }.collector-status .bad { color:#b13e48; background:#ffeded; }pre { background:#182b25; color:#d8f5e8; padding:14px; border-radius:10px; overflow:auto; font-size:12px; }
+@media (max-width:900px) { .layout { grid-template-columns:1fr; }.layout aside { order:-1; }.form-grid { grid-template-columns:1fr; }.form-grid .full { grid-column:auto; }.rule-summary { grid-template-columns:1fr 1fr; } }
+@media (max-width:560px) { .page-head { align-items:flex-start; }.rule-summary { grid-template-columns:1fr; }.rule-condition { display:none; }.setup-card { padding:16px; } }
 </style>

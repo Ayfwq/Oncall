@@ -135,9 +135,42 @@ async def test_resolve_is_idempotent(db, test_user):
     from sqlalchemy import func, select
 
     n = await db.scalar(
-        select(func.count()).select_from(Notification).where(Notification.incident_id == inc.id)
+        select(func.count()).select_from(Notification).where(
+            Notification.incident_id == inc.id,
+            Notification.payload['kind'].astext == 'resolved',
+        )
     )
     assert n == 1
+
+
+@pytest.mark.integration
+async def test_existing_incident_repairs_missing_alert_and_investigation(db, test_user):
+    """A crash between Incident commit and outbox enqueue cannot lose the alert."""
+    from datetime import datetime
+
+    from oncall.infrastructure.db.models import BackgroundJob, Conversation, Notification
+    from sqlalchemy import select
+
+    project = await make_project_with_rule(db, test_user)
+    rid = await rule_id(db, project.id)
+    now = datetime.now().astimezone()
+    inc = Incident(
+        project_id=project.id,
+        fingerprint=incident_fingerprint(project.id, rid, 'default', SYNTH),
+        status='open', severity='warning', anomaly_type=SYNTH,
+        resource_key='default', summary='partially-created incident',
+        first_seen=now, last_seen=now,
+    )
+    db.add(inc)
+    await db.commit()
+    await db.refresh(inc)
+
+    repaired = await IncidentService(db).on_firing(project.id, rid, 'default', SYNTH, 'warning', 96.0)
+
+    assert repaired.id == inc.id
+    assert await db.scalar(select(Conversation).where(Conversation.incident_id == inc.id)) is not None
+    assert await db.scalar(select(Notification).where(Notification.dedupe_key == f'incident:{inc.id}:triggered')) is not None
+    assert await db.scalar(select(BackgroundJob).where(BackgroundJob.idempotency_key == f'incident_investigate:{inc.id}:initial')) is not None
 
 
 @pytest.mark.integration

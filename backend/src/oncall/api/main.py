@@ -30,14 +30,20 @@ from oncall.application.dtos import (
     ConversationCreateDTO,
     ConversationPatchDTO,
     FeishuSettingsDTO,
+    MetricsSourceDTO,
     MetricsApplyDTO,
     MetricsDiscoverDTO,
+    MonitoredServerCreateDTO,
+    MonitoredServerDTO,
     PasswordChangeDTO,
     ProjectCreateDTO,
     ProjectRuntimeConfig,
+    PythonProjectOnboardDTO,
+    ServiceEndpointDTO,
 )
 from oncall.application.knowledge_service import KnowledgeService
 from oncall.application.project_service import ProjectService
+from oncall.application.server_service import MonitoredServerService, to_dto
 from oncall.bootstrap.config import get_settings, update_env_values
 from oncall.bootstrap.logging import configure_logging, set_request_id
 from oncall.infrastructure.db.models import (
@@ -50,6 +56,7 @@ from oncall.infrastructure.db.models import (
     KnowledgeDocument,
     KnowledgeDocumentVersion,
     MetricSample,
+    MonitoredServer,
     MonitoringRule,
     MonitoringRun,
     Notification,
@@ -162,9 +169,54 @@ async def change_password(dto:PasswordChangeDTO,request:Request,user=Depends(cur
 async def me(user=Depends(current_user)):
     return {'id':str(user.id),'username':user.username}
 
+
+@app.get('/api/servers')
+async def list_servers(user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    rows=await MonitoredServerService(db).list(user.id)
+    return [{**to_dto(server).model_dump(mode='json'),'project_count':project_count} for server,project_count in rows]
+
+
+@app.post('/api/servers/test')
+async def test_server_draft(dto:MonitoredServerCreateDTO,user=Depends(current_user)):
+    from uuid import uuid4
+    from oncall.integrations.server_exporters import ServerExportersIntegration
+    result=await ServerExportersIntegration(MonitoredServerDTO(id=uuid4(),**dto.model_dump())).collect()
+    return {'ok':result.ok,'signals':result.signals,'resource_signals':result.resource_signals,'resources':result.resources,'error':result.error}
+
+
+@app.post('/api/servers')
+async def create_server(dto:MonitoredServerCreateDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    try: row=await MonitoredServerService(db).create(user.id,dto)
+    except ValueError as exc: raise HTTPException(409,str(exc))
+    return to_dto(row).model_dump(mode='json')
+
+
+@app.put('/api/servers/{sid}')
+async def update_server(sid:str,dto:MonitoredServerCreateDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    row=await MonitoredServerService(db).update(_uuid(sid),user.id,dto)
+    if row is None: raise HTTPException(404,'not found')
+    return to_dto(row).model_dump(mode='json')
+
+
+@app.post('/api/servers/{sid}/test')
+async def test_server(sid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    from oncall.integrations.server_exporters import ServerExportersIntegration
+    row=await MonitoredServerService(db).get(_uuid(sid),user.id)
+    if row is None: raise HTTPException(404,'not found')
+    result=await ServerExportersIntegration(to_dto(row)).collect()
+    return {'ok':result.ok,'signals':result.signals,'resource_signals':result.resource_signals,'resources':result.resources,'error':result.error}
+
+
+@app.delete('/api/servers/{sid}')
+async def delete_server(sid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    try: deleted=await MonitoredServerService(db).delete(_uuid(sid),user.id)
+    except ValueError as exc: raise HTTPException(409,str(exc))
+    if not deleted: raise HTTPException(404,'not found')
+    return {'ok':True}
+
 @app.get('/api/conversations')
 async def conversations(q:str|None=Query(default=None,max_length=200),include_archived:bool=False,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
-    rows=await ConversationService(db).list(user.id,include_archived=include_archived,query=q);return [{'id':str(x.id),'title':x.title,'type':x.type,'project_id':str(x.project_id) if x.project_id else None,'incident_id':str(x.incident_id) if x.incident_id else None,'updated_at':x.updated_at} for x in rows]
+    rows=await ConversationService(db).list(user.id,include_archived=include_archived,query=q);return [{'id':str(x.id),'title':x.title,'type':x.type,'project_id':str(x.project_id) if x.project_id else None,'incident_id':str(x.incident_id) if x.incident_id else None,'archived':x.archived,'updated_at':x.updated_at} for x in rows]
 
 @app.post('/api/conversations')
 async def create_conversation(dto:ConversationCreateDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
@@ -222,15 +274,75 @@ async def chat(cid:str,dto:ChatMessageDTO,request:Request,user=Depends(current_u
 
 @app.get('/api/projects')
 async def list_projects(user=Depends(current_user),db:AsyncSession=Depends(get_session)):
-    rows=await ProjectService(db).list(user.id);return [{'id':str(x.id),'name':x.name,'description':x.description,'enabled':x.enabled,'poll_interval':x.poll_interval,'updated_at':x.updated_at} for x in rows]
+    rows=await ProjectService(db).list(user.id)
+    server_ids={x.server_id for x in rows if x.server_id}
+    servers={x.id:x for x in (await db.scalars(select(MonitoredServer).where(MonitoredServer.id.in_(server_ids)))).all()} if server_ids else {}
+    return [{'id':str(x.id),'server_id':str(x.server_id) if x.server_id else None,'server_name':servers[x.server_id].name if x.server_id in servers else None,'name':x.name,'description':x.description,'environment':x.environment,'enabled':x.enabled,'poll_interval':x.poll_interval,'updated_at':x.updated_at} for x in rows]
 
 @app.post('/api/projects')
 async def create_project(dto:ProjectCreateDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
-    p=await ProjectService(db).create(user.id,dto);return {'id':str(p.id),'name':p.name}
+    try: p=await ProjectService(db).create(user.id,dto)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    return {'id':str(p.id),'name':p.name}
+
+@app.post('/api/projects/onboard/python')
+async def onboard_python_project(dto:PythonProjectOnboardDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    """Create a remote Python project linked to a tested server."""
+    try: p=await ProjectService(db).create_python(user.id,dto)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    return {'id':str(p.id),'name':p.name,'environment':p.environment,'enabled':p.enabled}
+
+
+@app.post('/api/projects/onboard/python/test')
+async def test_python_project_draft(dto:PythonProjectOnboardDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    """Dry-run all three remote observation paths before a project is saved."""
+    from uuid import uuid4
+
+    from oncall.monitoring.engine import MonitoringEngine
+
+    server=await MonitoredServerService(db).get(dto.server_id,user.id)
+    if server is None:raise HTTPException(404,'selected server was not found')
+    project_id=uuid4()
+    config=ProjectRuntimeConfig(
+        id=project_id,user_id=user.id,server_id=server.id,server=to_dto(server),
+        name=dto.name,description=dto.description,environment='production',
+        enabled=False,poll_interval=dto.poll_interval,
+        service_endpoints=[ServiceEndpointDTO(name=f'{dto.name} 健康检查',url=dto.health_url,enabled=True)],
+        metrics_sources=[MetricsSourceDTO(name='app',url=dto.metrics_url,enabled=True)],
+    )
+    snap=await MonitoringEngine(db).collect(project_id,persist_state=False,config=config)
+    required=('server','service','prometheus')
+    checks=[
+        {'key':key,'ok':bool(snap.collector_status.get(key,{}).get('ok')),'error':snap.collector_status.get(key,{}).get('error')}
+        for key in required
+    ]
+    sources=((snap.resources.get('prometheus') or {}).get('sources') or [])
+    has_http_metrics=any(int(x.get('routes',0) or 0)>0 for x in sources if x.get('ok'))
+    has_process_metrics=any(bool(x.get('process_metrics')) for x in sources if x.get('ok'))
+    warnings=[]
+    if checks[-1]['ok'] and not has_http_metrics:
+        warnings.append('指标地址可访问，但没有识别到带路由和状态码的 HTTP 指标；请求率、错误率和延迟规则暂时没有有效数据。')
+    if checks[-1]['ok'] and not has_process_metrics:
+        warnings.append('指标地址可访问，但没有识别到 Python process_* 指标；进程 CPU、内存、文件数和运行时长暂时没有有效数据。')
+    return {
+        'ok':all(x['ok'] for x in checks),
+        'checks':checks,
+        'capabilities':{
+            'host_metrics':checks[0]['ok'],
+            'gpu_metrics':'host.gpu.available' in snap.signals,
+            'health_check':checks[1]['ok'],
+            'http_metrics':has_http_metrics,
+            'process_metrics':has_process_metrics,
+        },
+        'warnings':warnings,
+        'signals':snap.signals,
+        'collector_status':snap.collector_status,
+    }
 
 @app.put('/api/projects/{pid}')
 async def update_project(pid:str,dto:ProjectCreateDTO,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
-    p=await ProjectService(db).update(_uuid(pid),user.id,dto)
+    try: p=await ProjectService(db).update(_uuid(pid),user.id,dto)
+    except ValueError as exc: raise HTTPException(400,str(exc))
     if not p:raise HTTPException(404,'not found')
     return {'id':str(p.id),'name':p.name}
 
@@ -238,8 +350,10 @@ async def update_project(pid:str,dto:ProjectCreateDTO,user=Depends(current_user)
 
 def _project_runtime_payload(cfg):
     data=cfg.model_dump(mode='json')
-    for dbp in data.get('database_profiles',[]):
-        if dbp.get('password'): dbp['password']=None
+    for source in data.get('metrics_sources',[]):
+        # The worker receives decrypted credentials from runtime_config(), but
+        # browser reads must never echo them back.
+        source['token']=None
     return data
 
 @app.get('/api/projects/{pid}')
@@ -494,7 +608,7 @@ async def settings_readiness(user=Depends(current_user)):
 
 @app.get('/api/settings/feishu')
 async def feishu_settings(user=Depends(current_user)):
-    return {'enabled':s.feishu_enabled,'app_id':s.feishu_app_id,'app_secret_configured':bool(s.feishu_app_secret),'default_receive_id':s.feishu_default_receive_id,'default_receive_id_type':s.feishu_default_receive_id_type,'restart_required':False}
+    return {'enabled':s.feishu_enabled,'app_id':s.feishu_app_id,'app_secret_configured':bool(s.feishu_app_secret),'default_receive_id':s.feishu_default_receive_id,'default_receive_id_type':s.feishu_default_receive_id_type,'restart_required':True}
 
 @app.put('/api/settings/feishu')
 async def update_feishu_settings(dto:FeishuSettingsDTO,user=Depends(current_user)):

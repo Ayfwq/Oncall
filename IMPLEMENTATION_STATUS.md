@@ -11,14 +11,18 @@
 | 模块 | 状态 | 实测口径 |
 |---|---|---|
 | FastAPI / Session Auth / Request-ID | DONE（Real E2E） | 12 个 HTTP 集成测试 + 401/404 全覆盖 |
-| Project 配置（含 Secret 加密） | DONE（Real E2E） | CRUD + /test dry-run + DB 密码加密保留 |
+| Project 配置 | DONE（Real E2E） | 服务器绑定 + 两个远程 URL + /test dry-run |
 | Conversation / Message | DONE（Real E2E） | 创建/搜索/归档/删除 + 重启持久化 |
 | Context Summary（防失忆） | DONE（Real E2E） | 45 条消息触发真实 LLM 摘要，二次压缩 no-op |
 | Unified OncallAgent（LangGraph） | DONE（Real E2E） | PostgreSQL checkpointer + 真实 LLM + 流式 token |
-| 8 Read-only Tools | DONE（Real E2E） | 真实 Host/DB/Docker/Service/Log/Process 数据 |
+| 4 Read-only Tools | DONE（Code + Offline） | 当前指标、指标历史、服务健康、知识库 |
 | Monitoring Engine | DONE（Real E2E） | 多项目真实采集 + detector 状态机 |
-| 32 baseline signals | DONE（Real E2E） | 数量/契约 + 真实 collect 全 32 信号 |
-| 6 Integrations | DONE（Real E2E） | Host/Process/Log/Docker/Postgres/HTTP 实机数据 |
+| 远程 Python 28/34 signals | DONE（Code + Offline） | 28 个基础远程指标；配置 GPU 后增加 6 个 GPU 指标；采集路径已做 allow-list |
+| Python 快速接入 | DONE（Code + Offline） | 创建页/`POST /api/projects/onboard/python` 绑定服务器、健康检查和 Prometheus，并自动生成基础规则 |
+| Prometheus 应用指标 | DONE（Code + Offline） | 多源抓取时间隔离、请求加权错误率、RPS/P95/P99/可用性 |
+| 历史基线规则 | DONE（Code + Offline） | threshold/baseline/hybrid，持久化正常窗口，异常值不回写基线 |
+| NVIDIA GPU 主机指标 | DONE（Code + Offline） | 配置 DCGM URL 后加入 6 项；无 GPU 时不进入规则 |
+| 采集 Integrations | DONE（Code + Offline） | 只保留 server/service/prometheus 三条远程采集路径 |
 | Rule State Machine | DONE（Real E2E） | hysteresis + PG 持久化 + fresh-session 重启恢复 |
 | Incident Manager | DONE（Real E2E） | FIRING→Resolved→再异常 E2E + severity 升级重调查 |
 | Durable Job Queue | DONE（Real E2E） | PG lease/reclaim + 并发删除不崩 worker（Core UPDATE 幂等） |
@@ -35,7 +39,7 @@
 | 流式输出（token + 结构化事件） | DONE（Real E2E） | 真实 LLM 308 token chunk + tool/rag/diagnosis 事件 |
 | Incident Trace UI / Knowledge UI / Settings UI | DONE（Code + Offline） | 构建通过 + API 契约 |
 | Docker Compose | DONE（Real E2E） | 4 容器实际启动 |
-| Alembic initial schema | DONE（Real E2E） | 33 表 + 版本 0001 |
+| Alembic schema | DONE（Code + Offline） | 版本 0004，增加项目环境、基线窗口和自适应规则表 |
 | Restart Persistence | DONE（Real E2E） | 全进程重启后会话/检查点/记忆不丢 |
 | Real LLM E2E | DONE（Real E2E） | 见 RELEASE_VALIDATION.md |
 | Real Feishu E2E | **BLOCKED** | 无飞书 App ID/Secret/receive_id |

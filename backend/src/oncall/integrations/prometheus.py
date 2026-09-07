@@ -134,11 +134,26 @@ class PrometheusIntegration:
             headers['Authorization'] = f'Bearer {src.token}'
         elif src.auth_type == 'basic' and src.token:
             headers['Authorization'] = 'Basic ' + base64.b64encode(src.token.encode()).decode()
-        async with httpx.AsyncClient(timeout=src.scrape_timeout_ms / 1000.0) as client:
+        async with httpx.AsyncClient(timeout=src.scrape_timeout_ms / 1000.0, trust_env=False) as client:
             resp = await client.get(src.url, headers=headers)
             resp.raise_for_status()
             text = resp.text
         families = list(text_string_to_metric_families(text))
+        all_samples = [sample for family in families for sample in family.samples]
+
+        def sample_value(name: str) -> float | None:
+            for sample in all_samples:
+                if sample.name == name:
+                    return float(sample.value)
+            return None
+
+        process = {
+            'cpu_seconds_total': sample_value('process_cpu_seconds_total'),
+            'rss_bytes': sample_value('process_resident_memory_bytes'),
+            'virtual_memory_bytes': sample_value('process_virtual_memory_bytes'),
+            'open_fds': sample_value('process_open_fds'),
+            'start_time_seconds': sample_value('process_start_time_seconds'),
+        }
 
         routes: dict[str, dict[str, Any]] = {}
         has_counter = False
@@ -185,13 +200,25 @@ class PrometheusIntegration:
                     r['total'] += float(s.value)
                     if status >= 500:
                         r['err5xx'] += float(s.value)
-        return {'ok': True, 'routes': routes, 'meta': {'name': src.name, 'url': src.url, 'ok': True, 'routes': len(routes)}}
+        return {'ok': True, 'routes': routes, 'process': process, 'meta': {'name': src.name, 'url': src.url, 'ok': True, 'routes': len(routes), 'process_metrics': process['cpu_seconds_total'] is not None}}
 
     async def collect(self) -> CollectResult:
         signals: dict[str, float] = {}
         resource_signals: dict[str, dict[str, float]] = {}
         resources: dict[str, Any] = {'sources': []}
         any_ok = False
+        global_req_delta = 0.0
+        global_err_delta = 0.0
+        global_rps = 0.0
+        global_p95 = 0.0
+        global_p99 = 0.0
+        global_availability = 100.0
+        process_count = 0.0
+        process_cpu_percent = 0.0
+        process_rss_bytes = 0.0
+        process_virtual_memory_bytes = 0.0
+        process_open_fds = 0.0
+        process_uptime_seconds = 0.0
 
         enabled = [s for s in self.sources if s.enabled]
         if not enabled:
@@ -207,9 +234,29 @@ class PrometheusIntegration:
             resources['sources'].append(data['meta'])
             routes = data['routes']
 
-            prev_ts = await self._get_cursor('_scrape', 'ts')
+            # The scrape clock belongs to this source. Reusing one global clock
+            # made source #2 see an almost-zero interval and fabricate a huge RPS.
+            scrape_cursor_key = f'_scrape:{src.name}'
+            prev_ts = await self._get_cursor(scrape_cursor_key, 'ts')
             now = time.time()
             dt = now - prev_ts if prev_ts else 0.0
+
+            process = data.get('process') or {}
+            process_cpu = process.get('cpu_seconds_total')
+            if process_cpu is not None:
+                process_count += 1.0
+                previous_process_cpu = await self._get_cursor(scrape_cursor_key, '_process_cpu')
+                delta_process_cpu = float(process_cpu) - previous_process_cpu if previous_process_cpu is not None else 0.0
+                if delta_process_cpu >= 0 and dt > 0:
+                    process_cpu_percent += delta_process_cpu / dt * 100.0
+                process_rss_bytes += float(process.get('rss_bytes') or 0.0)
+                process_virtual_memory_bytes += float(process.get('virtual_memory_bytes') or 0.0)
+                process_open_fds += float(process.get('open_fds') or 0.0)
+                start_time = process.get('start_time_seconds')
+                if start_time is not None:
+                    process_uptime_seconds = max(process_uptime_seconds, max(0.0, now - float(start_time)))
+                if self.persist_state:
+                    await self._put_cursor(scrape_cursor_key, '_process_cpu', float(process_cpu))
 
             agg_total = 0.0
             agg_5xx = 0.0
@@ -222,18 +269,36 @@ class PrometheusIntegration:
                 route_key = f'route:{handler}'
                 cum_total = float(r['total'])
                 cum_5xx = float(r['err5xx'])
-                prev_total = await self._get_cursor(route_key, '_total')
-                prev_5xx = await self._get_cursor(route_key, '_5xx')
+                cursor_route_key = f'{src.name}:{route_key}'
+                prev_total = await self._get_cursor(cursor_route_key, '_total')
+                prev_5xx = await self._get_cursor(cursor_route_key, '_5xx')
                 d_total = cum_total - prev_total if prev_total is not None else 0.0
                 d_5xx = cum_5xx - prev_5xx if prev_5xx is not None else 0.0
                 if d_total < 0:  # counter reset on app restart
                     d_total = 0.0
                     d_5xx = 0.0
+                d_5xx = max(0.0, min(d_total, d_5xx))
                 rps = d_total / dt if dt > 0 else 0.0
                 err_rate = (d_5xx / d_total) if d_total > 0 else 0.0
-                avail = (1.0 - cum_5xx / cum_total) * 100.0 if cum_total > 0 else 100.0
-                p95 = _hist_quantile(r['buckets'], 0.95) * 1000.0
-                p99 = _hist_quantile(r['buckets'], 0.99) * 1000.0
+                # Availability and latency must describe this scrape interval,
+                # not the process lifetime. Lifetime counters/histograms can hide
+                # a fresh outage behind hours of healthy historical traffic.
+                avail = (1.0 - err_rate) * 100.0 if d_total > 0 else 100.0
+                interval_buckets: dict[float, float] = {}
+                bucket_reset = False
+                for le, cumulative in r['buckets'].items():
+                    cursor_key = f'_bucket:{le!r}'
+                    previous_bucket = await self._get_cursor(cursor_route_key, cursor_key)
+                    delta_bucket = float(cumulative) - previous_bucket if previous_bucket is not None else 0.0
+                    if delta_bucket < 0:
+                        bucket_reset = True
+                    interval_buckets[le] = max(0.0, delta_bucket)
+                    if self.persist_state:
+                        await self._put_cursor(cursor_route_key, cursor_key, float(cumulative))
+                if bucket_reset:
+                    interval_buckets = {le: 0.0 for le in interval_buckets}
+                p95 = _hist_quantile(interval_buckets, 0.95) * 1000.0
+                p99 = _hist_quantile(interval_buckets, 0.99) * 1000.0
 
                 resource_signals[route_key] = {
                     'app.http.rps': rps,
@@ -243,35 +308,54 @@ class PrometheusIntegration:
                     'app.http.availability': avail,
                 }
                 if self.persist_state:
-                    await self._put_cursor(route_key, '_total', cum_total)
-                    await self._put_cursor(route_key, '_5xx', cum_5xx)
+                    await self._put_cursor(cursor_route_key, '_total', cum_total)
+                    await self._put_cursor(cursor_route_key, '_5xx', cum_5xx)
 
                 agg_total += cum_total
                 agg_5xx += cum_5xx
                 agg_rps += rps
                 agg_req_delta += d_total
                 agg_err_delta += d_5xx
-                for le, c in r['buckets'].items():
+                for le, c in interval_buckets.items():
                     combined_buckets[le] = combined_buckets.get(le, 0.0) + c
 
-            agg_err_rate = (agg_err_delta / agg_req_delta) if agg_req_delta > 0 else 0.0
-            agg_avail = (1.0 - agg_5xx / agg_total) * 100.0 if agg_total > 0 else 100.0
+            agg_avail = (1.0 - agg_err_delta / agg_req_delta) * 100.0 if agg_req_delta > 0 else 100.0
             agg_p95 = _hist_quantile(combined_buckets, 0.95) * 1000.0
             agg_p99 = _hist_quantile(combined_buckets, 0.99) * 1000.0
 
-            signals.update({
-                'app.up': 1.0,
-                'app.http.rps': signals.get('app.http.rps', 0.0) + agg_rps,
-                'app.http.error_rate': signals.get('app.http.error_rate', 0.0) + agg_err_rate,
-                'app.http.p95_ms': max(signals.get('app.http.p95_ms', 0.0), agg_p95),
-                'app.http.p99_ms': max(signals.get('app.http.p99_ms', 0.0), agg_p99),
-                'app.http.availability': min(signals.get('app.http.availability', 100.0), agg_avail) if signals.get('app.http.availability') is not None else agg_avail,
-            })
+            global_req_delta += agg_req_delta
+            global_err_delta += agg_err_delta
+            global_rps += agg_rps
+            global_p95 = max(global_p95, agg_p95)
+            global_p99 = max(global_p99, agg_p99)
+            global_availability = min(global_availability, agg_avail)
             if self.persist_state:
-                await self._put_cursor('_scrape', 'ts', now)
+                await self._put_cursor(scrape_cursor_key, 'ts', now)
 
         if not any_ok:
             signals['app.up'] = 0.0
+        else:
+            # Error rate is a request-weighted aggregate, not the sum of each
+            # source's percentage. Percentiles are intentionally conservative
+            # (max) because the sources may represent different app instances.
+            signals.update({
+                'app.up': 1.0,
+                'app.http.rps': global_rps,
+                'app.http.error_rate': (global_err_delta / global_req_delta) if global_req_delta > 0 else 0.0,
+                'app.http.p95_ms': global_p95,
+                'app.http.p99_ms': global_p99,
+                'app.http.availability': global_availability,
+            })
+            if process_count:
+                signals.update({
+                    'process.target.alive': 1.0,
+                    'process.target.count': process_count,
+                    'process.target.cpu_percent_sum': process_cpu_percent,
+                    'process.target.rss_bytes_sum': process_rss_bytes,
+                    'process.target.virtual_memory_bytes_sum': process_virtual_memory_bytes,
+                    'process.target.open_fds_sum': process_open_fds,
+                    'process.target.uptime_seconds': process_uptime_seconds,
+                })
         return CollectResult(name=self.name, ok=any_ok, signals=signals, resource_signals=resource_signals, resources=resources)
 
     async def query(self) -> ToolResult:

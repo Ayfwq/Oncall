@@ -17,6 +17,7 @@ const router = createRouter({
     { path: '/incidents', component: IncidentsView },
     { path: '/incidents/:id', component: IncidentDetailView },
     { path: '/projects', component: ProjectsView },
+    { path: '/servers', redirect: { path: '/projects', query: { manage: 'servers' } } },
     { path: '/projects/:id', component: ProjectDetailView },
     { path: '/knowledge', component: KnowledgeView },
     { path: '/settings', component: SettingsView },

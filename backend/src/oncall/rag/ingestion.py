@@ -61,7 +61,7 @@ class KnowledgeIngestor:
             .values(status='processing')
             .returning(KnowledgeDocumentVersion.id)
         )
-        if claimed.rowcount==0:
+        if claimed.scalar_one_or_none() is None:
             return  # already claimed or in terminal state
         ver=await self.session.get(KnowledgeDocumentVersion,version_id)
         doc=await self.session.get(KnowledgeDocument,ver.document_id) if ver else None
@@ -82,8 +82,14 @@ class KnowledgeIngestor:
                 row=KnowledgeChunk(version_id=ver.id,chunk_index=i,heading_path=ch['headings'],page_range=ch['page_range'],content=ch['content'],metadata_json=ch['metadata']);self.session.add(row);chunks.append(row)
             await self.session.flush()
             embeddings=await self.embedder.embed([x.content for x in chunks]) if chunks else []
+            if len(embeddings) != len(chunks):
+                raise ValueError(f'embedding count mismatch: expected {len(chunks)}, got {len(embeddings)}')
+            expected_dim=self.settings.embedding_dimension
+            if any(len(vec) != expected_dim for vec in embeddings):
+                actual=next((len(vec) for vec in embeddings if len(vec) != expected_dim), 0)
+                raise ValueError(f'embedding dimension mismatch: expected {expected_dim}, got {actual}')
             rows=[]
-            for c,vec in zip(chunks,embeddings,strict=False):
+            for c,vec in zip(chunks,embeddings,strict=True):
                 rows.append({'id':str(c.id),'document_id':str(doc.id),'version_id':str(ver.id),'project_scope':str(doc.project_scope or ''),'title':doc.title[:1000],'page_range':(c.page_range or '')[:80],'content':c.content[:65535],'dense':vec})
             await self.index.delete_version(str(ver.id));await self.index.upsert(rows)
             ver.status='ready';doc.status='ready';doc.active_version_id=ver.id;await self.session.commit()

@@ -44,6 +44,20 @@ class FeishuClient:
                 raise RuntimeError(f"Feishu API error: {body.get('code')} {body.get('msg')}")
             return body.get('data',{}).get('message_id','')
 
+    async def _reply(self,message_id:str,msg_type:str,content:dict)->str:
+        token=await self.tenant_token()
+        async with httpx.AsyncClient(timeout=15) as c:
+            r=await c.post(
+                f'https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply',
+                headers={'Authorization':f'Bearer {token}'},
+                json={'msg_type':msg_type,'content':json.dumps(content,ensure_ascii=False)},
+            )
+            r.raise_for_status()
+            body=r.json()
+            if body.get('code') not in (None,0):
+                raise RuntimeError(f"Feishu API error: {body.get('code')} {body.get('msg')}")
+            return body.get('data',{}).get('message_id','')
+
     async def send_text(self,receive_id:str,text:str,receive_id_type:str='chat_id')->str:
         return await self._send(receive_id,'text',{'text':str(text)[:30000]},receive_id_type)
 
@@ -53,9 +67,18 @@ class FeishuClient:
         card={
             'config':{'wide_screen_mode':True},
             'header':{'template':template,'title':{'tag':'plain_text','content':'Oncall Incident 监测报告'}},
-            'elements':[{'tag':'markdown','content':text}],
+            'elements':[{'tag':'markdown','content':text},{'tag':'note','elements':[{'tag':'plain_text','content':'可直接回复本消息，继续围绕本次告警追问'}]}],
         }
         return await self._send(receive_id,'interactive',card,receive_id_type)
+
+    async def reply_incident_card(self,message_id:str,text:str,severity:str='warning')->str:
+        template='red' if severity=='critical' else 'orange' if severity=='warning' else 'blue'
+        card={
+            'config':{'wide_screen_mode':True},
+            'header':{'template':template,'title':{'tag':'plain_text','content':'Oncall Incident 诊断报告'}},
+            'elements':[{'tag':'markdown','content':str(text)[:18000]},{'tag':'note','elements':[{'tag':'plain_text','content':'可直接回复本消息，继续围绕本次告警追问'}]}],
+        }
+        return await self._reply(message_id,'interactive',card)
 
     async def send_alert_card(self,receive_id:str,text:str,severity:str='warning',receive_id_type:str='chat_id')->str:
         """First-stage alert. Deliberately short: it must land within seconds of
@@ -66,7 +89,7 @@ class FeishuClient:
             'config':{'wide_screen_mode':True},
             'header':{'template':template,'title':{'tag':'plain_text','content':f'🚨 Oncall 告警 · {label}'}},
             'elements':[{'tag':'markdown','content':str(text)[:18000]},
-                        {'tag':'note','elements':[{'tag':'plain_text','content':'正在自动调查原因，稍后推送诊断报告'}]}],
+                        {'tag':'note','elements':[{'tag':'plain_text','content':'正在自动调查原因；可直接回复本消息继续追问'}]}],
         }
         return await self._send(receive_id,'interactive',card,receive_id_type)
 
@@ -90,6 +113,22 @@ class FeishuOutboxSender:
             ).order_by(Notification.sent_at.desc()).limit(20)
         )).all())
         return any(x.payload.get('kind')==kind for x in recent)
+
+    async def _incident_thread_message_id(self,n:Notification)->str|None:
+        if not n.incident_id:
+            return None
+        rows=list((await self.session.scalars(
+            select(Notification).where(
+                Notification.incident_id==n.incident_id,
+                Notification.channel=='feishu',
+                Notification.status=='sent',
+                Notification.id!=n.id,
+            ).order_by(Notification.created_at.asc()).limit(20)
+        )).all())
+        for row in rows:
+            if row.payload.get('kind') in {'triggered','escalated'} and row.payload.get('message_id'):
+                return str(row.payload['message_id'])
+        return None
 
     async def send_pending(self,limit:int=20)->int:
         if not self.s.feishu_enabled:return 0
@@ -139,15 +178,26 @@ class FeishuOutboxSender:
                 # own receive_id_type in the payload; default to chat_id.
                 rid_type = str(n.payload.get('receive_id_type') or 'chat_id')
             if not target:
-                n.status='dead';n.last_error='Feishu receive_id is not configured (message the bot once to auto-bind, or set ONCALL_FEISHU_DEFAULT_RECEIVE_ID)';continue
+                n.status='dead';n.last_error='Feishu receive_id is not configured (message the bot once to auto-bind, or set ONCALL_FEISHU_DEFAULT_RECEIVE_ID)'
+                # This branch used to skip the per-row commit below, leaving the
+                # notification stuck in ``sending`` until the stale-claim timeout.
+                await self.session.commit()
+                continue
             if await self._in_cooldown(n,now):
-                n.status='suppressed';n.last_error='notification cooldown';continue
+                n.status='suppressed';n.last_error='notification cooldown'
+                await self.session.commit()
+                continue
             try:
                 text=n.payload.get('text') or f"Oncall Incident: {n.payload.get('summary','')}"
                 kind=n.payload.get('kind')
                 severity=n.payload.get('severity','warning')
                 if kind=='diagnosis':
-                    message_id=await self.client.send_incident_card(target,text,severity,rid_type)
+                    thread_message_id=await self._incident_thread_message_id(n)
+                    if thread_message_id:
+                        message_id=await self.client.reply_incident_card(thread_message_id,text,severity)
+                        n.payload={**n.payload,'root_id':thread_message_id}
+                    else:
+                        message_id=await self.client.send_incident_card(target,text,severity,rid_type)
                 elif kind in ('triggered','escalated'):
                     message_id=await self.client.send_alert_card(target,text,severity,rid_type)
                 else:

@@ -6,10 +6,12 @@ Oncall 是一个本地优先的 AI SRE / 智能 Oncall 平台，按 2026-08-18 �
 
 ## 架构基线
 
+监控指标分层、Python 快速接入和告警规则设计见 [MONITORING_DESIGN.md](MONITORING_DESIGN.md)。
+
 - **模块化单体 + 多运行进程**：`api` / `monitor-worker` / `agent-worker` / `rag-worker`。
 - **统一 OncallAgent**：LangGraph StateGraph；`CHAT / INVESTIGATE / FOLLOW_UP / DEEP` 共用同一套 RAG、Tools、Memory 和模型网关。
-- **确定性 Monitoring Engine**：32 个基线 signal、6 类 Integration、滞回 Detector、Incident 生命周期、PostgreSQL 持久规则状态。
-- **8 个只读 Agent Tool**：Host / History / Process / Logs / Docker / PostgreSQL / HTTP / Knowledge。
+- **远程 Python Monitoring Engine**：28 个基础 signal + 可选 6 个 NVIDIA GPU signal；固定阈值、历史基线/混合规则、滞回 Detector 和 Incident 生命周期。项目接入只接受服务器采集器、健康检查和应用 `/metrics` 三类入口。
+- **4 个只读 Agent Tool**：当前指标 / 指标历史 / 服务健康 / 知识库。
 - **完整 RAG 主链**：Docling → Canonical JSON/Markdown → HybridChunker → Dense + Milvus BM25 → RRF → Rerank → Citation；Milvus 只是可重建索引。
 - **持久化**：PostgreSQL 保存业务事实、会话、消息、Incident、Evidence、Diagnosis、Tool/RAG Trace、durable jobs/outbox；LangGraph 使用 PostgreSQL checkpointer。
 - **飞书**：自建应用机器人 + WebSocket 入站 + PostgreSQL Outbox 出站；主动 Incident 报告可绑定 Incident Conversation，用户回复后进入 `FOLLOW_UP`。
@@ -26,7 +28,7 @@ FastAPI Gateway ───── Conversation / Incident / Knowledge API
       │
       ├──────────────► OncallAgent (LangGraph)
       │                    │
-      │                    ├── 8 Read-only Tools
+      │                    ├── 4 Read-only Tools
       │                    ├── RAG
       │                    └── PostgreSQL Checkpoint
       │
@@ -62,7 +64,7 @@ ONCALL_ADMIN_PASSWORD=<新密码>
 docker compose up -d
 ```
 
-Compose 只运行 PostgreSQL/Milvus/etcd/MinIO；Oncall Python 进程应运行在 Windows 宿主机，才能正确观测本机 AutoGEO 的进程、日志和 Docker。
+Compose 只运行 PostgreSQL/Milvus/etcd/MinIO；远程 Python 项目由目标服务器的 Node Exporter、可选 DCGM Exporter 和项目自身的 `/health`、`/metrics` 提供观测数据。
 
 ### 3. Python
 

@@ -15,12 +15,9 @@ from oncall.agent.tool_contracts import ALLOWED_TOOLS, validate_tool_args
 from oncall.application.project_service import ProjectService
 from oncall.domain.schemas import ToolResult
 from oncall.infrastructure.db.models import MetricSample, RetrievalTrace, ToolRun
-from oncall.integrations.database import DatabaseIntegration
-from oncall.integrations.docker_integration import DockerIntegration
-from oncall.integrations.host import HostIntegration
-from oncall.integrations.logs import LogIntegration
-from oncall.integrations.process import ProcessIntegration
+from oncall.integrations.prometheus import PrometheusIntegration
 from oncall.integrations.service import ServiceIntegration
+from oncall.integrations.server_exporters import ServerExportersIntegration
 from oncall.rag.retrieval import KnowledgeRetriever
 from oncall.security.redact import redact_text
 
@@ -85,11 +82,10 @@ class ToolRegistry:
             if self._retriever is None:self._retriever=KnowledgeRetriever()
             return await self._retriever.search(str(args.get('query','')),ctx.project_id,top_k=int(args.get('top_k',5)))
         cfg=await ProjectService(self.session).runtime_config(ctx.project_id)
-        if name=='query_host_metrics':return await HostIntegration().query()
-        if name=='query_processes':return await ProcessIntegration(cfg.process_targets).query(int(args.get('limit',30)))
-        if name=='query_logs':return await LogIntegration(cfg.log_sources).query(str(args.get('keyword','')),str(args.get('level','')),int(args.get('limit',100)))
-        if name=='query_containers':return await DockerIntegration(cfg.docker_targets).query()
-        if name=='query_database':return await DatabaseIntegration(cfg.database_profiles).query()
+        if name=='query_current_metrics':
+            from oncall.monitoring.engine import MonitoringEngine
+            snapshot=await MonitoringEngine(self.session).collect(ctx.project_id, persist_state=False)
+            return ToolResult(ok=True, summary=f'当前采集到 {len(snapshot.signals)} 个指标', data=snapshot.model_dump(mode='json'))
         if name=='query_service_health':return await ServiceIntegration(cfg.service_endpoints).query()
         if name=='query_metric_history':
             key=str(args.get('metric','host.cpu.percent'));hours=max(1,min(int(args.get('hours',1)),168));since=datetime.now().astimezone()-timedelta(hours=hours)

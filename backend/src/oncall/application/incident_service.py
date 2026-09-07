@@ -21,6 +21,15 @@ from oncall.jobs.queue import JobQueue
 
 _SEVERITY_RANK={'info':0,'warning':1,'critical':2}
 _SEVERITY_LABEL={'info':'提示','warning':'警告','critical':'严重'}
+_METRIC_LABEL={
+    'host.exporter.up':'服务器采集器断开','host.cpu.percent':'服务器 CPU 使用率过高',
+    'host.memory.percent':'服务器内存使用率过高','host.disk.usage_percent':'服务器磁盘空间不足',
+    'host.gpu.exporter.up':'GPU 采集器断开','host.gpu.memory_percent':'GPU 显存使用率过高',
+    'host.gpu.temperature_celsius':'GPU 温度过高','service.reachable':'健康检查失败',
+    'app.up':'应用指标采集失败','app.http.error_rate':'API 错误率过高',
+    'app.http.p95_ms':'API P95 延迟异常','app.http.p99_ms':'API P99 延迟异常',
+    'app.http.availability':'API 可用性下降',
+}
 
 
 def _format_value(value:float)->str:
@@ -30,17 +39,30 @@ def _format_value(value:float)->str:
     return f'{value:.3f}'.rstrip('0').rstrip('.')
 
 
+def _format_metric_value(metric_key:str,value:float)->str:
+    if metric_key in {'host.cpu.percent','host.memory.percent','host.disk.usage_percent','host.gpu.memory_percent','app.http.availability'}:
+        return f'{value:.1f}%'
+    if metric_key=='app.http.error_rate':
+        return f'{value * 100:.1f}%'
+    if metric_key in {'app.http.p95_ms','app.http.p99_ms'}:
+        return f'{value:.0f} ms'
+    if metric_key=='host.gpu.temperature_celsius':
+        return f'{value:.1f} °C'
+    return _format_value(value)
+
+
 def _alert_text(project_name:str,anomaly_type:str,resource_key:str,severity:str,value:float,now)->str:
     """First-stage alert body. Intentionally short and factual: what broke, where,
     how bad. Root-cause analysis arrives later as a separate diagnosis message."""
     label=_SEVERITY_LABEL.get(severity,severity)
     lines=[
-        f'**{anomaly_type}**',
+        f'**{_METRIC_LABEL.get(anomaly_type,anomaly_type)}**',
         '',
         f'**级别**：{label}',
         f'**项目**：{project_name or "-"}',
         f'**资源**：{resource_key or "default"}',
-        f'**当前值**：{_format_value(value)}',
+        f'**指标**：`{anomaly_type}`',
+        f'**当前值**：{_format_metric_value(anomaly_type,value)}',
         f'**时间**：{now.strftime("%Y-%m-%d %H:%M:%S")}',
     ]
     return '\n'.join(lines)
@@ -72,21 +94,22 @@ class IncidentService:
             upgraded=_SEVERITY_RANK.get(severity,0)>_SEVERITY_RANK.get(inc.severity,0)
             if upgraded:inc.severity=severity
         await self.session.commit();await self.session.refresh(inc)
-        if is_new:
-            # Incident conversation is durable and becomes the Web/Feishu follow-up anchor.
-            project=await self.session.get(Project,project_id)
-            project_name=getattr(project,'name','') or ''
-            user_id=project.user_id if project else None
-            if user_id is not None:
-                conv=await ConversationService(self.session).create(user_id,title=f'🚨 {anomaly_type}',project_id=project_id,incident_id=inc.id,type_='incident')
-                conversation_id=str(conv.id)
-            else:
-                conversation_id=None
+        # Repairable initial pipeline: if the process crashes after committing the
+        # Incident but before queuing notification/investigation, the next firing
+        # observation fills in whichever durable records are missing.
+        project=await self.session.get(Project,project_id)
+        project_name=getattr(project,'name','') or ''
+        conv=await self.session.scalar(select(Conversation).where(Conversation.incident_id==inc.id).order_by(Conversation.created_at.asc()).limit(1))
+        if conv is None and project is not None:
+            conv=await ConversationService(self.session).create(project.user_id,title=f'🚨 {anomaly_type}',project_id=project_id,incident_id=inc.id,type_='incident')
+        initial_key=f'incident:{inc.id}:triggered'
+        initial_note=await self.session.scalar(select(Notification.id).where(Notification.dedupe_key==initial_key))
+        if initial_note is None:
             self._queue_alert(inc,anomaly_type,resource_key,severity,value,now,project_name,kind='triggered',dedupe_suffix='triggered')
             await self.session.commit()
-            if conversation_id:
-                await JobQueue(self.session).enqueue('incident_investigate',{'incident_id':str(inc.id),'conversation_id':conversation_id},idempotency_key=f'incident_investigate:{inc.id}:initial',priority=20)
-        elif upgraded:
+        if conv:
+            await JobQueue(self.session).enqueue('incident_investigate',{'incident_id':str(inc.id),'conversation_id':str(conv.id)},idempotency_key=f'incident_investigate:{inc.id}:initial',priority=20)
+        if not is_new and upgraded:
             project=await self.session.get(Project,project_id)
             self._queue_alert(inc,anomaly_type,resource_key,severity,value,now,getattr(project,'name','') or '',kind='escalated',dedupe_suffix=f'escalated:{severity}',prefix='🔺 **告警升级**\n\n')
             await self.session.commit()

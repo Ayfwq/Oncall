@@ -189,8 +189,8 @@ services:
     deploy:
       resources:
         limits:
-        cpus: "0.5"
-        memory: 512m
+          cpus: "0.5"
+          memory: 512m
 
   agent-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}

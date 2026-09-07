@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import math
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -10,211 +11,303 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from oncall.application.dtos import SnapshotDTO
 from oncall.application.incident_service import IncidentService, incident_fingerprint
 from oncall.application.project_service import ProjectService
+from oncall.domain.enums import RuleState
 from oncall.infrastructure.db.models import (
     AlertEvent,
     Conversation,
     Incident,
-    LogCursor,
     MetricSample,
+    MonitoringBaseline,
     MonitoringRule,
     MonitoringRuleState,
     MonitoringRun,
 )
-from oncall.integrations.database import DatabaseIntegration
-from oncall.integrations.docker_integration import DockerIntegration
-from oncall.integrations.host import HostIntegration
-from oncall.integrations.logs import LogIntegration
-from oncall.integrations.process import ProcessIntegration
+from oncall.integrations.base import CollectResult
 from oncall.integrations.prometheus import PrometheusIntegration
+from oncall.integrations.server_exporters import ServerExportersIntegration
 from oncall.integrations.service import ServiceIntegration
+from oncall.jobs.queue import JobQueue
 from oncall.monitoring.detector import Detector, RuleConfig, RuleRuntimeState, compare
+from oncall.monitoring.signals import SUPPORTED_SIGNALS
+
+
+def baseline_z_score(value: float, mean: float, std: float, operator: str) -> float:
+    """Measure deviation only in the rule's unhealthy direction."""
+    delta = value - mean
+    if operator in ('>', '>='):
+        directional = max(0.0, delta)
+    elif operator in ('<', '<='):
+        directional = max(0.0, -delta)
+    else:
+        directional = abs(delta)
+    if std <= max(1e-9, abs(mean) * 1e-6):
+        return float('inf') if directional > max(1e-6, abs(mean) * 1e-6) else 0.0
+    return directional / std
 
 
 class MonitoringEngine:
-    def __init__(self,session:AsyncSession):
+    """Collect and evaluate the one supported remote-Python project shape."""
+
+    def __init__(self, session: AsyncSession):
         from oncall.bootstrap.config import get_settings
-        self.session=session;self.detector=Detector();self._host=HostIntegration();self.settings=get_settings()
 
-    async def collect(self,project_id:UUID, *, persist_state:bool=True, config=None)->SnapshotDTO:
-        cfg=config or await ProjectService(self.session).runtime_config(project_id)
-        integrations=[self._host,ProcessIntegration(cfg.process_targets),DockerIntegration(cfg.docker_targets),DatabaseIntegration(cfg.database_profiles),ServiceIntegration(cfg.service_endpoints),PrometheusIntegration(self.session,project_id,cfg.metrics_sources,persist_state=persist_state)]
-        async def one(i):
-            try:return await asyncio.wait_for(i.collect(),timeout=8)
-            except Exception as e:
-                from oncall.integrations.base import CollectResult
-                return CollectResult(name=i.name,ok=False,error=str(e))
-        results=list(await asyncio.gather(*(one(i) for i in integrations)))
-        try:
-            results.append(await asyncio.wait_for(self._collect_logs_incremental(cfg.log_sources,cfg.poll_interval,persist_state=persist_state),timeout=8))
-        except Exception as e:
-            from oncall.integrations.base import CollectResult
-            results.append(CollectResult(name='logs',ok=False,error=str(e)))
-        signals={};resource_signals={};resources={};status={}
-        for r in results:
-            signals.update(r.signals);resources[r.name]=r.resources;status[r.name]={'ok':r.ok,'error':r.error}
-            for resource_key, values in r.resource_signals.items():
-                resource_signals.setdefault(str(resource_key), {}).update(values)
-        # PostgreSQL exposes a cumulative deadlock counter. Convert it to the
-        # contract's db.deadlock.delta by comparing against the previous completed
-        # snapshot, rather than mislabelling the cumulative total as a delta.
-        db_rows=(resources.get('database') or {}).get('databases') or []
-        current_deadlocks=float(db_rows[0].get('deadlocks',0)) if db_rows else 0.0
-        previous=await self.session.scalar(select(MonitoringRun).where(MonitoringRun.project_id==project_id,MonitoringRun.status=='completed').order_by(MonitoringRun.finished_at.desc()).limit(1))
-        previous_snapshot=(previous.snapshot or {}) if previous else {}
-        previous_rows=(previous_snapshot.get('resources',{}).get('database',{}).get('databases') or [])
-        previous_deadlocks=float(previous_rows[0].get('deadlocks',current_deadlocks)) if previous_rows else current_deadlocks
-        if 'db.deadlock.delta' in signals:signals['db.deadlock.delta']=max(0.0,current_deadlocks-previous_deadlocks)
+        self.session = session
+        self.detector = Detector()
+        self.settings = get_settings()
 
-        # Convert host cumulative OS counters into rates even when a worker process
-        # constructs a fresh MonitoringEngine between polls.
-        cur_c=(resources.get('host') or {}).get('counters') or {}
-        prev_c=(previous_snapshot.get('resources',{}).get('host',{}).get('counters') or {})
-        dt=float(cur_c.get('ts',0) or 0)-float(prev_c.get('ts',0) or 0)
-        if dt>0:
-            pairs=(('host.disk.read_bytes_per_sec','disk_read_bytes'),('host.disk.write_bytes_per_sec','disk_write_bytes'),('host.net.rx_bytes_per_sec','net_rx_bytes'),('host.net.tx_bytes_per_sec','net_tx_bytes'))
-            for metric,counter in pairs:
-                cur=cur_c.get(counter);prev=prev_c.get(counter)
-                if cur is not None and prev is not None:signals[metric]=max(0.0,(float(cur)-float(prev))/dt)
+    async def _previous_run(self, project_id: UUID) -> MonitoringRun | None:
+        return await self.session.scalar(
+            select(MonitoringRun)
+            .where(MonitoringRun.project_id == project_id, MonitoringRun.status == 'completed')
+            .order_by(MonitoringRun.finished_at.desc())
+            .limit(1)
+        )
 
-        # Consecutive HTTP failures are also durable across worker restarts.
-        if 'service.consecutive_failures' in signals:
-            current_eps=(resources.get('service') or {}).get('endpoints') or []
-            ok=bool(current_eps[0].get('ok')) if current_eps else True
-            previous_failures=float(previous_snapshot.get('signals',{}).get('service.consecutive_failures',0) or 0)
-            signals['service.consecutive_failures']=0.0 if ok else previous_failures+1.0
-        return SnapshotDTO(project_id=project_id,observed_at=datetime.now().astimezone(),signals=signals,resource_signals=resource_signals,resources=resources,collector_status=status)
+    async def collect(self, project_id: UUID, *, persist_state: bool = True, config=None) -> SnapshotDTO:
+        cfg = config or await ProjectService(self.session).runtime_config(project_id)
+        if cfg.server is None:
+            raise ValueError('remote Python monitoring requires a configured server')
 
-    async def _collect_logs_incremental(self,sources,window_seconds:int, *, persist_state:bool=True):
-        """Read only bytes appended since the last successful poll.
+        integrations = [
+            ServerExportersIntegration(cfg.server),
+            ServiceIntegration(cfg.service_endpoints),
+            PrometheusIntegration(self.session, project_id, cfg.metrics_sources, persist_state=persist_state),
+        ]
 
-        The cursor is PostgreSQL-backed, therefore service restarts do not cause the
-        monitor to recount the whole file. Rotation/truncation resets the offset.
-        First observation is bounded to the most recent 2 MiB to avoid a huge import.
-        """
-        from pathlib import Path
-        max_first_read=2*1024*1024
-        lines_by_source={}
-        status={}
-        for src in sources:
-            p=Path(src.path)
+        async def collect_one(integration):
             try:
-                stat=await asyncio.to_thread(p.stat)
-                identity=f"{getattr(stat,'st_dev',0)}:{getattr(stat,'st_ino',0)}:{p.resolve()}"
-                cursor=await self.session.get(LogCursor,src.id) if src.id else None
-                if not cursor and src.id and persist_state:
-                    cursor=LogCursor(source_id=src.id,file_identity=identity,offset=max(0,stat.st_size-max_first_read),size=stat.st_size,mtime=stat.st_mtime)
-                    self.session.add(cursor);await self.session.flush()
-                offset=(cursor.offset if cursor else max(0,stat.st_size-max_first_read))
-                if cursor and (cursor.file_identity!=identity or stat.st_size<cursor.offset):offset=0
-                def read_new():
-                    with p.open('rb') as f:
-                        f.seek(offset);data=f.read(max_first_read)
-                    return data
-                data=await asyncio.to_thread(read_new)
-                text=data.decode(src.encoding,errors='replace')
-                lines_by_source[src.path]=text.splitlines()
-                if cursor and persist_state:
-                    cursor.file_identity=identity;cursor.offset=min(stat.st_size,offset+len(data));cursor.size=stat.st_size;cursor.mtime=stat.st_mtime
-                status[src.path]={'ok':True,'bytes':len(data),'offset':offset}
-            except Exception as exc:
-                status[src.path]={'ok':False,'error':str(exc)}
-        if persist_state:
-            await self.session.commit()
-        result=LogIntegration.summarize(lines_by_source,window_seconds)
-        result.resource_signals={}
-        for source, lines in lines_by_source.items():
-            one=LogIntegration.summarize({source: lines},window_seconds)
-            result.resource_signals[source]=dict(one.signals)
-        result.resources['sources']=status
-        result.ok=any(x.get('ok') for x in status.values()) if status else True
-        return result
+                return await asyncio.wait_for(integration.collect(), timeout=8)
+            except Exception as exc:  # noqa: BLE001
+                return CollectResult(name=integration.name, ok=False, error=str(exc))
 
-    async def run_project(self,project_id:UUID)->SnapshotDTO:
-        run=MonitoringRun(project_id=project_id);self.session.add(run);await self.session.flush()
-        snapshot=await self.collect(project_id);run.snapshot=snapshot.model_dump(mode='json');run.collector_status=snapshot.collector_status;run.status='completed';run.finished_at=datetime.now().astimezone()
-        for key,value in snapshot.signals.items():
-            if isinstance(value,(int,float,bool)):
-                self.session.add(MetricSample(project_id=project_id,metric_key=key,resource_key='default',ts=snapshot.observed_at,value=float(value)))
+        results = list(await asyncio.gather(*(collect_one(x) for x in integrations)))
+        signals: dict[str, float] = {}
+        resource_signals: dict[str, dict[str, float]] = {}
+        resources: dict = {}
+        collector_status: dict = {}
+        for result in results:
+            signals.update(result.signals)
+            resources[result.name] = result.resources
+            collector_status[result.name] = {'ok': result.ok, 'error': result.error}
+            for resource_key, values in result.resource_signals.items():
+                resource_signals.setdefault(str(resource_key), {}).update(values)
+
+        previous = await self._previous_run(project_id)
+        previous_snapshot = (previous.snapshot or {}) if previous else {}
+
+        # Node Exporter exposes cumulative counters. Convert them to rates using
+        # the previous completed snapshot, including after worker restarts.
+        current_counters = ((resources.get('server') or {}).get('node') or {}).get('counters') or {}
+        previous_counters = ((previous_snapshot.get('resources', {}).get('server') or {}).get('node') or {}).get('counters') or {}
+        dt = float(current_counters.get('ts', 0) or 0) - float(previous_counters.get('ts', 0) or 0)
+        if dt > 0:
+            cpu_total_delta = float(current_counters.get('cpu_total_seconds', 0) or 0) - float(previous_counters.get('cpu_total_seconds', 0) or 0)
+            cpu_idle_delta = float(current_counters.get('cpu_idle_seconds', 0) or 0) - float(previous_counters.get('cpu_idle_seconds', 0) or 0)
+            if cpu_total_delta > 0:
+                signals['host.cpu.percent'] = max(0.0, min(100.0, (1.0 - cpu_idle_delta / cpu_total_delta) * 100.0))
+            for metric, counter in (
+                ('host.disk.read_bytes_per_sec', 'disk_read_bytes'),
+                ('host.disk.write_bytes_per_sec', 'disk_write_bytes'),
+                ('host.net.rx_bytes_per_sec', 'net_rx_bytes'),
+                ('host.net.tx_bytes_per_sec', 'net_tx_bytes'),
+            ):
+                current = current_counters.get(counter)
+                prior = previous_counters.get(counter)
+                if current is not None and prior is not None:
+                    signals[metric] = max(0.0, (float(current) - float(prior)) / dt)
+
+        # Health failures are consecutive across worker restarts and include
+        # both transport errors and unexpected HTTP status codes.
+        endpoints = (resources.get('service') or {}).get('endpoints') or []
+        if 'service.consecutive_failures' in signals:
+            healthy = all(bool(row.get('ok')) for row in endpoints) if endpoints else True
+            prior_failures = float(previous_snapshot.get('signals', {}).get('service.consecutive_failures', 0) or 0)
+            signals['service.consecutive_failures'] = 0.0 if healthy else prior_failures + 1.0
+
+        signals = {key: value for key, value in signals.items() if key in SUPPORTED_SIGNALS}
+        resource_signals = {
+            resource: {key: value for key, value in values.items() if key in SUPPORTED_SIGNALS}
+            for resource, values in resource_signals.items()
+        }
+        return SnapshotDTO(
+            project_id=project_id,
+            observed_at=datetime.now().astimezone(),
+            signals=signals,
+            resource_signals=resource_signals,
+            resources=resources,
+            collector_status=collector_status,
+        )
+
+    async def run_project(self, project_id: UUID) -> SnapshotDTO:
+        run = MonitoringRun(project_id=project_id)
+        self.session.add(run)
+        await self.session.flush()
+        snapshot = await self.collect(project_id)
+        run.snapshot = snapshot.model_dump(mode='json')
+        run.collector_status = snapshot.collector_status
+        run.status = 'completed'
+        run.finished_at = datetime.now().astimezone()
+        for metric_key, value in snapshot.signals.items():
+            if isinstance(value, (int, float, bool)):
+                self.session.add(MetricSample(project_id=project_id, metric_key=metric_key, resource_key='default', ts=snapshot.observed_at, value=float(value)))
         for resource_key, values in snapshot.resource_signals.items():
-            for key, value in values.items():
-                if isinstance(value,(int,float,bool)):
-                    self.session.add(MetricSample(project_id=project_id,metric_key=key,resource_key=str(resource_key),ts=snapshot.observed_at,value=float(value)))
-        await self.session.commit();await self.evaluate_rules(project_id,snapshot)
+            for metric_key, value in values.items():
+                if isinstance(value, (int, float, bool)):
+                    self.session.add(MetricSample(project_id=project_id, metric_key=metric_key, resource_key=str(resource_key), ts=snapshot.observed_at, value=float(value)))
+        await self.session.commit()
+        await self.evaluate_rules(project_id, snapshot)
         return snapshot
 
-    def _condition_holds(self, cond: dict, snapshot: SnapshotDTO) -> bool:
-        mk = str(cond.get('metric_key', ''))
-        rk = str(cond.get('resource_key', 'default') or 'default')
-        raw = (snapshot.signals if rk == 'default' else snapshot.resource_signals.get(rk, {})).get(mk)
-        if not isinstance(raw, (int, float, bool)):
+    def _condition_holds(self, condition: dict, snapshot: SnapshotDTO) -> bool:
+        metric_key = str(condition.get('metric_key', ''))
+        resource_key = str(condition.get('resource_key', 'default') or 'default')
+        source = snapshot.signals if resource_key == 'default' else snapshot.resource_signals.get(resource_key, {})
+        value = source.get(metric_key)
+        if not isinstance(value, (int, float, bool)):
             return False
-        return compare(float(raw), str(cond.get('operator', '>')), float(cond.get('threshold', 0)))
+        return compare(float(value), str(condition.get('operator', '>')), float(condition.get('threshold', 0)))
 
     def _composite_active(self, conditions: dict, snapshot: SnapshotDTO) -> bool:
         group = conditions.get('all') or []
-        # AND semantics: every condition must currently hold to be "active".
-        return bool(group) and all(self._condition_holds(c, snapshot) for c in group)
+        return bool(group) and all(self._condition_holds(condition, snapshot) for condition in group)
 
     def _composite_severity(self, conditions: dict, snapshot: SnapshotDTO, base: str) -> str:
-        esc = conditions.get('escalate_at')
-        if esc and self._condition_holds(esc, snapshot):
-            return str(esc.get('escalate_severity', 'critical') or 'critical')
+        escalate_at = conditions.get('escalate_at')
+        if escalate_at and self._condition_holds(escalate_at, snapshot):
+            return str(escalate_at.get('escalate_severity', 'critical') or 'critical')
         return base
 
-    async def evaluate_rules(self,project_id:UUID,snapshot:SnapshotDTO)->None:
-        rules=list((await self.session.scalars(select(MonitoringRule).where(MonitoringRule.project_id==project_id,MonitoringRule.enabled.is_(True)))).all())
-        incident_service=IncidentService(self.session)
-        for rule in rules:
-            # ---- resolve effective metric/resource/severity + the boolean "value" ----
-            if rule.conditions:
-                # Composite rule (P4): fire only when ALL conditions hold. The
-                # scalar metric_key/operator/threshold fields are ignored. We feed a
-                # boolean (1.0 active / 0.0 not) into the same hysteresis state machine.
-                eff_metric_key='composite'
-                eff_resource_key='default'
-                active=self._composite_active(rule.conditions, snapshot)
-                eff_severity=self._composite_severity(rule.conditions, snapshot, rule.severity)
-                value=1.0 if active else 0.0
-                cfg=RuleConfig('>',0.5,rule.trigger_for,0.5,rule.recovery_for)
-            else:
-                eff_metric_key=rule.metric_key
-                eff_resource_key=rule.resource_key
-                eff_severity=rule.severity
-                raw=(snapshot.signals if rule.resource_key == 'default' else snapshot.resource_signals.get(rule.resource_key, {})).get(rule.metric_key)
-                if not isinstance(raw,(int,float,bool)):continue
-                value=float(raw)
-                cfg=RuleConfig(rule.operator,rule.trigger_threshold,rule.trigger_for,rule.recovery_threshold,rule.recovery_for)
-            rs=await self.session.get(MonitoringRuleState,rule.id)
-            if not rs:
-                rs=MonitoringRuleState(rule_id=rule.id);self.session.add(rs);await self.session.flush()
-            runtime=RuleRuntimeState(state=__import__('oncall.domain.enums',fromlist=['RuleState']).RuleState(rs.state),abnormal_hits=rs.abnormal_hits,recovery_hits=rs.recovery_hits,last_value=rs.last_value)
-            tr=self.detector.evaluate(cfg,runtime,value)
-            rs.state=runtime.state.value;rs.abnormal_hits=runtime.abnormal_hits;rs.recovery_hits=runtime.recovery_hits;rs.last_value=value
-            if tr.changed:
-                self.session.add(AlertEvent(rule_id=rule.id,project_id=project_id,resource_key=eff_resource_key,state_from=tr.before.value,state_to=tr.after.value,payload={'metric_key':eff_metric_key,'value':value,'threshold':(rule.conditions and rule.conditions.get('all')) or rule.trigger_threshold,'composite':bool(rule.conditions),'observed_at':snapshot.observed_at.isoformat()}))
-            await self.session.commit()
-            if tr.became_firing:
-                await incident_service.on_firing(project_id,rule.id,eff_resource_key,eff_metric_key,eff_severity,value)
-            elif tr.became_recovered:
-                fp=incident_fingerprint(project_id,rule.id,eff_resource_key,eff_metric_key)
-                inc=await self.session.scalar(select(Incident).where(Incident.project_id==project_id,Incident.fingerprint==fp,Incident.status!='resolved').order_by(Incident.first_seen.desc()).limit(1))
-                if inc:await incident_service.resolve(inc.id)
-            elif runtime.state.value=='firing':
-                # Sustained FIRING updates last_seen every poll but does not call the LLM
-                # every time. If an operator manually resolved the Incident while the
-                # metric stayed abnormal, recreate it instead of leaving a blind spot.
-                from datetime import timedelta
+    async def _baseline_check(self, project_id: UUID, rule: MonitoringRule, value: float, *, currently_firing: bool = False) -> tuple[bool, dict]:
+        row = await self.session.scalar(
+            select(MonitoringBaseline)
+            .where(
+                MonitoringBaseline.project_id == project_id,
+                MonitoringBaseline.metric_key == rule.metric_key,
+                MonitoringBaseline.resource_key == rule.resource_key,
+            )
+            .limit(1)
+        )
+        samples = [float(x) for x in (row.samples if row else []) if isinstance(x, (int, float)) and math.isfinite(float(x))]
+        details = {'mode': rule.detection_mode, 'sample_count': len(samples), 'min_samples': rule.baseline_min_samples}
+        if len(samples) < rule.baseline_min_samples:
+            return False, details
+        mean = sum(samples) / len(samples)
+        variance = sum((x - mean) ** 2 for x in samples) / max(1, len(samples) - 1)
+        std = math.sqrt(variance)
+        z_score = baseline_z_score(value, mean, std, rule.operator)
+        limit = rule.baseline_recovery_z_score if currently_firing else rule.baseline_z_score
+        details.update({'mean': mean, 'stddev': std, 'z_score': z_score, 'active_z_score': limit, 'trigger_z_score': rule.baseline_z_score, 'recovery_z_score': rule.baseline_recovery_z_score})
+        return z_score >= limit, details
 
-                from oncall.jobs.queue import JobQueue
-                fp=incident_fingerprint(project_id,rule.id,eff_resource_key,eff_metric_key)
-                inc=await self.session.scalar(select(Incident).where(Incident.project_id==project_id,Incident.fingerprint==fp,Incident.status.in_(['open','investigating','diagnosed'])).order_by(Incident.first_seen.desc()).limit(1))
-                if not inc:
-                    inc=await incident_service.on_firing(project_id,rule.id,eff_resource_key,eff_metric_key,eff_severity,value)
+    async def _record_baseline(self, project_id: UUID, rule: MonitoringRule, value: float) -> None:
+        row = await self.session.scalar(
+            select(MonitoringBaseline)
+            .where(
+                MonitoringBaseline.project_id == project_id,
+                MonitoringBaseline.metric_key == rule.metric_key,
+                MonitoringBaseline.resource_key == rule.resource_key,
+            )
+            .limit(1)
+        )
+        samples = [float(x) for x in (row.samples if row else []) if isinstance(x, (int, float)) and math.isfinite(float(x))]
+        samples = (samples + [value])[-rule.baseline_window:]
+        if row is None:
+            self.session.add(MonitoringBaseline(project_id=project_id, metric_key=rule.metric_key, resource_key=rule.resource_key, samples=samples))
+        else:
+            row.samples = samples
+
+    async def evaluate_rules(self, project_id: UUID, snapshot: SnapshotDTO) -> None:
+        rules = list((await self.session.scalars(select(MonitoringRule).where(MonitoringRule.project_id == project_id, MonitoringRule.enabled.is_(True)))).all())
+        incident_service = IncidentService(self.session)
+        for rule in rules:
+            state_row = await self.session.get(MonitoringRuleState, rule.id)
+            currently_firing = bool(state_row and state_row.state == 'firing')
+            threshold_active = False
+            baseline_active = False
+            baseline_details = None
+            raw = None
+            if rule.conditions:
+                effective_metric = rule.metric_key
+                effective_resource = 'default'
+                active = self._composite_active(rule.conditions, snapshot)
+                effective_severity = self._composite_severity(rule.conditions, snapshot, rule.severity)
+                value = 1.0 if active else 0.0
+                observed = snapshot.signals.get(rule.metric_key)
+                reported_value = float(observed) if isinstance(observed, (int, float, bool)) else value
+                detector_config = RuleConfig('>', 0.5, rule.trigger_for, 0.5, rule.recovery_for)
+            else:
+                effective_metric = rule.metric_key
+                effective_resource = rule.resource_key
+                effective_severity = rule.severity
+                source = snapshot.signals if rule.resource_key == 'default' else snapshot.resource_signals.get(rule.resource_key, {})
+                raw = source.get(rule.metric_key)
+                if not isinstance(raw, (int, float, bool)):
+                    continue
+                value = float(raw)
+                reported_value = value
+                threshold_active = compare(value, rule.operator, rule.trigger_threshold)
+                if rule.detection_mode == 'threshold':
+                    detector_config = RuleConfig(rule.operator, rule.trigger_threshold, rule.trigger_for, rule.recovery_threshold, rule.recovery_for)
                 else:
-                    await incident_service.touch_firing(inc,eff_severity,value)
-                now=datetime.now().astimezone()
-                if inc and inc.last_investigated_at and now-inc.last_investigated_at>=timedelta(seconds=self.settings.incident_stale_reinvestigate_seconds):
-                    conv=await self.session.scalar(select(Conversation).where(Conversation.incident_id==inc.id).order_by(Conversation.created_at.asc()).limit(1))
-                    if conv:
-                        bucket=int(now.timestamp())//self.settings.incident_stale_reinvestigate_seconds
-                        await JobQueue(self.session).enqueue('incident_investigate',{'incident_id':str(inc.id),'conversation_id':str(conv.id)},idempotency_key=f'incident_investigate:{inc.id}:stale:{bucket}',priority=30)
+                    baseline_active, baseline_details = await self._baseline_check(project_id, rule, value, currently_firing=currently_firing)
+                    active = baseline_active or (threshold_active if rule.detection_mode == 'hybrid' else False)
+                    value = 1.0 if active else 0.0
+                    detector_config = RuleConfig('>', 0.5, rule.trigger_for, 0.5, rule.recovery_for)
+
+            if state_row is None:
+                state_row = MonitoringRuleState(rule_id=rule.id)
+                self.session.add(state_row)
+                await self.session.flush()
+            runtime = RuleRuntimeState(
+                state=RuleState(state_row.state),
+                abnormal_hits=state_row.abnormal_hits,
+                recovery_hits=state_row.recovery_hits,
+                last_value=state_row.last_value,
+            )
+            transition = self.detector.evaluate(detector_config, runtime, value)
+            state_row.state = runtime.state.value
+            state_row.abnormal_hits = runtime.abnormal_hits
+            state_row.recovery_hits = runtime.recovery_hits
+            state_row.last_value = value
+            if rule.conditions is None and rule.detection_mode != 'threshold' and not threshold_active and not baseline_active and transition.after.value != 'firing':
+                await self._record_baseline(project_id, rule, float(raw))
+            if transition.changed:
+                self.session.add(AlertEvent(
+                    rule_id=rule.id,
+                    project_id=project_id,
+                    resource_key=effective_resource,
+                    state_from=transition.before.value,
+                    state_to=transition.after.value,
+                    payload={
+                        'metric_key': effective_metric,
+                        'value': reported_value,
+                        'detector_value': value,
+                        'raw_value': reported_value,
+                        'threshold': (rule.conditions and rule.conditions.get('all')) or rule.trigger_threshold,
+                        'detection_mode': rule.detection_mode,
+                        'baseline': baseline_details,
+                        'composite': bool(rule.conditions),
+                        'observed_at': snapshot.observed_at.isoformat(),
+                    },
+                ))
+            await self.session.commit()
+            if transition.became_firing:
+                await incident_service.on_firing(project_id, rule.id, effective_resource, effective_metric, effective_severity, reported_value)
+            elif transition.became_recovered:
+                fingerprint = incident_fingerprint(project_id, rule.id, effective_resource, effective_metric)
+                incident = await self.session.scalar(select(Incident).where(Incident.project_id == project_id, Incident.fingerprint == fingerprint, Incident.status != 'resolved').order_by(Incident.first_seen.desc()).limit(1))
+                if incident:
+                    await incident_service.resolve(incident.id)
+            elif runtime.state.value == 'firing':
+                fingerprint = incident_fingerprint(project_id, rule.id, effective_resource, effective_metric)
+                incident = await self.session.scalar(select(Incident).where(Incident.project_id == project_id, Incident.fingerprint == fingerprint, Incident.status.in_(['open', 'investigating', 'diagnosed'])).order_by(Incident.first_seen.desc()).limit(1))
+                if not incident:
+                    incident = await incident_service.on_firing(project_id, rule.id, effective_resource, effective_metric, effective_severity, reported_value)
+                else:
+                    await incident_service.touch_firing(incident, effective_severity, reported_value)
+                now = datetime.now().astimezone()
+                if incident and incident.last_investigated_at and now - incident.last_investigated_at >= timedelta(seconds=self.settings.incident_stale_reinvestigate_seconds):
+                    conversation = await self.session.scalar(select(Conversation).where(Conversation.incident_id == incident.id).order_by(Conversation.created_at.asc()).limit(1))
+                    if conversation:
+                        bucket = int(now.timestamp()) // self.settings.incident_stale_reinvestigate_seconds
+                        await JobQueue(self.session).enqueue('incident_investigate', {'incident_id': str(incident.id), 'conversation_id': str(conversation.id)}, idempotency_key=f'incident_investigate:{incident.id}:stale:{bucket}', priority=30)

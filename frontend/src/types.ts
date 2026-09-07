@@ -11,6 +11,7 @@ export interface Conversation {
   type: ConversationType | string
   project_id: string | null
   incident_id: string | null
+  archived: boolean
   updated_at: string
 }
 
@@ -25,51 +26,48 @@ export interface ChatMessage {
 
 export interface ProjectSummary {
   id: string
+  server_id: string | null
+  server_name: string | null
   name: string
   description: string
+  environment: string
   enabled: boolean
   poll_interval: number
   updated_at: string
 }
 
-export interface ProcessTarget {
-  id: string | null
+export interface MonitoredServer {
+  id: string
   name: string
-  executable: string | null
-  cmdline_filters: string[]
-  cwd: string | null
-  port: number | null
-  service_id: string | null
+  node_metrics_url: string
+  gpu_metrics_url: string | null
   enabled: boolean
+  project_count: number
+  created_at: string | null
+  updated_at: string | null
 }
 
-export interface LogSource {
-  id: string | null
-  path: string
-  encoding: string
-  parser_config: Record<string, unknown>
-  service_id: string | null
-  enabled: boolean
+export interface ServerTestResult {
+  ok: boolean
+  signals: Record<string, number>
+  resource_signals: Record<string, Record<string, number>>
+  resources: Record<string, unknown>
+  error: string | null
 }
 
-export interface DockerTarget {
-  id: string | null
-  container_ref: string
-  service_id: string | null
-  enabled: boolean
-}
-
-export interface DatabaseProfile {
-  id: string | null
-  type: string
-  host: string
-  port: number
-  database: string
-  username: string
-  password: string | null
-  sslmode: string
-  service_id: string | null
-  enabled: boolean
+export interface ProjectDraftTestResult {
+  ok: boolean
+  checks: Array<{ key: 'server' | 'service' | 'prometheus'; ok: boolean; error: string | null }>
+  capabilities: {
+    host_metrics: boolean
+    gpu_metrics: boolean
+    health_check: boolean
+    http_metrics: boolean
+    process_metrics: boolean
+  }
+  warnings: string[]
+  signals: Record<string, number>
+  collector_status: Record<string, { ok: boolean; error: string | null }>
 }
 
 export interface ServiceEndpoint {
@@ -95,15 +93,6 @@ export interface MetricsSource {
   enabled: boolean
 }
 
-// A logical application/component that groups related monitoring targets so
-// incidents can be reasoned about per service rather than per raw target.
-export interface Service {
-  id: string | null
-  name: string
-  description: string
-  enabled: boolean
-}
-
 export interface MonitoringRule {
   id: string | null
   metric_key: string
@@ -115,22 +104,26 @@ export interface MonitoringRule {
   recovery_for: number
   severity: string
   enabled: boolean
+  detection_mode: 'threshold' | 'baseline' | 'hybrid'
+  baseline_window: number
+  baseline_min_samples: number
+  baseline_z_score: number
+  baseline_recovery_z_score: number
+  conditions?: Record<string, unknown> | null
 }
 
 export interface ProjectConfig {
   id: string
+  server_id: string | null
+  server?: MonitoredServer | null
   name: string
   description: string
+  environment: string
   enabled: boolean
   timezone: string
   poll_interval: number
-  process_targets: ProcessTarget[]
-  log_sources: LogSource[]
-  docker_targets: DockerTarget[]
-  database_profiles: DatabaseProfile[]
   service_endpoints: ServiceEndpoint[]
   metrics_sources: MetricsSource[]
-  services: Service[]
   rules: MonitoringRule[]
 }
 

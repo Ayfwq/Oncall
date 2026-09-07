@@ -49,12 +49,31 @@ class Session(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class MonitoredServer(Base):
+    """A remote host observed through standard Prometheus exporters."""
+
+    __tablename__ = 'monitored_servers'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    node_metrics_url: Mapped[str] = mapped_column(Text)
+    gpu_metrics_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint('user_id', 'name', name='uq_monitored_server_user_name'),)
+
+
 class Project(Base):
     __tablename__ = 'projects'
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
+    server_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('monitored_servers.id', ondelete='SET NULL'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default='')
+    # Deployment boundary used by the UI and runbooks. It is descriptive only;
+    # remote collection still requires a worker/agent on that host.
+    environment: Mapped[str] = mapped_column(String(40), default='local')
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     timezone: Mapped[str] = mapped_column(String(80), default='Asia/Singapore')
     poll_interval: Mapped[int] = mapped_column(Integer, default=300)
@@ -192,7 +211,14 @@ class MonitoringRule(Base):
     recovery_for: Mapped[int] = mapped_column(Integer, default=2)
     severity: Mapped[str] = mapped_column(String(20), default='warning')
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    # Composite rule definition (P4). When set, the legacy scalar metric_key/
+    # threshold is deterministic; baseline compares against a learned window;
+    # hybrid fires when either the absolute threshold or the baseline is bad.
+    detection_mode: Mapped[str] = mapped_column(String(20), default='threshold')
+    baseline_window: Mapped[int] = mapped_column(Integer, default=60)
+    baseline_min_samples: Mapped[int] = mapped_column(Integer, default=12)
+    baseline_z_score: Mapped[float] = mapped_column(Float, default=3.0)
+    baseline_recovery_z_score: Mapped[float] = mapped_column(Float, default=2.0)
+    # Composite rule definition. When set, the scalar metric_key/
     # operator/threshold fields are ignored and the rule fires only when EVERY
     # condition in `conditions['all']` holds simultaneously. Structure:
     #   {"all": [{"metric_key","resource_key","operator","threshold"}, ...],
@@ -209,6 +235,23 @@ class MonitoringRuleState(Base):
     recovery_hits: Mapped[int] = mapped_column(Integer, default=0)
     last_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class MonitoringBaseline(Base):
+    """Bounded normal samples for adaptive rules.
+
+    Only samples observed while the rule is not abnormal are appended. Keeping
+    the window in the database makes baseline learning survive worker restarts
+    without turning the full metric history into the hot path.
+    """
+    __tablename__ = 'monitoring_baselines'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    metric_key: Mapped[str] = mapped_column(String(160), index=True)
+    resource_key: Mapped[str] = mapped_column(String(200), default='default')
+    samples: Mapped[list[float]] = mapped_column(JSONB, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint('project_id', 'metric_key', 'resource_key', name='uq_monitoring_baseline_key'),)
 
 
 class MonitoringRun(Base):
@@ -327,7 +370,7 @@ class AgentRun(Base):
     incident_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('incidents.id', ondelete='SET NULL'), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default='running')
     model_profile: Mapped[str] = mapped_column(String(120), default='default')
-    prompt_version: Mapped[str] = mapped_column(String(80), default='v1')
+    prompt_version: Mapped[str] = mapped_column(String(80), default='current')
     usage: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

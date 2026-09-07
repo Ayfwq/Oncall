@@ -11,4 +11,4 @@ def test_every_tool_has_llm_visible_description_and_json_schema():
         assert 'project_id' not in schema.get('properties',{})
         assert 'incident_id' not in schema.get('properties',{})
         assert schema.get('additionalProperties') is False
-    assert len(public_tool_specs())==8
+    assert len(public_tool_specs())==4

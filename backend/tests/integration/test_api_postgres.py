@@ -29,7 +29,6 @@ from oncall.infrastructure.db.models import (
     MetricSample,
     MonitoringRun,
     Project,
-    ProjectDatabaseProfile,
     Session,
     User,
 )
@@ -48,7 +47,7 @@ ADMIN_PASS = SETTINGS.admin_password
 # monitor worker can never fire it: incidents are only ever created by the dev
 # endpoint with an explicit value.
 SYNTH_RULE = {
-    "metric_key": "test.synthetic.metric",
+    "metric_key": "zz.test.synthetic",
     "resource_key": "synthetic",
     "operator": ">",
     "trigger_threshold": 1000.0,
@@ -70,17 +69,23 @@ async def _scalars(stmt):
         return list((await db.scalars(stmt)).all())
 
 
-async def _create_project(client: httpx.AsyncClient, name: str, **overrides) -> dict:
+async def _create_project(client: httpx.AsyncClient, name: str, _cleanup=None, **overrides) -> dict:
+    server_response = await client.post('/api/servers', json={
+        'name': f'{name}-server',
+        'node_metrics_url': 'http://127.0.0.1:9100/metrics',
+        'gpu_metrics_url': None,
+        'enabled': True,
+    })
+    assert server_response.status_code == 200, server_response.text[:300]
+    if _cleanup is not None:
+        _cleanup.track_server(server_response.json()['id'])
     body = {
         "name": name,
         "description": "integration test project",
+        "server_id": server_response.json()['id'],
         "enabled": True,
         "timezone": "Asia/Singapore",
         "poll_interval": 3600,
-        "process_targets": [],
-        "log_sources": [],
-        "docker_targets": [],
-        "database_profiles": [],
         "service_endpoints": [],
         "rules": [dict(SYNTH_RULE)],
     }
@@ -96,6 +101,7 @@ class Cleanup:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
         self.projects: list[str] = []
+        self.servers: list[str] = []
         self.conversations: list[str] = []
         self.documents: list[str] = []
         self.job_ids: list[str] = []
@@ -104,6 +110,10 @@ class Cleanup:
     def track_project(self, pid: str) -> str:
         self.projects.append(pid)
         return pid
+
+    def track_server(self, sid: str) -> str:
+        self.servers.append(sid)
+        return sid
 
     def track_conversation(self, cid: str) -> str:
         self.conversations.append(cid)
@@ -135,6 +145,11 @@ class Cleanup:
         for pid in reversed(self.projects):
             try:
                 await self.client.delete(f"/api/projects/{pid}")
+            except Exception:
+                pass
+        for sid in reversed(self.servers):
+            try:
+                await self.client.delete(f"/api/servers/{sid}")
             except Exception:
                 pass
         async with SessionFactory() as db:
@@ -250,17 +265,7 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
     client, cleanup = admin_client
     suffix = uuid.uuid4().hex[:10]
     name = f"itest-project-{suffix}"
-    db_profile = {
-        "type": "postgresql",
-        "host": "127.0.0.1",
-        "port": 5432,
-        "database": "oncall",
-        "username": "oncall",
-        "password": "s3cret-placeholder",
-        "sslmode": "prefer",
-        "enabled": True,
-    }
-    p = await _create_project(client, name, database_profiles=[db_profile])
+    p = await _create_project(client, name, _cleanup=cleanup)
     pid = cleanup.track_project(p["id"])
     assert p["name"] == name
 
@@ -272,27 +277,23 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
     # list contains it
     assert pid in [x["id"] for x in (await client.get("/api/projects")).json()]
 
-    # detail: db password is redacted, rule survives
+    # detail: only active remote-Python fields are returned
     r = await client.get(f"/api/projects/{pid}")
     assert r.status_code == 200
     detail = r.json()
     assert detail["name"] == name
-    assert detail["database_profiles"][0]["password"] is None
-    assert len(detail["rules"]) == 1 and detail["rules"][0]["metric_key"] == "test.synthetic.metric"
+    assert "database_profiles" not in detail
+    assert "process_targets" not in detail
+    assert len(detail["rules"]) == 1 and detail["rules"][0]["metric_key"] == "zz.test.synthetic"
 
-    # update: rename; password=None sent must preserve the stored encrypted secret
+    # update: rename while preserving the active remote-Python contract
     updated = dict(detail)
     updated["name"] = name + "-renamed"
-    for dbp in updated["database_profiles"]:
-        dbp["password"] = None
     r = await client.put(f"/api/projects/{pid}", json=updated)
     assert r.status_code == 200
     r = await client.get(f"/api/projects/{pid}")
     assert r.json()["name"] == name + "-renamed"
     assert len(r.json()["rules"]) == 1
-    dbp_row = await _scalar(select(ProjectDatabaseProfile).where(ProjectDatabaseProfile.project_id == UUID(pid)))
-    assert dbp_row is not None and dbp_row.encrypted_password is not None
-
     # validation failure -> 422
     bad = dict(updated)
     bad["poll_interval"] = 5
@@ -307,9 +308,9 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
 
     # snapshot: seed a completed MonitoringRun and verify the endpoint surfaces it
     seeded_snapshot = {
-        "signals": {"test.synthetic.metric": 42.0},
-        "resources": {"host": {"counters": {}}},
-        "collector_status": {"host": {"ok": True}},
+        "signals": {"zz.test.synthetic": 42.0},
+        "resources": {"server": {"node": {"counters": {}}}},
+        "collector_status": {"server": {"ok": True}},
     }
     future = datetime.now().astimezone() + timedelta(hours=1)
     async with SessionFactory() as db:
@@ -319,14 +320,14 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
             started_at=future,
             finished_at=future,
             snapshot=seeded_snapshot,
-            collector_status={"host": {"ok": True}},
+            collector_status={"server": {"ok": True}},
         ))
         await db.commit()
     r = await client.get(f"/api/projects/{pid}/snapshot")
     assert r.status_code == 200
     body = r.json()
     assert body["snapshot"] == seeded_snapshot
-    assert body["collector_status"] == {"host": {"ok": True}}
+    assert body["collector_status"] == {"server": {"ok": True}}
     assert body["observed_at"] is not None
 
     # monitoring metrics: seed samples and verify ascending order
@@ -334,11 +335,11 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
     ts2 = datetime.now().astimezone() - timedelta(minutes=1)
     async with SessionFactory() as db:
         db.add_all([
-            MetricSample(project_id=UUID(pid), metric_key="test.synthetic.metric", resource_key="synthetic", ts=ts1, value=1.5),
-            MetricSample(project_id=UUID(pid), metric_key="test.synthetic.metric", resource_key="synthetic", ts=ts2, value=2.5),
+            MetricSample(project_id=UUID(pid), metric_key="zz.test.synthetic", resource_key="synthetic", ts=ts1, value=1.5),
+            MetricSample(project_id=UUID(pid), metric_key="zz.test.synthetic", resource_key="synthetic", ts=ts2, value=2.5),
         ])
         await db.commit()
-    r = await client.get("/api/monitoring/metrics", params={"project_id": pid, "metric_key": "test.synthetic.metric"})
+    r = await client.get("/api/monitoring/metrics", params={"project_id": pid, "metric_key": "zz.test.synthetic"})
     assert r.status_code == 200
     assert [x["value"] for x in r.json()] == [1.5, 2.5]
 
@@ -353,12 +354,14 @@ async def test_projects_owner_scope_and_unauthenticated(admin_client, second_use
     client, cleanup = admin_client
     sclient, scleanup, _, _ = second_user
 
-    apid = cleanup.track_project((await _create_project(client, f"itest-admin-{uuid.uuid4().hex[:8]}"))["id"])
-    spid = scleanup.track_project((await _create_project(sclient, f"itest-user2-{uuid.uuid4().hex[:8]}"))["id"])
+    apid = cleanup.track_project((await _create_project(client, f"itest-admin-{uuid.uuid4().hex[:8]}", _cleanup=cleanup))["id"])
+    spid = scleanup.track_project((await _create_project(sclient, f"itest-user2-{uuid.uuid4().hex[:8]}", _cleanup=scleanup))["id"])
 
     # admin cannot touch user2's project
     assert (await client.get(f"/api/projects/{spid}")).status_code == 404
-    assert (await client.put(f"/api/projects/{spid}", json={"name": "x", "poll_interval": 60})).status_code == 404
+    # FastAPI validates the request body before the ownership check; an
+    # incomplete update payload is therefore a client-side 422.
+    assert (await client.put(f"/api/projects/{spid}", json={"name": "x", "poll_interval": 60})).status_code == 422
     assert (await client.delete(f"/api/projects/{spid}")).status_code == 404
     assert (await client.post(f"/api/projects/{spid}/test")).status_code == 404
     assert (await client.get(f"/api/projects/{spid}/snapshot")).status_code == 404
@@ -383,7 +386,7 @@ async def test_projects_owner_scope_and_unauthenticated(admin_client, second_use
 async def test_conversations_crud_search_archive_messages_stream(admin_client):
     client, cleanup = admin_client
     suffix = uuid.uuid4().hex[:10]
-    pid = cleanup.track_project((await _create_project(client, f"itest-convproj-{suffix}"))["id"])
+    pid = cleanup.track_project((await _create_project(client, f"itest-convproj-{suffix}", _cleanup=cleanup))["id"])
 
     title_a = f"itest-conv-a-{suffix}"
     title_b = f"itest-conv-b-{suffix}"
@@ -482,7 +485,7 @@ async def test_conversations_owner_scope(admin_client, second_user):
 async def test_incidents_lifecycle_via_dev_trigger(admin_client):
     client, cleanup = admin_client
     suffix = uuid.uuid4().hex[:10]
-    pid = cleanup.track_project((await _create_project(client, f"itest-inc-{suffix}"))["id"])
+    pid = cleanup.track_project((await _create_project(client, f"itest-inc-{suffix}", _cleanup=cleanup))["id"])
 
     # dev endpoints require the development environment (assert the running env)
     readiness = (await client.get("/api/settings/readiness")).json()
@@ -491,7 +494,7 @@ async def test_incidents_lifecycle_via_dev_trigger(admin_client):
     # trigger -> creates incident + incident conversation
     r = await client.post(
         "/api/dev/incidents/trigger",
-        json={"project_id": pid, "metric_key": "test.synthetic.metric", "value": 2000.0},
+        json={"project_id": pid, "metric_key": "zz.test.synthetic", "value": 2000.0},
     )
     assert r.status_code == 200, r.text
     iid = r.json()["incident_id"]
@@ -503,7 +506,7 @@ async def test_incidents_lifecycle_via_dev_trigger(admin_client):
     # DB rows
     inc = await _scalar(select(Incident).where(Incident.id == UUID(iid)))
     assert inc is not None and str(inc.project_id) == pid
-    assert inc.anomaly_type == "test.synthetic.metric" and inc.status in {"open", "investigating", "diagnosed"}
+    assert inc.anomaly_type == "zz.test.synthetic" and inc.status in {"open", "investigating", "diagnosed"}
     iconv = await _scalar(select(Conversation).where(Conversation.id == UUID(icid)))
     assert iconv is not None and iconv.type == "incident" and str(iconv.incident_id) == iid
 
@@ -545,7 +548,7 @@ async def test_incidents_lifecycle_via_dev_trigger(admin_client):
     # a new trigger while the old incident is resolved creates a NEW incident
     r = await client.post(
         "/api/dev/incidents/trigger",
-        json={"project_id": pid, "metric_key": "test.synthetic.metric", "value": 2500.0},
+        json={"project_id": pid, "metric_key": "zz.test.synthetic", "value": 2500.0},
     )
     assert r.status_code == 200
     iid2 = r.json()["incident_id"]
@@ -583,8 +586,8 @@ async def test_incidents_lifecycle_via_dev_trigger(admin_client):
 async def test_incidents_owner_scope(admin_client, second_user):
     client, cleanup = admin_client
     sclient, scleanup, _, _ = second_user
-    spid = scleanup.track_project((await _create_project(sclient, f"itest-inc-user2-{uuid.uuid4().hex[:8]}"))["id"])
-    r = await sclient.post("/api/dev/incidents/trigger", json={"project_id": spid, "metric_key": "test.synthetic.metric", "value": 3000.0})
+    spid = scleanup.track_project((await _create_project(sclient, f"itest-inc-user2-{uuid.uuid4().hex[:8]}", _cleanup=scleanup))["id"])
+    r = await sclient.post("/api/dev/incidents/trigger", json={"project_id": spid, "metric_key": "zz.test.synthetic", "value": 3000.0})
     assert r.status_code == 200
     iid = r.json()["incident_id"]
     icid = r.json()["conversation_id"]
@@ -672,7 +675,7 @@ async def test_knowledge_documents_upload_jobs_reindex_delete(admin_client):
 async def test_knowledge_owner_scope_and_errors(admin_client, second_user):
     client, cleanup = admin_client
     sclient, scleanup, _, _ = second_user
-    spid = scleanup.track_project((await _create_project(sclient, f"itest-kd-user2-{uuid.uuid4().hex[:8]}"))["id"])
+    spid = scleanup.track_project((await _create_project(sclient, f"itest-kd-user2-{uuid.uuid4().hex[:8]}", _cleanup=scleanup))["id"])
 
     # scope to another user's project -> 404; malformed scope -> 400; bad ext -> 400
     r = await client.post(

@@ -1,6 +1,6 @@
 # Local Deployment — Oncall AI SRE
 
-本指南覆盖在 Windows 本机从零部署 Oncall 的完整步骤。架构为**模块化单体 + 多进程**：PostgreSQL/Milvus 等基础设施跑在 Docker，Oncall 的 4 个 Python 进程跑在 Windows 宿主机（以便直接观测本机进程、日志与 Docker）。
+本指南覆盖在 Windows 本机从零部署 Oncall 的完整步骤。架构为**模块化单体 + 多进程**：PostgreSQL/Milvus 等基础设施跑在 Docker，Oncall 的 4 个 Python 进程跑在 Windows 宿主机；被监控项目通过远程服务器的 exporter、健康检查和 `/metrics` 接入。
 
 ## 0. 前置条件
 
@@ -94,8 +94,8 @@ uv run oncall-rag-worker
 
 | 进程 | 职责 |
 |---|---|
-| `oncall-api` | FastAPI 网关（Web/Feishu 入口、33 路由） |
-| `oncall-monitor-worker` | 采集 → 32 signals → Detector → Incident → 下发调查 job |
+| `oncall-api` | FastAPI 网关（Web/Feishu 入口、39 路由，含 Python 快速接入） |
+| `oncall-monitor-worker` | 采集 28/34 个远程 Python signals → Detector → Incident → 下发调查 job |
 | `oncall-agent-worker` | 消费调查 job → LangGraph Agent → Evidence/Diagnosis |
 | `oncall-rag-worker` | 消费知识入库 job → Docling → Chunk → Milvus 索引 |
 
@@ -131,6 +131,6 @@ API  http://127.0.0.1:9900
 
 ## 9. 已知边界
 
-- 当前实现为只读诊断：Agent 的 8 个工具均为只读，不提供 restart/kill/write 等破坏性 Action。
+- 当前实现为只读诊断：Agent 的 4 个工具均为只读，不提供 restart/kill/write 等破坏性 Action。
 - 真实飞书与 AutoGEO 实机采集依赖外部凭证/应用，见 `IMPLEMENTATION_STATUS.md`。
 - 生产语义 Embedding/Rerank 需配置远端 embedding/rerank 模型端点；未配置时 RAG 会明确报配置错误。

@@ -17,7 +17,7 @@ class ServiceIntegration:
     async def _probe(self,e:ServiceEndpointDTO)->dict:
         start=time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=e.timeout_ms/1000.0) as client:
+            async with httpx.AsyncClient(timeout=e.timeout_ms/1000.0, trust_env=False) as client:
                 r=await client.request(e.method,e.url)
             latency=(time.perf_counter()-start)*1000
             return {'name':e.name,'url':e.url,'reachable':True,'status_code':r.status_code,'expected_status':e.expected_status,'ok':r.status_code==e.expected_status,'latency_ms':latency}

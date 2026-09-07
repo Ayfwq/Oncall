@@ -176,15 +176,19 @@ def build_suggested_rules(profile: FrameworkProfile, routes: list[str]) -> list[
             metric_key='app.up', resource_key='default', operator='==',
             trigger_threshold=0.0, recovery_threshold=0.0, severity='critical',
         ),
-        # Aggregate error rate above 10% -> warning.
+        # Aggregate error rate above 10% with meaningful traffic -> warning.
         MonitoringRuleDTO(
             metric_key='app.http.error_rate', resource_key='default', operator='>',
             trigger_threshold=0.10, recovery_threshold=0.05, severity='warning',
+            conditions={'all': [
+                {'metric_key': 'app.http.rps', 'resource_key': 'default', 'operator': '>', 'threshold': 1.0},
+                {'metric_key': 'app.http.error_rate', 'resource_key': 'default', 'operator': '>', 'threshold': 0.10},
+            ]},
         ),
         # p95 latency above 800ms -> warning.
         MonitoringRuleDTO(
             metric_key='app.http.p95_ms', resource_key='default', operator='>',
-            trigger_threshold=800.0, recovery_threshold=500.0, severity='warning',
+            trigger_threshold=800.0, recovery_threshold=500.0, severity='warning', detection_mode='hybrid',
         ),
         # p99 latency above 2s -> critical.
         MonitoringRuleDTO(

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import { api, streamChat } from '../api'
@@ -11,10 +11,18 @@ const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const convs = ref<Conversation[]>([]), projects = ref<ProjectSummary[]>([]), active = ref(''), messages = ref<ChatMessage[]>([]), input = ref('')
 const busy = ref(false), newProject = ref(''), search = ref(''), showArchived = ref(false), statusLine = ref('')
 const mobileListOpen = ref(false)
+const messagesEl = ref<HTMLElement | null>(null)
+let scrollQueued = false
 
 const activeConversation = computed(() => convs.value.find(x => x.id === active.value))
 function render(text: string) { return DOMPurify.sanitize(md.render(text || '')) }
 function timeAgo(iso?: string) { if (!iso) return ''; const d = new Date(iso).getTime(); const s = Math.floor((Date.now() - d) / 1000); if (s < 60) return '刚刚'; if (s < 3600) return Math.floor(s / 60) + ' 分钟前'; if (s < 86400) return Math.floor(s / 3600) + ' 小时前'; return Math.floor(s / 86400) + ' 天前' }
+function scrollToBottom() { if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight }
+function queueScroll() {
+  if (scrollQueued) return
+  scrollQueued = true
+  requestAnimationFrame(() => { scrollQueued = false; scrollToBottom() })
+}
 
 async function load() {
   const qs = new URLSearchParams()
@@ -35,6 +43,7 @@ async function startWith(promptText: string) {
 }
 async function open(id: string) {
   active.value = id; messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
+  await nextTick(); scrollToBottom()
 }
 async function rename() {
   const c = activeConversation.value; if (!c) return
@@ -43,13 +52,24 @@ async function rename() {
 }
 async function archive() {
   const c = activeConversation.value; if (!c) return
-  await api(`/conversations/${c.id}`, { method: 'PATCH', body: JSON.stringify({ archived: true }) })
-  active.value = ''; messages.value = []; await load()
+  await archiveConversation(c)
+}
+async function archiveConversation(c: Conversation) {
+  const nextArchived = !c.archived
+  await api(`/conversations/${c.id}`, { method: 'PATCH', body: JSON.stringify({ archived: nextArchived }) })
+  if (nextArchived && active.value === c.id) { active.value = ''; messages.value = [] }
+  await load()
+}
+async function removeConversation(c: Conversation) {
+  if (busy.value) return
+  if (!confirm(`删除会话「${c.title}」？删除后消息和上下文将无法恢复。`)) return
+  await api(`/conversations/${c.id}`, { method: 'DELETE' })
+  if (active.value === c.id) { active.value = ''; messages.value = [] }
+  await load()
 }
 async function remove() {
-  const c = activeConversation.value; if (!c || !confirm(`删除会话「${c.title}」？`)) return
-  await api(`/conversations/${c.id}`, { method: 'DELETE' })
-  active.value = ''; messages.value = []; await load()
+  const c = activeConversation.value
+  if (c) await removeConversation(c)
 }
 function onCmd(cmd: string) { if (cmd === 'rename') rename(); else if (cmd === 'archive') archive(); else if (cmd === 'remove') remove() }
 
@@ -60,6 +80,7 @@ async function send() {
   const streamingMsg: ChatMessage = { role: 'assistant', content: '' }
   messages.value.push(streamingMsg)
   busy.value = true; statusLine.value = '正在分析…'
+  await nextTick(); scrollToBottom()
   try {
     await streamChat(active.value, text, (e) => {
       if (e.type === 'token') streamingMsg.content += e.data.content
@@ -72,6 +93,7 @@ async function send() {
       else if (e.type === 'diagnosis_ready') statusLine.value = '诊断完成 · 置信度 ' + Math.round((e.data.confidence || 0) * 100) + '%'
       else if (e.type === 'final') streamingMsg.content = e.data.content
       else if (e.type === 'error') streamingMsg.content = '错误：' + e.data.message
+      queueScroll()
     })
     await load()
   } catch (e) {
@@ -109,9 +131,17 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
         <div v-for="c in convs" :key="c.id" class="conv" :class="{ active: active === c.id }" @click="open(c.id)">
           <div class="conv-title">
             <span v-if="c.type === 'incident'" class="badge warn" style="padding: 0 6px">告警</span>
-            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ c.title }}</span>
+            <span class="conv-name">{{ c.title }}</span>
           </div>
           <div class="conv-meta">{{ c.incident_id ? 'Incident 会话' : timeAgo(c.updated_at) }}</div>
+          <div class="conv-actions" @click.stop>
+            <button class="conv-icon archive" :title="c.archived ? '恢复会话' : '归档会话'" :aria-label="c.archived ? '恢复会话' : '归档会话'" @click="archiveConversation(c)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6" /></svg>
+            </button>
+            <button class="conv-icon danger" title="删除会话" aria-label="删除会话" @click="removeConversation(c)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 4h4l1 3H9l1-3M8 10v7M12 10v7M16 10v7M7 7l1 14h8l1-14" /></svg>
+            </button>
+          </div>
         </div>
         <div v-if="!convs.length" style="color: var(--text-3); text-align: center; padding: 30px 10px; font-size: 13px">暂无会话</div>
       </div>
@@ -134,7 +164,7 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item command="rename">重命名</el-dropdown-item>
-                <el-dropdown-item command="archive">归档</el-dropdown-item>
+                <el-dropdown-item command="archive">{{ activeConversation.archived ? '恢复' : '归档' }}</el-dropdown-item>
                 <el-dropdown-item command="remove" divided>删除</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -142,7 +172,7 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
         </template>
       </div>
 
-      <div class="messages">
+      <div ref="messagesEl" class="messages">
         <div v-if="!active" class="empty-state">
           <div class="empty-icon">◈</div>
             <div class="welcome-kicker">ONCALL AI SRE</div>
@@ -174,6 +204,7 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </button>
         </div>
+        <p class="composer-hint">Oncall 会结合监控数据与知识库回答，请在执行变更前核实建议。</p>
       </div>
     </section>
   </div>
@@ -182,18 +213,26 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 <style scoped>
 .menu-btn { background: none; border: none; font-size: 20px; color: var(--text-2); cursor: pointer; padding: 4px 10px; border-radius: 8px; line-height: 1; }
 .menu-btn:hover { background: #eef0f4; }
-.empty-state { text-align: center; padding: 90px 20px 40px; }
-.empty-icon { width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 20px; background: linear-gradient(135deg, #818cf8, #6366f1); color: #fff; font-size: 28px; display: grid; place-items: center; box-shadow: var(--shadow); }
+.conv { position: relative; }
+.conv-actions { position: absolute; right: 7px; top: 10px; display: flex; gap: 3px; opacity: 0; transition: opacity .15s; }
+.conv:hover .conv-actions, .conv.active .conv-actions, .conv-actions:focus-within { opacity: 1; }
+.conv-icon { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #dce8e3; border-radius: 7px; background: rgba(255,255,255,.96); color: var(--text-2); cursor: pointer; padding: 0; }
+.conv-icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.conv-icon:hover { background: #eaf6f1; border-color: #a9d9c7; color: var(--accent-strong); }
+.conv-icon.danger:hover { background: #fff1f0; border-color: #f2c5c2; color: #c0393f; }
+.empty-state { min-height: 100%; display:flex; flex-direction:column; justify-content:center; text-align: center; padding: 36px 20px 155px; }
+.empty-icon { width: 58px; height: 58px; margin: 0 auto 17px; border-radius: 18px; background: linear-gradient(135deg, #46c59d, #20886c); color: #fff; font-size: 26px; display: grid; place-items: center; box-shadow: 0 15px 36px -18px rgba(25,132,99,.7); }
 .welcome-kicker { color: var(--accent-strong); font-size: 11px; font-weight: 700; letter-spacing: .14em; margin-bottom: 7px; }
 .empty-state h2 { font-size: 20px; }
 .empty-state > p { max-width: 510px; margin: 0 auto 24px; }
-.prompt-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; max-width: 760px; margin: 0 auto; text-align: left; }
-.prompt-card { position: relative; text-align: left; border: 1px solid var(--border); background: var(--surface); border-radius: 13px; padding: 14px; cursor: pointer; box-shadow: var(--shadow-sm); transition: .15s; }
+.prompt-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; width:100%; max-width: 720px; margin: 0 auto; text-align: left; }
+.prompt-card { position: relative; text-align: left; border: 1px solid #dfe9e5; background: #fff; border-radius: 15px; padding: 15px; cursor: pointer; box-shadow: var(--shadow-sm); transition: .15s; }
 .prompt-card:hover { border-color: var(--accent); box-shadow: var(--shadow); transform: translateY(-2px); }
 .prompt-card b, .prompt-card span { display: block; }
 .prompt-card b { font-size: 13px; margin-bottom: 5px; }
 .prompt-card span { font-size: 11px; color: var(--text-3); }
 .prompt-card i { position: absolute; right: 12px; bottom: 12px; color: var(--accent-strong); font-style: normal; }
+.composer-hint{margin:7px auto 0;color:#9aa8a3;font-size:10px;text-align:center}
 @media (max-width: 760px) { .prompt-grid { grid-template-columns: 1fr; max-width: 360px; } .empty-state { padding-top: 55px; } }
 
 .mobile-conv-toggle { display: none; }

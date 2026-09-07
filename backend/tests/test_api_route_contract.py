@@ -12,8 +12,9 @@ from pathlib import Path
 EXPECTED={
 ('GET','/api/health'),('POST','/api/auth/login'),('POST','/api/auth/logout'),('GET','/api/auth/me'),
 ('POST','/api/auth/password'),
+('GET','/api/servers'),('POST','/api/servers'),('POST','/api/servers/test'),('PUT','/api/servers/{sid}'),('POST','/api/servers/{sid}/test'),('DELETE','/api/servers/{sid}'),
 ('GET','/api/conversations'),('POST','/api/conversations'),('PATCH','/api/conversations/{cid}'),('DELETE','/api/conversations/{cid}'),('GET','/api/conversations/{cid}/messages'),('POST','/api/conversations/{cid}/messages:stream'),
-('GET','/api/projects'),('POST','/api/projects'),('PUT','/api/projects/{pid}'),('GET','/api/projects/{pid}'),('DELETE','/api/projects/{pid}'),('POST','/api/projects/{pid}/test'),('GET','/api/projects/{pid}/snapshot'),
+('GET','/api/projects'),('POST','/api/projects'),('POST','/api/projects/onboard/python'),('POST','/api/projects/onboard/python/test'),('PUT','/api/projects/{pid}'),('GET','/api/projects/{pid}'),('DELETE','/api/projects/{pid}'),('POST','/api/projects/{pid}/test'),('POST','/api/projects/{pid}/metrics/discover'),('POST','/api/projects/{pid}/metrics/apply'),('GET','/api/projects/{pid}/snapshot'),
 ('GET','/api/incidents'),('GET','/api/incidents/{iid}'),('POST','/api/incidents/{iid}/investigate'),('POST','/api/incidents/{iid}/resolve'),('POST','/api/incidents/{iid}/conversation'),('GET','/api/incidents/{iid}/trace'),
 ('GET','/api/monitoring/metrics'),
 ('GET','/api/knowledge/documents'),('POST','/api/knowledge/documents'),('GET','/api/knowledge/jobs/{jid}'),('POST','/api/knowledge/documents/{did}/reindex'),('DELETE','/api/knowledge/documents/{did}'),

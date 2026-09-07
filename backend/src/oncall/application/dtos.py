@@ -8,38 +8,19 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from oncall.monitoring.signals import BASELINE_SIGNALS
+from oncall.monitoring.signals import PYTHON_GPU_SIGNALS, PYTHON_SIGNALS, SUPPORTED_SIGNALS
 
-SUPPORTED_ENCODINGS = {'utf-8', 'gbk', 'gb2312', 'utf-16', 'latin-1'}
-SUPPORTED_SSL_MODES = {'disable', 'prefer', 'require', 'verify-ca', 'verify-full'}
-# White-box application metrics scraped from a Prometheus text-format /metrics
-# endpoint (e.g. a FastAPI app instrumented with prometheus-fastapi-instrumentator).
-# Kept separate from BASELINE_SIGNALS so the 32-signal contract tests stay stable.
-APP_HTTP_SIGNALS = (
-    'app.up',
-    'app.http.rps',
-    'app.http.error_rate',
-    'app.http.p95_ms',
-    'app.http.p99_ms',
-    'app.http.availability',
-)
-SUPPORTED_METRICS = frozenset([*BASELINE_SIGNALS, *APP_HTTP_SIGNALS])
-METRIC_FAMILY_TARGETS = {
-    'process.': 'process_targets',
-    'log.': 'log_sources',
-    'container.': 'docker_targets',
-    'db.': 'database_profiles',
-    'service.': 'service_endpoints',
-    'app.': 'metrics_sources',
-}
+# Only the remote-Python contract is accepted. The monitored server exporter
+# supplies host/GPU telemetry and the project supplies health/Prometheus URLs.
+APP_HTTP_SIGNALS = tuple(x for x in PYTHON_SIGNALS if x.startswith('app.'))
+HOST_GPU_SIGNALS = PYTHON_GPU_SIGNALS
+HOST_EXPORTER_SIGNALS = tuple(x for x in PYTHON_SIGNALS if x.startswith('host.'))
+PROCESS_PROM_SIGNALS = tuple(x for x in PYTHON_SIGNALS if x.startswith('process.'))
+SUPPORTED_METRICS = SUPPORTED_SIGNALS
 METRIC_RANGES = {
     'host.cpu.percent': (0, 100),
     'host.memory.percent': (0, 100),
     'host.disk.usage_percent': (0, 100),
-    'process.target.alive': (0, 1),
-    'container.running': (0, 1),
-    'container.health': (-1, 1),
-    'db.reachable': (0, 1),
     'service.reachable': (0, 1),
     'service.status_code': (0, 599),
     'app.up': (0, 1),
@@ -48,154 +29,47 @@ METRIC_RANGES = {
     'app.http.p95_ms': (0, 600000),
     'app.http.p99_ms': (0, 600000),
     'app.http.availability': (0, 100),
+    'host.gpu.exporter.up': (0, 1),
+    'host.gpu.utilization_percent': (0, 100),
+    'host.gpu.memory_percent': (0, 100),
+    'host.gpu.temperature_celsius': (0, 150),
+    'host.gpu.available': (0, 1),
+    'host.exporter.up': (0, 1),
 }
 
 
-class ServiceDTO(BaseModel):
-    """A logical application/component that groups related monitoring targets."""
-    id: UUID | None = None
-    name: str = 'service'
-    description: str = ''
+class MonitoredServerCreateDTO(BaseModel):
+    name: str
+    node_metrics_url: str
+    gpu_metrics_url: str | None = None
     enabled: bool = True
 
     @field_validator('name')
     @classmethod
-    def service_name_not_blank(cls, value: str) -> str:
+    def server_name_not_blank(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError('service name must not be blank')
+            raise ValueError('server name must not be blank')
         return value
 
-
-class ServiceCreateDTO(BaseModel):
-    # Optional id lets an update match an existing service in place. Without it,
-    # every save would recreate services and cascade SET NULL onto bound targets.
-    id: UUID | None = None
-    name: str = 'service'
-    description: str = ''
-    enabled: bool = True
-
-    @field_validator('name')
+    @field_validator('node_metrics_url', 'gpu_metrics_url')
     @classmethod
-    def service_create_name(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError('service name must not be blank')
-        return value
-
-
-class ProcessTargetDTO(BaseModel):
-    id: UUID | None = None
-    service_id: UUID | None = None
-    name: str = 'target'
-    executable: str | None = None
-    cmdline_filters: list[str] = Field(default_factory=list)
-    cwd: str | None = None
-    port: int | None = Field(default=None, ge=1, le=65535)
-    enabled: bool = True
-
-    @field_validator('name')
-    @classmethod
-    def name_not_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError('process target name must not be blank')
-        return value
-
-    @field_validator('executable', 'cwd')
-    @classmethod
-    def optional_text(cls, value: str | None) -> str | None:
+    def server_metrics_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
         value = value.strip()
-        return value or None
-
-    @field_validator('cmdline_filters')
-    @classmethod
-    def normalize_filters(cls, value: list[str]) -> list[str]:
-        return [item.strip() for item in value if item and item.strip()]
-
-    @model_validator(mode='after')
-    def has_process_selector(self) -> ProcessTargetDTO:
-        if not (self.executable or self.cmdline_filters or self.cwd):
-            raise ValueError('process target needs executable, cmdline_filters, or cwd')
-        return self
-
-
-class LogSourceDTO(BaseModel):
-    id: UUID | None = None
-    service_id: UUID | None = None
-    path: str
-    encoding: str = 'utf-8'
-    parser_config: dict[str, Any] = Field(default_factory=dict)
-    enabled: bool = True
-
-    @field_validator('path', 'encoding')
-    @classmethod
-    def text_not_blank(cls, value: str) -> str:
-        value = value.strip()
         if not value:
-            raise ValueError('log source value must not be blank')
-        return value
-
-    @field_validator('encoding')
-    @classmethod
-    def encoding_allowed(cls, value: str) -> str:
-        value = value.lower()
-        if value not in SUPPORTED_ENCODINGS:
-            raise ValueError(f'unsupported log encoding: {value}')
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in {'http', 'https'} or not parts.netloc:
+            raise ValueError('server metrics URL must be an absolute http(s) URL')
         return value
 
 
-class DockerTargetDTO(BaseModel):
-    id: UUID | None = None
-    service_id: UUID | None = None
-    container_ref: str
-    enabled: bool = True
-
-    @field_validator('container_ref')
-    @classmethod
-    def container_ref_not_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError('container_ref must not be blank')
-        return value
-
-
-class DatabaseProfileDTO(BaseModel):
-    id: UUID | None = None
-    service_id: UUID | None = None
-    type: str = 'postgresql'
-    host: str = '127.0.0.1'
-    port: int = Field(default=5432, ge=1, le=65535)
-    database: str
-    username: str
-    password: str | None = None
-    sslmode: str = 'prefer'
-    enabled: bool = True
-
-    @field_validator('type', 'host', 'database', 'username', 'sslmode')
-    @classmethod
-    def database_text_not_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError('database profile values must not be blank')
-        return value
-
-    @field_validator('type')
-    @classmethod
-    def database_type_supported(cls, value: str) -> str:
-        if value.lower() != 'postgresql':
-            raise ValueError('only postgresql database profiles are supported')
-        return 'postgresql'
-
-    @field_validator('sslmode')
-    @classmethod
-    def sslmode_supported(cls, value: str) -> str:
-        value = value.lower()
-        if value not in SUPPORTED_SSL_MODES:
-            raise ValueError(f'unsupported database sslmode: {value}')
-        return value
+class MonitoredServerDTO(MonitoredServerCreateDTO):
+    id: UUID
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class ServiceEndpointDTO(BaseModel):
@@ -315,6 +189,11 @@ class MonitoringRuleDTO(BaseModel):
     recovery_for: int = Field(default=2, ge=1, le=100)
     severity: str = 'warning'
     enabled: bool = True
+    detection_mode: Literal['threshold', 'baseline', 'hybrid'] = 'threshold'
+    baseline_window: int = Field(default=60, ge=6, le=10000)
+    baseline_min_samples: int = Field(default=12, ge=3, le=10000)
+    baseline_z_score: float = Field(default=3.0, gt=0, le=20)
+    baseline_recovery_z_score: float = Field(default=2.0, gt=0, le=20)
     # Composite rule (P4). When set, the scalar metric_key/operator/threshold
     # fields above are ignored and firing requires ALL conditions to hold.
     conditions: dict | None = None
@@ -352,6 +231,8 @@ class MonitoringRuleDTO(BaseModel):
 
     @model_validator(mode='after')
     def validate_conditions(self) -> MonitoringRuleDTO:
+        if self.conditions is not None and self.detection_mode != 'threshold':
+            raise ValueError('composite rules only support threshold detection')
         if self.conditions is None:
             return self
         conds = self.conditions
@@ -403,6 +284,8 @@ class MonitoringRuleDTO(BaseModel):
     def thresholds_are_consistent(self) -> MonitoringRuleDTO:
         if self.conditions is not None:
             return self  # composite rules ignore the scalar threshold fields
+        if self.detection_mode in {'baseline', 'hybrid'} and self.baseline_recovery_z_score >= self.baseline_z_score:
+            raise ValueError('baseline recovery z-score must be lower than trigger z-score')
         bounds = METRIC_RANGES.get(self.metric_key)
         if bounds:
             low, high = bounds
@@ -421,17 +304,14 @@ class MonitoringRuleDTO(BaseModel):
 
 class ProjectCreateDTO(BaseModel):
     name: str
+    server_id: UUID
     description: str = ''
+    environment: Literal['production'] = 'production'
     enabled: bool = True
     timezone: str = 'Asia/Shanghai'
-    poll_interval: int = Field(default=300, ge=10, le=86400)
-    process_targets: list[ProcessTargetDTO] = Field(default_factory=list)
-    log_sources: list[LogSourceDTO] = Field(default_factory=list)
-    docker_targets: list[DockerTargetDTO] = Field(default_factory=list)
-    database_profiles: list[DatabaseProfileDTO] = Field(default_factory=list)
+    poll_interval: int = Field(default=30, ge=10, le=86400)
     service_endpoints: list[ServiceEndpointDTO] = Field(default_factory=list)
     metrics_sources: list[MetricsSourceDTO] = Field(default_factory=list)
-    services: list[ServiceCreateDTO] = Field(default_factory=list)
     rules: list[MonitoringRuleDTO] = Field(default_factory=list)
 
     @field_validator('name')
@@ -454,23 +334,14 @@ class ProjectCreateDTO(BaseModel):
     def validate_configuration(self) -> ProjectCreateDTO:
         errors: list[str] = []
         collections = {
-            'process_targets': self.process_targets,
-            'log_sources': self.log_sources,
-            'docker_targets': self.docker_targets,
-            'database_profiles': self.database_profiles,
             'service_endpoints': self.service_endpoints,
             'metrics_sources': self.metrics_sources,
         }
         for name, rows in collections.items():
             if len({row.id for row in rows if row.id is not None}) != len([row.id for row in rows if row.id is not None]):
                 errors.append(f'{name} contains duplicate ids')
-
-        if len({s.name for s in self.services}) != len([s.name for s in self.services]):
-            errors.append('services contains duplicate names')
-
         seen_rules: set[tuple[str, str]] = set()
         for index, rule in enumerate(self.rules, start=1):
-            # Composite rules (P4): validate each condition instead of the scalar fields.
             if rule.conditions is not None:
                 for c in rule.conditions.get('all', []):
                     metric = str(c.get('metric_key', ''))
@@ -478,63 +349,85 @@ class ProjectCreateDTO(BaseModel):
                     if metric not in SUPPORTED_METRICS and not metric.startswith('zz.test.'):
                         errors.append(f'rule #{index} condition uses unknown metric: {metric}')
                         continue
-                    for prefix, target_field in METRIC_FAMILY_TARGETS.items():
-                        if not metric.startswith(prefix):
-                            continue
-                        if rk == 'default':
-                            if not any(row.enabled for row in getattr(self, target_field)):
-                                errors.append(f'rule #{index} condition requires an enabled {target_field} target')
-                        elif rk.startswith('route:'):
-                            if target_field == 'metrics_sources':
-                                break
-                            errors.append(f'rule #{index} condition resource {rk} is only valid for metrics_sources')
-                        else:
-                            targets = getattr(self, target_field)
-                            keys = {str(row.id) for row in targets if row.id is not None}
-                            keys.update(str(getattr(row, 'name', '') or getattr(row, 'container_ref', '') or getattr(row, 'database', '') or getattr(row, 'path', '') or getattr(row, 'url', '')) for row in targets)
-                            if rk not in keys:
-                                errors.append(f'rule #{index} condition resource does not match a configured {target_field} target')
-                        break
+                    if metric.startswith('zz.test.'):
+                        continue
+                    if rk.startswith('route:') and not metric.startswith('app.'):
+                        errors.append(f'rule #{index} condition resource {rk} is only valid for app metrics')
+                    elif rk != 'default':
+                        source_names = {str(row.id) for row in self.metrics_sources if row.id is not None}
+                        source_names.update(row.name for row in self.metrics_sources)
+                        if rk not in source_names and not rk.startswith('route:'):
+                            errors.append(f'rule #{index} condition resource does not match a configured metrics source')
                 key = ('composite', str(index))
                 if key in seen_rules:
                     errors.append(f'rule #{index} duplicates a composite rule')
                 seen_rules.add(key)
                 continue
-
             metric = rule.metric_key
-            # zz.test.* is reserved for the detector's synthetic integration tests.
             if metric not in SUPPORTED_METRICS and not metric.startswith('zz.test.'):
                 errors.append(f'rule #{index} uses unknown metric: {metric}')
             key = (metric, rule.resource_key)
             if key in seen_rules:
                 errors.append(f'rule #{index} duplicates metric/resource {metric}/{rule.resource_key}')
             seen_rules.add(key)
-            for prefix, target_field in METRIC_FAMILY_TARGETS.items():
-                if metric.startswith(prefix) and rule.enabled and not any(row.enabled for row in getattr(self, target_field)):
-                    errors.append(f'rule #{index} requires an enabled {target_field} target')
-                    break
-                if metric.startswith(prefix) and rule.enabled and rule.resource_key != 'default':
-                    # Per-route white-box metrics carry a dynamic resource_key such as
-                    # "route:/health" that is not a configured target id/name.
-                    if target_field == 'metrics_sources' and rule.resource_key.startswith('route:'):
-                        break
-                    targets = getattr(self, target_field)
-                    keys = {str(row.id) for row in targets if row.id is not None}
-                    keys.update(str(getattr(row, 'name', '') or getattr(row, 'container_ref', '') or getattr(row, 'database', '') or getattr(row, 'path', '') or getattr(row, 'url', '')) for row in targets)
-                    if rule.resource_key not in keys:
-                        errors.append(f'rule #{index} resource does not match a configured {target_field} target')
-                    break
-
+            if rule.enabled and metric.startswith(('service.', 'app.', 'process.')):
+                if metric.startswith('service.') and not any(row.enabled for row in self.service_endpoints):
+                    errors.append(f'rule #{index} requires an enabled service_endpoints target')
+                if metric.startswith(('app.', 'process.')) and not any(row.enabled for row in self.metrics_sources):
+                    errors.append(f'rule #{index} requires an enabled metrics_sources target')
+            if rule.enabled and rule.resource_key != 'default' and not metric.startswith('zz.test.'):
+                source_names = {str(row.id) for row in self.metrics_sources if row.id is not None}
+                source_names.update(row.name for row in self.metrics_sources)
+                if not (rule.metric_key.startswith('app.') and rule.resource_key.startswith('route:')) and rule.resource_key not in source_names:
+                    errors.append(f'rule #{index} resource does not match a configured metrics source')
         if errors:
             raise ValueError('; '.join(errors))
         return self
 
 
+class PythonProjectOnboardDTO(BaseModel):
+    """Remote-only onboarding contract for a Python service.
+
+    A saved server supplies host/GPU telemetry; the two project URLs supply
+    health, API golden signals and optional Python client process telemetry.
+    """
+    name: str
+    server_id: UUID
+    description: str = ''
+    environment: Literal['production'] = 'production'
+    health_url: str
+    metrics_url: str
+    poll_interval: int = Field(default=30, ge=10, le=86400)
+    enabled: bool = False
+
+    @field_validator('name')
+    @classmethod
+    def onboard_name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError('project name must not be blank')
+        return value
+
+    @field_validator('health_url', 'metrics_url')
+    @classmethod
+    def onboard_url_trim(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError('URL must not be blank')
+        return value
+
+    @model_validator(mode='after')
+    def has_observation_target(self) -> PythonProjectOnboardDTO:
+        # Keep an explicit model-level validation so API clients receive a
+        # stable domain error even if the fields become optional in the future.
+        if not self.health_url or not self.metrics_url:
+            raise ValueError('health_url and metrics_url are required for remote Python onboarding')
+        return self
+
 class ProjectRuntimeConfig(ProjectCreateDTO):
     id: UUID
     user_id: UUID
-    # Read-side: services carry generated ids (ProjectCreateDTO uses ServiceCreateDTO).
-    services: list[ServiceDTO] = Field(default_factory=list)
+    server: MonitoredServerDTO | None = None
 
 
 class ConversationCreateDTO(BaseModel):
@@ -554,8 +447,8 @@ class ChatMessageDTO(BaseModel):
 
 class PasswordChangeDTO(BaseModel):
     current_password: str = Field(min_length=1, max_length=200)
-    new_password: str = Field(min_length=8, max_length=200)
-    confirm_password: str = Field(min_length=8, max_length=200)
+    new_password: str = Field(min_length=6, max_length=200)
+    confirm_password: str = Field(min_length=6, max_length=200)
 
     @model_validator(mode='after')
     def passwords_match(self) -> PasswordChangeDTO:
