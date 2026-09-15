@@ -34,3 +34,7 @@ output/
 tmp/
 .venv_test/
 backend/.venv_test/
+
+# Local browser profiles created by UI/e2e checks; never commit runtime state.
+.chrome-*/
+.edge-*/

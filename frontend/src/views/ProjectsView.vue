@@ -12,7 +12,7 @@ const servers = ref<MonitoredServer[]>([])
 const serverMode = ref<'existing' | 'new'>('existing')
 const serverId = ref('')
 const showServerManager = ref(route.query.manage === 'servers')
-const serverForm = ref({ name: '', node_metrics_url: '', gpu_metrics_url: '', enabled: true })
+const serverForm = ref({ name: '', node_metrics_url: '', gpu_metrics_url: '', collector_url: '', collector_token: '', enabled: true })
 const serverTest = ref<ServerTestResult | null>(null)
 const testedServerSignature = ref('')
 const testingServer = ref(false)
@@ -23,6 +23,7 @@ const name = ref('')
 const description = ref('')
 const healthUrl = ref('')
 const metricsUrl = ref('')
+const databaseUrl = ref('')
 const creating = ref(false)
 const testing = ref(false)
 const loading = ref(false)
@@ -34,10 +35,14 @@ const testResult = ref<ProjectDraftTestResult | null>(null)
 
 const nodeCommand = `docker run -d --name oncall-node-exporter --restart unless-stopped --network host --pid host -v "/:/host:ro,rslave" quay.io/prometheus/node-exporter:v1.12.1 --path.rootfs=/host`
 const gpuCommand = `docker run -d --name oncall-dcgm-exporter --restart unless-stopped --gpus all --cap-add SYS_ADMIN -p 9400:9400 nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless`
-const serverSignature = computed(() => `${serverForm.value.node_metrics_url.trim()}|${serverForm.value.gpu_metrics_url.trim()}`)
-const canSaveServer = computed(() => Boolean(serverForm.value.name.trim() && serverForm.value.node_metrics_url.trim() && serverTest.value?.ok && testedServerSignature.value === serverSignature.value))
-const signature = computed(() => [serverId.value, healthUrl.value.trim(), metricsUrl.value.trim()].join('|'))
-const canTest = computed(() => Boolean(serverId.value && healthUrl.value.trim() && metricsUrl.value.trim()))
+const collectorCommand = computed(() => {
+  const token = serverForm.value.collector_token.trim() || '<将自动生成>'
+  return `ONCALL_COLLECTOR_TOKEN=${token} docker compose -f deploy/collector.compose.yaml up -d --build`
+})
+const serverSignature = computed(() => `${serverForm.value.node_metrics_url.trim()}|${serverForm.value.gpu_metrics_url.trim()}|${serverForm.value.collector_url.trim()}|${serverForm.value.collector_token.trim()}`)
+const canSaveServer = computed(() => Boolean(serverForm.value.name.trim() && serverForm.value.node_metrics_url.trim() && serverForm.value.collector_url.trim() && serverForm.value.collector_token.trim() && serverTest.value?.ok && testedServerSignature.value === serverSignature.value))
+const signature = computed(() => [serverId.value, healthUrl.value.trim(), metricsUrl.value.trim(), databaseUrl.value.trim()].join('|'))
+const canTest = computed(() => Boolean(serverId.value && healthUrl.value.trim() && metricsUrl.value.trim() && databaseUrl.value.trim()))
 const canCreate = computed(() => Boolean(name.value.trim() && testResult.value?.ok && testedSignature.value === signature.value))
 const filteredRows = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -45,7 +50,7 @@ const filteredRows = computed(() => {
 })
 const enabledCount = computed(() => rows.value.filter(x => x.enabled).length)
 const selectedServer = computed(() => servers.value.find(x => x.id === serverId.value))
-const checkLabels: Record<string, string> = { server: '服务器采集器', service: '健康检查', prometheus: '应用指标' }
+const checkLabels: Record<string, string> = { server: '服务器采集器', service: '健康检查', prometheus: '应用指标', logs: 'Docker 日志', database: 'PostgreSQL 数据库' }
 
 function errorMessage(error: unknown): string {
   const raw = String(error instanceof Error ? error.message : error || '未知错误')
@@ -60,9 +65,19 @@ function errorMessage(error: unknown): string {
 
 function show(text: string, error = false) { message.value = text; messageError.value = error }
 
+function generateCollectorToken() {
+  const random = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID().replace(/-/g, '')
+    : Math.random().toString(36).slice(2) + Date.now().toString(36)
+  serverForm.value.collector_token = `oncall-${random}`
+}
+
 function setServerMode(mode: 'existing' | 'new') {
   serverMode.value = mode
-  if (mode === 'new') serverId.value = ''
+  if (mode === 'new') {
+    serverId.value = ''
+    if (!serverForm.value.collector_token) generateCollectorToken()
+  }
 }
 
 function projectPayload() {
@@ -70,6 +85,7 @@ function projectPayload() {
     name: name.value.trim() || '待创建的 Python 项目', server_id: serverId.value,
     description: description.value.trim(), environment: 'production',
     health_url: healthUrl.value.trim(), metrics_url: metricsUrl.value.trim(),
+    database_url: databaseUrl.value.trim(),
     poll_interval: 30, enabled: false,
   }
 }
@@ -94,11 +110,12 @@ async function load() {
 async function testNewServer() {
   if (!serverForm.value.name.trim()) { show('请填写服务器名称', true); return }
   if (!serverForm.value.node_metrics_url.trim()) { show('请填写系统指标地址', true); return }
+  if (!serverForm.value.collector_url.trim() || !serverForm.value.collector_token.trim()) { show('请填写 Collector 地址和 Token', true); return }
   testingServer.value = true
   serverTest.value = null
   try {
     const result = await api<ServerTestResult>('/servers/test', {
-      method: 'POST', body: JSON.stringify({ ...serverForm.value, name: serverForm.value.name.trim(), gpu_metrics_url: serverForm.value.gpu_metrics_url.trim() || null }),
+      method: 'POST', body: JSON.stringify({ ...serverForm.value, name: serverForm.value.name.trim(), gpu_metrics_url: serverForm.value.gpu_metrics_url.trim() || null, collector_url: serverForm.value.collector_url.trim() || null, collector_token: serverForm.value.collector_token.trim() || null }),
     })
     serverTest.value = result
     testedServerSignature.value = serverSignature.value
@@ -113,12 +130,12 @@ async function saveNewServer() {
   savingServer.value = true
   try {
     const created = await api<MonitoredServer>('/servers', {
-      method: 'POST', body: JSON.stringify({ ...serverForm.value, name: serverForm.value.name.trim(), gpu_metrics_url: serverForm.value.gpu_metrics_url.trim() || null }),
+      method: 'POST', body: JSON.stringify({ ...serverForm.value, name: serverForm.value.name.trim(), gpu_metrics_url: serverForm.value.gpu_metrics_url.trim() || null, collector_url: serverForm.value.collector_url.trim() || null, collector_token: serverForm.value.collector_token.trim() || null }),
     })
     servers.value.unshift({ ...created, project_count: 0 })
     serverId.value = created.id
     serverMode.value = 'existing'
-    serverForm.value = { name: '', node_metrics_url: '', gpu_metrics_url: '', enabled: true }
+    serverForm.value = { name: '', node_metrics_url: '', gpu_metrics_url: '', collector_url: '', collector_token: '', enabled: true }
     serverTest.value = null
     testedServerSignature.value = ''
     show('服务器已连接，继续填写 Python 项目信息')
@@ -150,14 +167,14 @@ async function removeServer(row: MonitoredServer) {
 }
 
 async function testDraft() {
-  if (!canTest.value) { show('请先选择服务器，并填写健康检查与 /metrics 地址', true); return }
+  if (!canTest.value) { show('请先选择服务器，并填写健康检查、/metrics 和数据库连接串', true); return }
   testing.value = true
   testResult.value = null
   try {
     const result = await api<ProjectDraftTestResult>('/projects/onboard/python/test', { method: 'POST', body: JSON.stringify(projectPayload()) })
     testResult.value = result
     testedSignature.value = signature.value
-    show(result.ok ? '服务器、健康检查和项目指标均已通过' : '存在连接失败，请检查下方结果', !result.ok)
+    show(result.ok ? '服务器、应用、日志和数据库均已通过' : '存在连接失败，请检查下方结果', !result.ok)
   } catch (error) { show('连接测试失败：' + errorMessage(error), true) }
   finally { testing.value = false }
 }
@@ -181,7 +198,7 @@ onMounted(load)
 <template>
   <div class="page projects-page">
     <section class="fresh-hero compact-hero">
-      <div class="hero-copy"><span class="eyebrow"><i></i> MONITORED PROJECTS</span><h1>当前监控项目 <em>{{ rows.length }}</em> 个</h1><p>添加远程 Python 项目，填写健康检查地址和 Prometheus `/metrics` 地址即可。</p></div>
+      <div class="hero-copy"><span class="eyebrow"><i></i> MONITORED PROJECTS</span><h1>当前监控项目 <em>{{ rows.length }}</em> 个</h1><p>统一接入服务器、应用指标、Docker 日志和 PostgreSQL 诊断。</p></div>
     </section>
 
     <p v-if="message" class="page-message" :class="messageError ? 'err' : 'ok'">{{ message }}</p>
@@ -202,20 +219,22 @@ onMounted(load)
               <el-select v-model="serverId" size="large" placeholder="请选择项目所在的服务器"><el-option v-for="server in servers" :key="server.id" :value="server.id" :label="server.name"><span>{{ server.name }}</span><span class="option-note">{{ server.gpu_metrics_url ? 'CPU · GPU' : 'CPU · 内存 · 磁盘' }}</span></el-option></el-select>
               <div v-if="selectedServer" class="server-selected"><span class="live-dot"></span><b>{{ selectedServer.name }}</b><span>{{ selectedServer.gpu_metrics_url ? '含 GPU 采集' : '系统指标已配置' }}</span><a @click.prevent="showServerManager = !showServerManager">{{ showServerManager ? '收起管理' : '管理服务器' }}</a></div>
             </template>
-            <div v-else class="server-empty"><span>▣</span><div><b>暂无可用服务器</b><small>先添加一台服务器，保存后会自动回到这里并选中它。</small></div><el-button type="primary" plain @click="setServerMode('new')">＋ 添加服务器</el-button></div>
           </div>
 
           <div v-else-if="serverMode === 'new'" class="new-server-box">
-            <div class="simple-note"><span>名称和系统地址必填</span><p>系统地址用于整机指标；有 NVIDIA GPU 才填写 GPU 地址。</p></div>
+            <div class="simple-note"><span>系统指标与 Collector 必填</span><p>Collector 自动发现 Docker 日志并执行只读数据库诊断。</p></div>
             <el-collapse class="install-guide"><el-collapse-item title="服务器还没安装采集器？展开查看命令" name="install">
               <div class="command-row"><div><b>系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button size="small" @click="copy(nodeCommand)">复制</el-button></div>
+              <div class="command-row"><div><b>日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button size="small" @click="copy(collectorCommand)">复制</el-button></div>
               <div class="command-row"><div><b>GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button size="small" @click="copy(gpuCommand)">复制</el-button></div>
-              <p class="install-hint">在目标 Linux 服务器执行；9100 和 9400 是这两个采集器的默认端口，Oncall 需要通过内网访问对应端口。</p>
+              <p class="install-hint">在目标 Linux 服务器执行；Collector 默认端口为 9910，并需要访问本机 Docker。</p>
             </el-collapse-item></el-collapse>
             <div class="server-form-grid">
-              <el-form-item label="系统指标地址（必填，默认 9100）" required><el-input v-model="serverForm.node_metrics_url" size="large" placeholder="http://10.0.0.22:9100/metrics" /></el-form-item>
-              <el-form-item label="GPU 指标地址（可选，默认 9400）"><el-input v-model="serverForm.gpu_metrics_url" size="large" placeholder="无 NVIDIA GPU 留空，例如 http://10.0.0.22:9400/metrics" /></el-form-item>
               <el-form-item label="服务器名称（必填）" required><el-input v-model="serverForm.name" size="large" placeholder="例如：服务器 B · 股票服务" /></el-form-item>
+              <el-form-item label="系统指标地址（必填，默认 9100）" required><el-input v-model="serverForm.node_metrics_url" size="large" placeholder="http://10.0.0.22:9100/metrics" /></el-form-item>
+              <el-form-item label="Collector 地址（必填，默认 9910）" required><el-input v-model="serverForm.collector_url" size="large" placeholder="http://10.0.0.22:9910" /></el-form-item>
+              <el-form-item label="Collector Token（自动生成）" required><el-input v-model="serverForm.collector_token" type="password" show-password size="large" placeholder="点击添加新服务器后自动生成，可手动替换" /></el-form-item>
+              <el-form-item label="GPU 指标地址（可选，默认 9400）"><el-input v-model="serverForm.gpu_metrics_url" size="large" placeholder="无 NVIDIA GPU 留空，例如 http://10.0.0.22:9400/metrics" /></el-form-item>
             </div>
             <div v-if="serverTest && testedServerSignature === serverSignature" class="server-test-result" :class="serverTest.ok ? 'passed' : 'failed'"><span>{{ serverTest.ok ? '✓' : '!' }}</span><div><b>{{ serverTest.ok ? '服务器连接正常' : '服务器连接失败' }}</b><small>{{ serverTest.ok ? '已直连并识别 CPU、内存、磁盘和网络指标' : (serverTest.error || '请检查地址和网络') }}</small></div></div>
             <div class="inline-actions"><el-button size="large" :loading="testingServer" @click="testNewServer">⚡ 测试服务器</el-button><el-button type="primary" size="large" :loading="savingServer" :disabled="!canSaveServer" @click="saveNewServer">保存并继续</el-button></div>
@@ -225,19 +244,21 @@ onMounted(load)
         </div>
 
         <div class="field-block" :class="{ locked: !serverId }">
-          <div class="field-title"><span class="field-number">2</span><div><b>填写 Python 项目信息</b><small>{{ serverId ? '只需名称、健康检查和 Prometheus 地址' : '连接服务器后即可填写' }}</small></div></div>
+          <div class="field-title"><span class="field-number">2</span><div><b>填写 Python 项目信息</b><small>{{ serverId ? '日志自动识别；数据库只需一个只读连接串' : '连接服务器后即可填写' }}</small></div></div>
           <template v-if="serverId">
             <div class="two-fields"><el-form-item label="项目名称" required><el-input v-model="name" size="large" placeholder="例如：股票行情 API" /></el-form-item><el-form-item label="用途说明（可选）"><el-input v-model="description" size="large" placeholder="例如：生产环境行情服务" /></el-form-item></div>
             <div class="endpoint-list">
               <div class="endpoint-row"><span class="endpoint-icon health">♥</span><div class="endpoint-label"><b>健康检查地址</b><small>判断服务是否可达</small></div><el-input v-model="healthUrl" size="large" placeholder="https://stock.example.com/health" /></div>
               <div class="endpoint-row"><span class="endpoint-icon metrics">⌁</span><div class="endpoint-label"><b>Prometheus 地址</b><small>获取请求、错误、延迟和进程指标</small></div><el-input v-model="metricsUrl" size="large" placeholder="https://stock.example.com/metrics" /></div>
+              <div class="endpoint-row"><span class="endpoint-icon database">DB</span><div class="endpoint-label"><b>PostgreSQL 只读连接串</b><small>连接、慢 SQL、事务和锁</small></div><el-input v-model="databaseUrl" type="password" show-password size="large" placeholder="postgresql://oncall_monitor:密码@postgres:5432/app" /></div>
+              <div class="auto-log-note"><span>✓</span><div><b>Docker stdout 日志自动识别</b><small>系统根据 Health/Metrics 端口匹配 API 容器及同一 Compose 项目的业务容器。</small></div></div>
             </div>
           </template>
           <div v-else class="locked-note"><span>→</span>请先在上方选择已有服务器，或连接一台新服务器。</div>
         </div>
 
         <div class="field-block final-block" :class="{ locked: !serverId }">
-          <div class="field-title"><span class="field-number">3</span><div><b>一次验证，完成创建</b><small>同时检查服务器、健康状态和项目指标</small></div></div>
+          <div class="field-title"><span class="field-number">3</span><div><b>一次验证，完成创建</b><small>同时检查服务器、应用、Docker 日志和 PostgreSQL</small></div></div>
           <div v-if="testResult && testedSignature === signature" class="test-result" :class="testResult.ok ? 'passed' : 'failed'">
             <div v-for="check in testResult.checks" :key="check.key" class="check-item"><span>{{ check.ok ? '✓' : '!' }}</span><div><b>{{ checkLabels[check.key] }}</b><small>{{ check.ok ? '连接正常' : (check.error || '连接失败') }}</small></div></div>
             <p v-for="warning in testResult.warnings" :key="warning" class="test-warning">提示：{{ warning }}</p>
@@ -247,10 +268,9 @@ onMounted(load)
       </div>
 
       <aside class="card coverage-card">
-        <span class="step-tag">创建后自动获得</span><h3>无需手写指标和规则</h3><p>系统根据三个数据入口，自动生成完整监控。</p>
-        <div class="source-map"><div><span class="coverage-icon mint">主机</span><p><b>服务器采集器</b><small>CPU、内存、磁盘、网络、负载</small></p></div><div><span class="coverage-icon coral">状态</span><p><b>健康检查</b><small>服务可达性与响应时间</small></p></div><div><span class="coverage-icon blue">应用</span><p><b>Prometheus</b><small>流量、错误率、P95/P99、进程资源</small></p></div></div>
+        <span class="step-tag">创建后自动获得</span><h3>指标、日志、数据库联合监控</h3><p>一次验证所有必备数据入口。</p>
+        <div class="source-map"><div><span class="coverage-icon mint">主机</span><p><b>服务器采集器</b><small>CPU、内存、磁盘、网络、负载</small></p></div><div><span class="coverage-icon coral">状态</span><p><b>健康检查</b><small>服务可达性与响应时间</small></p></div><div><span class="coverage-icon blue">应用</span><p><b>Prometheus</b><small>流量、错误率、P95/P99、进程资源</small></p></div><div><span class="coverage-icon violet">日志</span><p><b>Docker stdout</b><small>ERROR、异常堆栈和时间窗口</small></p></div><div><span class="coverage-icon amber">DB</span><p><b>PostgreSQL</b><small>连接、慢 SQL、事务、锁和复制</small></p></div></div>
         <div class="arrow-down">↓</div><div class="rule-note"><i></i><span><b>规则自动生成</b><small>固定阈值 + 历史基线 + 连续次数，异常后进入飞书告警和 AI 分析链路。</small></span></div>
-        <div class="why-card"><b>为什么服务器仍会被保存？</b><p>它只是项目向导里的可复用配置，不再是独立操作模块。同一服务器上的第二个项目直接选择即可。</p></div>
       </aside>
     </section>
 
@@ -266,5 +286,11 @@ onMounted(load)
 .server-form-grid{grid-template-columns:1fr}.server-form-grid :deep(.el-form-item){grid-column:1/-1}
 .compact-hero{grid-template-columns:1fr;min-height:132px;padding-top:25px;padding-bottom:25px}
 .server-empty{display:flex;align-items:center;gap:12px;padding:15px 16px;border:1px dashed #c9ddd6;border-radius:13px;background:#fafdfc}.server-empty>span{width:35px;height:35px;display:grid;place-items:center;flex:0 0 auto;border-radius:10px;color:#2c9174;background:#eaf8f3}.server-empty>div{min-width:0;flex:1}.server-empty b,.server-empty small{display:block}.server-empty b{color:#405750;font-size:12px}.server-empty small{margin-top:2px;color:#899b95;font-size:10px}
+.endpoint-icon.database{color:#7c57aa;background:#f3edfb;font-size:11px}.auto-log-note{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid #cfeade;border-radius:12px;background:#f1faf6}.auto-log-note>span{width:25px;height:25px;display:grid;place-items:center;border-radius:50%;color:#fff;background:#31ae84}.auto-log-note b,.auto-log-note small{display:block}.auto-log-note b{color:#315149;font-size:11px}.auto-log-note small{color:#7d928b;font-size:10px}.coverage-icon.violet{color:#7653a7;background:#f0eafa}.coverage-icon.amber{color:#976810;background:#fff4d9}.test-result{grid-template-columns:repeat(5,minmax(0,1fr))}.server-form-grid :deep(.el-form-item:nth-child(3)){grid-column:auto}
 @media(max-width:1020px){.fresh-hero{grid-template-columns:1fr}.flow-line{justify-content:flex-start}.onboarding-layout{grid-template-columns:1fr}.coverage-card{display:none}}@media(max-width:700px){.projects-page{padding-top:14px}.fresh-hero{padding:23px 20px;border-radius:18px}.hero-copy h1{font-size:25px}.flow-step small{display:none}.flow-line>i{width:14px}.wizard-card{padding:20px 17px}.mode-tabs,.two-fields,.server-form-grid{grid-template-columns:1fr}.server-form-grid :deep(.el-form-item:nth-child(3)){grid-column:auto}.endpoint-row{grid-template-columns:36px 1fr}.endpoint-row .el-input{grid-column:1/-1}.test-result{grid-template-columns:1fr}.wizard-actions,.list-heading{align-items:stretch;flex-direction:column}.wizard-actions>div{display:grid;grid-template-columns:1fr 1fr}.project-search{max-width:none}}
+.server-form-grid{grid-template-columns:1fr}
+.server-form-grid :deep(.el-form-item){display:flex;align-items:center;min-width:0}
+.server-form-grid :deep(.el-form-item__label){width:250px;flex:0 0 250px;padding-right:14px;text-align:left;white-space:nowrap}
+.server-form-grid :deep(.el-form-item__content){min-width:0;flex:1}
+@media(max-width:700px){.server-form-grid :deep(.el-form-item){display:block}.server-form-grid :deep(.el-form-item__label){width:auto;padding-right:0;text-align:left;white-space:normal}.server-form-grid :deep(.el-form-item__content){width:100%}}
 </style>

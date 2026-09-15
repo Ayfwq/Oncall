@@ -100,7 +100,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "4.0"
+          cpus: "2.0"
           memory: 4g
 
   migrate:
@@ -113,6 +113,7 @@ services:
     restart: "no"
     volumes:
       - ./.env:/app/.env
+      - ./backend:/app/backend:ro
       - oncall_data:/app/data
     depends_on:
       postgres:
@@ -133,6 +134,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
+      - ./backend:/app/backend:ro
       - oncall_data:/app/data
     expose:
       - "9900"
@@ -161,6 +163,7 @@ services:
     pid: host
     volumes:
       - ./.env:/app/.env
+      - ./backend:/app/backend:ro
       - oncall_data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt:/host/opt:ro
@@ -178,10 +181,11 @@ services:
   notification-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
-    command: /opt/venv/bin/oncall-notification-worker
+    command: /opt/venv/bin/python -m oncall.workers.notification_worker
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
+      - ./backend:/app/backend:ro
       - oncall_data:/app/data
     depends_on:
       migrate:
@@ -199,6 +203,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
+      - ./backend:/app/backend:ro
       - oncall_data:/app/data
     depends_on:
       migrate:
@@ -218,6 +223,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
+      - ./backend:/app/backend:ro
       - oncall_data:/app/data
     depends_on:
       migrate:
@@ -227,7 +233,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "4.0"
+          cpus: "2.0"
           memory: 8g
 
   frontend:

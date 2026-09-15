@@ -42,6 +42,8 @@ class MonitoredServerCreateDTO(BaseModel):
     name: str
     node_metrics_url: str
     gpu_metrics_url: str | None = None
+    collector_url: str | None = None
+    collector_token: str | None = None
     enabled: bool = True
 
     @field_validator('name')
@@ -52,7 +54,7 @@ class MonitoredServerCreateDTO(BaseModel):
             raise ValueError('server name must not be blank')
         return value
 
-    @field_validator('node_metrics_url', 'gpu_metrics_url')
+    @field_validator('node_metrics_url', 'gpu_metrics_url', 'collector_url')
     @classmethod
     def server_metrics_url(cls, value: str | None) -> str | None:
         if value is None:
@@ -70,6 +72,34 @@ class MonitoredServerDTO(MonitoredServerCreateDTO):
     id: UUID
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class LogSourceDTO(BaseModel):
+    id: UUID | None = None
+    path: str = 'docker://auto'
+    encoding: str = 'utf-8'
+    parser_config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class DatabaseProfileDTO(BaseModel):
+    id: UUID | None = None
+    type: Literal['postgresql'] = 'postgresql'
+    host: str
+    port: int = Field(default=5432, ge=1, le=65535)
+    database: str
+    username: str
+    password: str | None = None
+    sslmode: Literal['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'] = 'prefer'
+    enabled: bool = True
+
+    @field_validator('host', 'database', 'username')
+    @classmethod
+    def database_text_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError('database connection values must not be blank')
+        return value
 
 
 class ServiceEndpointDTO(BaseModel):
@@ -312,6 +342,8 @@ class ProjectCreateDTO(BaseModel):
     poll_interval: int = Field(default=30, ge=10, le=86400)
     service_endpoints: list[ServiceEndpointDTO] = Field(default_factory=list)
     metrics_sources: list[MetricsSourceDTO] = Field(default_factory=list)
+    log_sources: list[LogSourceDTO] = Field(default_factory=list)
+    database_profiles: list[DatabaseProfileDTO] = Field(default_factory=list)
     rules: list[MonitoringRuleDTO] = Field(default_factory=list)
 
     @field_validator('name')
@@ -397,6 +429,7 @@ class PythonProjectOnboardDTO(BaseModel):
     environment: Literal['production'] = 'production'
     health_url: str
     metrics_url: str
+    database_url: str
     poll_interval: int = Field(default=30, ge=10, le=86400)
     enabled: bool = False
 
@@ -408,7 +441,7 @@ class PythonProjectOnboardDTO(BaseModel):
             raise ValueError('project name must not be blank')
         return value
 
-    @field_validator('health_url', 'metrics_url')
+    @field_validator('health_url', 'metrics_url', 'database_url')
     @classmethod
     def onboard_url_trim(cls, value: str) -> str:
         value = value.strip()
@@ -420,8 +453,8 @@ class PythonProjectOnboardDTO(BaseModel):
     def has_observation_target(self) -> PythonProjectOnboardDTO:
         # Keep an explicit model-level validation so API clients receive a
         # stable domain error even if the fields become optional in the future.
-        if not self.health_url or not self.metrics_url:
-            raise ValueError('health_url and metrics_url are required for remote Python onboarding')
+        if not self.health_url or not self.metrics_url or not self.database_url:
+            raise ValueError('health_url, metrics_url and database_url are required for remote Python onboarding')
         return self
 
 class ProjectRuntimeConfig(ProjectCreateDTO):

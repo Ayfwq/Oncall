@@ -23,7 +23,16 @@ PYTHON_GPU_SIGNALS = (
     'host.gpu.memory_percent', 'host.gpu.temperature_celsius', 'host.gpu.power_watts',
 )
 
-SUPPORTED_SIGNALS = frozenset((*PYTHON_SIGNALS, *PYTHON_GPU_SIGNALS))
+OBSERVABILITY_SIGNALS = (
+    'log.collector.up', 'log.error_count', 'log.exception_count',
+    'db.up', 'db.connections.active', 'db.connections.max',
+    'db.connections.utilization_percent', 'db.long_transactions', 'db.lock_waits',
+    'db.deadlocks_total', 'db.cache_hit_percent', 'db.replication_lag_seconds',
+    'db.slow_queries',
+)
+
+SUPPORTED_SIGNALS = frozenset((*PYTHON_SIGNALS, *PYTHON_GPU_SIGNALS, *OBSERVABILITY_SIGNALS))
 
 assert len(PYTHON_SIGNALS) == 28
 assert len(PYTHON_GPU_SIGNALS) == 6
+assert len(OBSERVABILITY_SIGNALS) == 13

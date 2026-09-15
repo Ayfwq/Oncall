@@ -70,6 +70,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', '0'))
+        if length:
+            self.rfile.read(length)
+        if self.path == '/v1/logs/search':
+            body = b'{"ok":true,"containers":["app"],"lines":[],"error_count":0,"exception_count":0}'
+        elif self.path == '/v1/database/diagnose':
+            body = b'{"ok":true,"signals":{"db.up":1,"db.connections.utilization_percent":10,"db.long_transactions":0,"db.lock_waits":0,"db.replication_lag_seconds":0},"capabilities":{"slow_sql":true}}'
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, format, *args):
         return
 
@@ -98,6 +116,8 @@ async def test_server_first_remote_python_onboarding_end_to_end(exporter_server)
                 'name': f'e2e-server-{uuid.uuid4().hex[:8]}',
                 'node_metrics_url': f'{exporter_server}/node/metrics',
                 'gpu_metrics_url': None,
+                'collector_url': exporter_server,
+                'collector_token': 'test-token',
                 'enabled': True,
             })
             assert created_server.status_code == 200, created_server.text
@@ -108,6 +128,7 @@ async def test_server_first_remote_python_onboarding_end_to_end(exporter_server)
                 'server_id': server_id,
                 'health_url': f'{exporter_server}/health',
                 'metrics_url': f'{exporter_server}/app/metrics',
+                'database_url': 'postgresql://monitor:secret@postgres:5432/app',
                 'poll_interval': 30,
                 'enabled': False,
             }

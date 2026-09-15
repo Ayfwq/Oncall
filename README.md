@@ -10,8 +10,8 @@ Oncall 是一个本地优先的 AI SRE / 智能 Oncall 平台，按 2026-08-18 �
 
 - **模块化单体 + 多运行进程**：`api` / `monitor-worker` / `agent-worker` / `rag-worker`。
 - **统一 OncallAgent**：LangGraph StateGraph；`CHAT / INVESTIGATE / FOLLOW_UP / DEEP` 共用同一套 RAG、Tools、Memory 和模型网关。
-- **远程 Python Monitoring Engine**：28 个基础 signal + 可选 6 个 NVIDIA GPU signal；固定阈值、历史基线/混合规则、滞回 Detector 和 Incident 生命周期。项目接入只接受服务器采集器、健康检查和应用 `/metrics` 三类入口。
-- **4 个只读 Agent Tool**：当前指标 / 指标历史 / 服务健康 / 知识库。
+- **远程 Python Monitoring Engine**：41 个基础 signal + 可选 6 个 NVIDIA GPU signal；覆盖服务器、健康检查、应用、Python 进程、Docker 日志和 PostgreSQL。规则命中先作为 Detector 信号，同项目 120 秒内的可操作信号合并为一个 Incident；CPU、内存等共享资源压力仅作为诊断证据。
+- **6 个只读 Agent Tool**：当前指标 / 指标历史 / 服务健康 / 日志搜索 / 数据库诊断 / 知识库。
 - **完整 RAG 主链**：Docling → Canonical JSON/Markdown → HybridChunker → Dense + Milvus BM25 → RRF → Rerank → Citation；Milvus 只是可重建索引。
 - **持久化**：PostgreSQL 保存业务事实、会话、消息、Incident、Evidence、Diagnosis、Tool/RAG Trace、durable jobs/outbox；LangGraph 使用 PostgreSQL checkpointer。
 - **飞书**：自建应用机器人 + WebSocket 入站 + PostgreSQL Outbox 出站；主动 Incident 报告可绑定 Incident Conversation，用户回复后进入 `FOLLOW_UP`。
@@ -66,6 +66,12 @@ docker compose up -d
 
 Compose 只运行 PostgreSQL/Milvus/etcd/MinIO；远程 Python 项目由目标服务器的 Node Exporter、可选 DCGM Exporter 和项目自身的 `/health`、`/metrics` 提供观测数据。
 
+目标服务器还需运行轻量 Collector，以只读方式发现 Docker stdout 日志并执行预定义 PostgreSQL 诊断：
+
+```bash
+ONCALL_COLLECTOR_TOKEN=<随机令牌> docker compose -f deploy/collector.compose.yaml up -d --build
+```
+
 ### 3. Python
 
 ```powershell
@@ -95,6 +101,7 @@ cd ..
 ```text
 Web  http://127.0.0.1:5173
 API  http://127.0.0.1:9900
+Collector http://127.0.0.1:9910
 ```
 
 ### 6. Mock E2E

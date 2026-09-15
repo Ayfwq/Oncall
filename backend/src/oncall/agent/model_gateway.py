@@ -52,12 +52,12 @@ class MockProvider(ModelProvider):
             summary='；'.join(x.get('summary','') for x in ev[-4:])
             return AgentDecision(action='final',answer=f"这是同一个 Incident 的后续追问。当前事故：{prev.get('summary','')}。已掌握证据：{summary or '暂无新增实时证据'}。如需确认当前状态，我可以继续调用只读工具复查。")
         # investigation/deep
-        sequence=['query_current_metrics','search_knowledge']
+        sequence=['query_current_metrics','search_logs','query_database_health','search_knowledge']
         anomaly=str(incident.get('anomaly_type',''))
-        if 'service.' in anomaly:sequence=['query_service_health','query_current_metrics','search_knowledge']
+        if 'service.' in anomaly:sequence=['query_service_health','query_current_metrics','search_logs','query_database_health','search_knowledge']
         for name in sequence:
             if name not in called:
-                args={'query':f"{anomaly} 远程 Python 服务运维处理方案"} if name=='search_knowledge' else {}
+                args={'query':f"{anomaly} 远程 Python 服务运维处理方案"} if name=='search_knowledge' else ({'level':'ERROR','since_minutes':30,'limit':200} if name=='search_logs' else {})
                 return AgentDecision(action='tool',rationale=f'收集 {name} 证据',tool_name=name,tool_args=args)
         evidence=context.get('evidence',[]);summaries=[x.get('summary','') for x in evidence if x.get('summary')]
         report=DiagnosisReport(summary=f"检测到 {anomaly or '运行异常'}",severity=incident.get('severity','warning'),affected_service=incident.get('project_name'),symptoms=[incident.get('summary','异常触发')],evidence=summaries[-8:],root_cause='当前证据显示存在运行异常；Mock 模型不会虚构更具体根因，配置真实 LLM 后将基于 Evidence 进行因果判断。',confidence=0.55 if summaries else 0.2,remediation=['按照报告中的 Evidence 逐项确认异常资源','参考知识库命中的 SOP 进行人工处置','当前不自动执行有副作用操作'],verification=['重新检查触发指标已越过 recovery threshold','确认服务健康检查恢复并持续两个监测周期正常'],risks=['执行任何重启/终止进程前先确认业务任务状态'],knowledge_refs=context.get('knowledge_refs',[]),unknowns=[] if summaries else ['缺少有效工具证据'])

@@ -4,6 +4,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 import uvicorn
 from fastapi import (
     Depends,
@@ -30,9 +31,10 @@ from oncall.application.dtos import (
     ConversationCreateDTO,
     ConversationPatchDTO,
     FeishuSettingsDTO,
-    MetricsSourceDTO,
+    LogSourceDTO,
     MetricsApplyDTO,
     MetricsDiscoverDTO,
+    MetricsSourceDTO,
     MonitoredServerCreateDTO,
     MonitoredServerDTO,
     PasswordChangeDTO,
@@ -42,7 +44,7 @@ from oncall.application.dtos import (
     ServiceEndpointDTO,
 )
 from oncall.application.knowledge_service import KnowledgeService
-from oncall.application.project_service import ProjectService
+from oncall.application.project_service import ProjectService, default_remote_python_rules
 from oncall.application.server_service import MonitoredServerService, to_dto
 from oncall.bootstrap.config import get_settings, update_env_values
 from oncall.bootstrap.logging import configure_logging, set_request_id
@@ -76,6 +78,18 @@ def _uuid(value, what='id'):
         return UUID(str(value))
     except (ValueError, TypeError, AttributeError):
         raise HTTPException(404, f'{what} not found')
+
+
+async def _collector_check(server:MonitoredServerDTO)->dict:
+    if not server.collector_url:
+        return {'ok':False,'error':'未配置 Oncall Collector 地址'}
+    try:
+        async with httpx.AsyncClient(timeout=8,trust_env=False) as client:
+            response=await client.get(server.collector_url.rstrip('/')+'/health',headers={'X-Oncall-Token':server.collector_token or ''})
+            response.raise_for_status()
+            return response.json()
+    except Exception as exc:
+        return {'ok':False,'error':str(exc)}
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
@@ -179,9 +193,12 @@ async def list_servers(user=Depends(current_user),db:AsyncSession=Depends(get_se
 @app.post('/api/servers/test')
 async def test_server_draft(dto:MonitoredServerCreateDTO,user=Depends(current_user)):
     from uuid import uuid4
+
     from oncall.integrations.server_exporters import ServerExportersIntegration
-    result=await ServerExportersIntegration(MonitoredServerDTO(id=uuid4(),**dto.model_dump())).collect()
-    return {'ok':result.ok,'signals':result.signals,'resource_signals':result.resource_signals,'resources':result.resources,'error':result.error}
+    server_dto=MonitoredServerDTO(id=uuid4(),**dto.model_dump())
+    result=await ServerExportersIntegration(server_dto).collect()
+    collector=await _collector_check(server_dto) if server_dto.collector_url else {'ok':True,'configured':False}
+    return {'ok':result.ok and bool(collector.get('ok')),'signals':result.signals,'resource_signals':result.resource_signals,'resources':{**result.resources,'collector':collector},'error':result.error or collector.get('error')}
 
 
 @app.post('/api/servers')
@@ -203,8 +220,11 @@ async def test_server(sid:str,user=Depends(current_user),db:AsyncSession=Depends
     from oncall.integrations.server_exporters import ServerExportersIntegration
     row=await MonitoredServerService(db).get(_uuid(sid),user.id)
     if row is None: raise HTTPException(404,'not found')
-    result=await ServerExportersIntegration(to_dto(row)).collect()
-    return {'ok':result.ok,'signals':result.signals,'resource_signals':result.resource_signals,'resources':result.resources,'error':result.error}
+    server_dto=to_dto(row)
+    server_dto.collector_token=MonitoredServerService(db).collector_token(row)
+    result=await ServerExportersIntegration(server_dto).collect()
+    collector=await _collector_check(server_dto) if server_dto.collector_url else {'ok':True,'configured':False}
+    return {'ok':result.ok and bool(collector.get('ok')),'signals':result.signals,'resource_signals':result.resource_signals,'resources':{**result.resources,'collector':collector},'error':result.error or collector.get('error')}
 
 
 @app.delete('/api/servers/{sid}')
@@ -303,12 +323,18 @@ async def test_python_project_draft(dto:PythonProjectOnboardDTO,user=Depends(cur
     server=await MonitoredServerService(db).get(dto.server_id,user.id)
     if server is None:raise HTTPException(404,'selected server was not found')
     project_id=uuid4()
+    server_dto=to_dto(server)
+    server_dto.collector_token=MonitoredServerService(db).collector_token(server)
+    try: database=ProjectService.database_profile_from_url(dto.database_url)
+    except ValueError as exc: raise HTTPException(400,str(exc))
     config=ProjectRuntimeConfig(
-        id=project_id,user_id=user.id,server_id=server.id,server=to_dto(server),
+        id=project_id,user_id=user.id,server_id=server.id,server=server_dto,
         name=dto.name,description=dto.description,environment='production',
         enabled=False,poll_interval=dto.poll_interval,
         service_endpoints=[ServiceEndpointDTO(name=f'{dto.name} 健康检查',url=dto.health_url,enabled=True)],
         metrics_sources=[MetricsSourceDTO(name='app',url=dto.metrics_url,enabled=True)],
+        log_sources=[LogSourceDTO(path='docker://auto',parser_config={'target_urls':[dto.health_url,dto.metrics_url]},enabled=True)],
+        database_profiles=[database],
     )
     snap=await MonitoringEngine(db).collect(project_id,persist_state=False,config=config)
     required=('server','service','prometheus')
@@ -324,6 +350,13 @@ async def test_python_project_draft(dto:PythonProjectOnboardDTO,user=Depends(cur
         warnings.append('指标地址可访问，但没有识别到带路由和状态码的 HTTP 指标；请求率、错误率和延迟规则暂时没有有效数据。')
     if checks[-1]['ok'] and not has_process_metrics:
         warnings.append('指标地址可访问，但没有识别到 Python process_* 指标；进程 CPU、内存、文件数和运行时长暂时没有有效数据。')
+    observability=snap.resources.get('observability') or {}
+    log_result=observability.get('logs') or {}
+    database_result=observability.get('database') or {}
+    checks.extend([
+        {'key':'logs','ok':bool(log_result.get('ok')),'error':log_result.get('error')},
+        {'key':'database','ok':bool(database_result.get('ok')),'error':database_result.get('error')},
+    ])
     return {
         'ok':all(x['ok'] for x in checks),
         'checks':checks,
@@ -333,6 +366,9 @@ async def test_python_project_draft(dto:PythonProjectOnboardDTO,user=Depends(cur
             'health_check':checks[1]['ok'],
             'http_metrics':has_http_metrics,
             'process_metrics':has_process_metrics,
+            'docker_logs':bool(log_result.get('ok')),
+            'database_health':bool(database_result.get('ok')),
+            'slow_sql':bool((database_result.get('capabilities') or {}).get('slow_sql')),
         },
         'warnings':warnings,
         'signals':snap.signals,
@@ -354,7 +390,26 @@ def _project_runtime_payload(cfg):
         # The worker receives decrypted credentials from runtime_config(), but
         # browser reads must never echo them back.
         source['token']=None
+    if data.get('server'):
+        data['server']['collector_token']=None
+    for profile in data.get('database_profiles',[]):
+        profile['password']=None
     return data
+
+@app.get('/api/projects/{pid}/rules/defaults')
+async def project_default_rules(pid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    """Return the backend-owned starter policy for the project's actual sources."""
+    project=await ProjectService(db).get(_uuid(pid),user.id)
+    if not project:raise HTTPException(404,'not found')
+    cfg=await ProjectService(db).runtime_config(project.id,include_disabled=True)
+    rules=default_remote_python_rules(
+        has_gpu=bool(cfg.server and cfg.server.gpu_metrics_url),
+        has_health=any(x.enabled for x in cfg.service_endpoints),
+        has_metrics=any(x.enabled for x in cfg.metrics_sources),
+        has_logs=any(x.enabled for x in cfg.log_sources),
+        has_database=any(x.enabled for x in cfg.database_profiles),
+    )
+    return {'rules':[x.model_dump(mode='json') for x in rules]}
 
 @app.get('/api/projects/{pid}')
 async def project_detail(pid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):

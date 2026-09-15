@@ -6,7 +6,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.dtos import MonitoredServerCreateDTO, MonitoredServerDTO
+from oncall.bootstrap.config import get_settings
 from oncall.infrastructure.db.models import MonitoredServer, Project
+from oncall.security.crypto import SecretBox
 
 
 def to_dto(row: MonitoredServer) -> MonitoredServerDTO:
@@ -15,6 +17,8 @@ def to_dto(row: MonitoredServer) -> MonitoredServerDTO:
         name=row.name,
         node_metrics_url=row.node_metrics_url,
         gpu_metrics_url=row.gpu_metrics_url,
+        collector_url=row.collector_url,
+        collector_token=None,
         enabled=row.enabled,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -24,6 +28,10 @@ def to_dto(row: MonitoredServer) -> MonitoredServerDTO:
 class MonitoredServerService:
     def __init__(self, session: AsyncSession):
         self.session = session
+        self.box = SecretBox(get_settings().secret_master_key)
+
+    def collector_token(self, row: MonitoredServer) -> str:
+        return self.box.decrypt(row.encrypted_collector_token)
 
     async def list(self, user_id: UUID) -> list[tuple[MonitoredServer, int]]:
         stmt = (
@@ -44,7 +52,10 @@ class MonitoredServerService:
     async def create(self, user_id: UUID, dto: MonitoredServerCreateDTO) -> MonitoredServer:
         if await self.session.scalar(select(MonitoredServer.id).where(MonitoredServer.user_id == user_id, MonitoredServer.name == dto.name)):
             raise ValueError('server name already exists')
-        row = MonitoredServer(user_id=user_id, **dto.model_dump())
+        data=dto.model_dump(exclude={'collector_token'})
+        row = MonitoredServer(user_id=user_id, **data)
+        if dto.collector_token:
+            row.encrypted_collector_token=self.box.encrypt(dto.collector_token)
         self.session.add(row)
         await self.session.commit()
         await self.session.refresh(row)
@@ -57,6 +68,9 @@ class MonitoredServerService:
         row.name = dto.name
         row.node_metrics_url = dto.node_metrics_url
         row.gpu_metrics_url = dto.gpu_metrics_url
+        row.collector_url = dto.collector_url
+        if dto.collector_token:
+            row.encrypted_collector_token = self.box.encrypt(dto.collector_token)
         row.enabled = dto.enabled
         await self.session.commit()
         await self.session.refresh(row)

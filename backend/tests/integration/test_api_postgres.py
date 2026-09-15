@@ -282,7 +282,7 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
     assert r.status_code == 200
     detail = r.json()
     assert detail["name"] == name
-    assert "database_profiles" not in detail
+    assert detail["database_profiles"] == []
     assert "process_targets" not in detail
     assert len(detail["rules"]) == 1 and detail["rules"][0]["metric_key"] == "zz.test.synthetic"
 

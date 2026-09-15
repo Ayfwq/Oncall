@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 from oncall.application.dtos import MetricsSourceDTO, MonitoringRuleDTO, ProjectCreateDTO, PythonProjectOnboardDTO, ServiceEndpointDTO
 from pydantic import ValidationError
+from oncall.application.project_service import default_remote_python_rules
 
 
 def base_project(**kwargs):
@@ -40,8 +41,31 @@ def test_remote_only_fields_and_rule_direction_are_validated():
 
 
 def test_python_onboarding_requires_health_and_metrics_urls():
-    dto = PythonProjectOnboardDTO(name='stock-api', server_id=uuid4(), health_url='http://127.0.0.1:8000/health', metrics_url='http://127.0.0.1:8000/metrics')
+    dto = PythonProjectOnboardDTO(name='stock-api', server_id=uuid4(), health_url='http://127.0.0.1:8000/health', metrics_url='http://127.0.0.1:8000/metrics', database_url='postgresql://monitor:secret@127.0.0.1:5432/app')
     assert dto.poll_interval == 30
     assert dto.environment == 'production'
     with pytest.raises(ValidationError, match='health_url'):
-        PythonProjectOnboardDTO(name='empty', server_id=uuid4(), health_url='', metrics_url='')
+        PythonProjectOnboardDTO(name='empty', server_id=uuid4(), health_url='', metrics_url='', database_url='')
+
+
+def test_backend_default_rules_follow_available_sources_and_reduce_log_noise():
+    base = default_remote_python_rules(
+        has_gpu=False, has_health=True, has_metrics=True, has_logs=True, has_database=True
+    )
+    gpu = default_remote_python_rules(
+        has_gpu=True, has_health=True, has_metrics=True, has_logs=True, has_database=True
+    )
+    assert len(base) == 20
+    assert len(gpu) == 23
+    by_key = {rule.metric_key: rule for rule in base}
+    assert by_key['log.exception_count'].trigger_threshold == 5
+    assert by_key['log.exception_count'].trigger_for == 2
+    assert by_key['db.up'].trigger_for == 2
+    assert by_key['host.exporter.up'].trigger_for == 2
+    assert by_key['service.consecutive_failures'].trigger_for == 2
+    assert by_key['app.up'].trigger_for == 2
+
+    without_observability = default_remote_python_rules(
+        has_gpu=False, has_health=True, has_metrics=True, has_logs=False, has_database=False
+    )
+    assert not any(rule.metric_key.startswith(('log.', 'db.')) for rule in without_observability)

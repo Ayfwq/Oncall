@@ -1,0 +1,12 @@
+services:
+  oncall-collector:
+    build:
+      context: ..
+      dockerfile: Dockerfile.collector
+    restart: unless-stopped
+    environment:
+      ONCALL_COLLECTOR_TOKEN: ${ONCALL_COLLECTOR_TOKEN:?set ONCALL_COLLECTOR_TOKEN}
+    ports:
+      - "9910:9910"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro

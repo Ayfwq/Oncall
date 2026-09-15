@@ -1,0 +1,10 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+RUN pip install --no-cache-dir fastapi==0.141.0 uvicorn==0.35.0 docker==7.1.0 asyncpg==0.30.0 pydantic==2.13.4
+COPY backend/src/oncall/collector /app/oncall/collector
+COPY backend/src/oncall/security /app/oncall/security
+COPY backend/src/oncall/__init__.py /app/oncall/__init__.py
+ENV PYTHONPATH=/app
+EXPOSE 9910
+CMD ["python", "-m", "oncall.collector.app"]

@@ -6,7 +6,7 @@ from oncall.monitoring.signals import PYTHON_GPU_SIGNALS, PYTHON_SIGNALS, SUPPOR
 def test_base_and_gpu_signal_counts_are_stable():
     assert len(PYTHON_SIGNALS) == 28
     assert len(PYTHON_GPU_SIGNALS) == 6
-    assert len(SUPPORTED_SIGNALS) == 34
+    assert len(SUPPORTED_SIGNALS) == 47
     assert not set(PYTHON_SIGNALS) & set(PYTHON_GPU_SIGNALS)
 
 

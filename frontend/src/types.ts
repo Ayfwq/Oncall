@@ -41,6 +41,8 @@ export interface MonitoredServer {
   name: string
   node_metrics_url: string
   gpu_metrics_url: string | null
+  collector_url: string | null
+  collector_token?: string | null
   enabled: boolean
   project_count: number
   created_at: string | null
@@ -57,13 +59,16 @@ export interface ServerTestResult {
 
 export interface ProjectDraftTestResult {
   ok: boolean
-  checks: Array<{ key: 'server' | 'service' | 'prometheus'; ok: boolean; error: string | null }>
+  checks: Array<{ key: 'server' | 'service' | 'prometheus' | 'logs' | 'database'; ok: boolean; error: string | null }>
   capabilities: {
     host_metrics: boolean
     gpu_metrics: boolean
     health_check: boolean
     http_metrics: boolean
     process_metrics: boolean
+    docker_logs: boolean
+    database_health: boolean
+    slow_sql: boolean
   }
   warnings: string[]
   signals: Record<string, number>
@@ -124,6 +129,8 @@ export interface ProjectConfig {
   poll_interval: number
   service_endpoints: ServiceEndpoint[]
   metrics_sources: MetricsSource[]
+  log_sources?: Array<{ id: string | null; path: string; encoding: string; parser_config: Record<string, unknown>; enabled: boolean }>
+  database_profiles?: Array<{ id: string | null; type: 'postgresql'; host: string; port: number; database: string; username: string; password: string | null; sslmode: string; enabled: boolean }>
   rules: MonitoringRule[]
 }
 

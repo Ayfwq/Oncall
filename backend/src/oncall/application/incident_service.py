@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.conversation_service import ConversationService
@@ -12,6 +12,7 @@ from oncall.infrastructure.db.models import (
     Conversation,
     Incident,
     IncidentEvidence,
+    IncidentSignal,
     MonitoringRule,
     MonitoringRuleState,
     Notification,
@@ -29,6 +30,10 @@ _METRIC_LABEL={
     'app.up':'应用指标采集失败','app.http.error_rate':'API 错误率过高',
     'app.http.p95_ms':'API P95 延迟异常','app.http.p99_ms':'API P99 延迟异常',
     'app.http.availability':'API 可用性下降',
+    'log.collector.up':'日志采集器失联','log.exception_count':'异常日志集中出现',
+    'db.up':'数据库连接失败','db.connections.utilization_percent':'数据库连接压力过高',
+    'db.long_transactions':'数据库存在长事务','db.lock_waits':'数据库存在锁等待',
+    'db.replication_lag_seconds':'数据库复制延迟过高',
 }
 
 
@@ -48,6 +53,10 @@ def _format_metric_value(metric_key:str,value:float)->str:
         return f'{value:.0f} ms'
     if metric_key=='host.gpu.temperature_celsius':
         return f'{value:.1f} °C'
+    if metric_key=='db.connections.utilization_percent':
+        return f'{value:.1f}%'
+    if metric_key=='db.replication_lag_seconds':
+        return f'{value:.1f} 秒'
     return _format_value(value)
 
 
@@ -82,10 +91,45 @@ class IncidentService:
         if not conv:return
         await JobQueue(self.session).enqueue('incident_investigate',{'incident_id':str(inc.id),'conversation_id':str(conv.id)},idempotency_key=f'incident_investigate:{inc.id}:{reason}',priority=20)
 
+    async def active_incident_for_signal(self,project_id:UUID,rule_id:UUID,resource_key:str)->Incident|None:
+        """Find the open incident that owns one detector signal."""
+        return await self.session.scalar(
+            select(Incident)
+            .join(IncidentSignal,IncidentSignal.incident_id==Incident.id)
+            .where(
+                Incident.project_id==project_id,
+                Incident.status.in_(['open','investigating','diagnosed']),
+                IncidentSignal.rule_id==rule_id,
+                IncidentSignal.resource_key==resource_key,
+                IncidentSignal.state=='firing',
+            )
+            .order_by(Incident.last_seen.desc())
+            .limit(1)
+        )
+
+    async def _recent_correlated_incident(self,project_id:UUID,now:datetime)->Incident|None:
+        from oncall.bootstrap.config import get_settings
+
+        window=get_settings().incident_correlation_window_seconds
+        if window<=0:return None
+        return await self.session.scalar(
+            select(Incident).where(
+                Incident.project_id==project_id,
+                Incident.status.in_(['open','investigating','diagnosed']),
+                Incident.last_seen>=now-timedelta(seconds=window),
+            ).order_by(Incident.last_seen.desc()).limit(1)
+        )
+
     async def on_firing(self,project_id:UUID,rule_id:UUID,resource_key:str,anomaly_type:str,severity:str,value:float)->Incident:
         fp=incident_fingerprint(project_id,rule_id,resource_key,anomaly_type)
         stmt=select(Incident).where(Incident.project_id==project_id,Incident.fingerprint==fp,Incident.status.in_(['open','investigating','diagnosed'])).order_by(Incident.first_seen.desc()).limit(1)
-        inc=await self.session.scalar(stmt);now=datetime.now().astimezone();is_new=inc is None
+        now=datetime.now().astimezone()
+        inc=await self.active_incident_for_signal(project_id,rule_id,resource_key)
+        if inc is None:inc=await self.session.scalar(stmt)
+        if inc is None:inc=await self._recent_correlated_incident(project_id,now)
+        is_new=inc is None
+        added_signal=False
+        upgraded=False
         if not inc:
             inc=Incident(project_id=project_id,fingerprint=fp,status='open',severity=severity,anomaly_type=anomaly_type,resource_key=resource_key,summary=f'{anomaly_type} triggered: {value}',first_seen=now,last_seen=now)
             self.session.add(inc);await self.session.flush()
@@ -93,6 +137,22 @@ class IncidentService:
             inc.last_seen=now
             upgraded=_SEVERITY_RANK.get(severity,0)>_SEVERITY_RANK.get(inc.severity,0)
             if upgraded:inc.severity=severity
+        signal=await self.session.scalar(select(IncidentSignal).where(
+            IncidentSignal.incident_id==inc.id,
+            IncidentSignal.rule_id==rule_id,
+            IncidentSignal.resource_key==resource_key,
+        ).limit(1))
+        if signal is None:
+            signal=IncidentSignal(incident_id=inc.id,rule_id=rule_id,resource_key=resource_key,anomaly_type=anomaly_type,severity=severity,state='firing',last_value=value,first_seen=now,last_seen=now)
+            self.session.add(signal)
+            self.session.add(IncidentEvidence(
+                incident_id=inc.id,type='monitoring_signal',source=f'rule:{rule_id}',
+                summary=f'{anomaly_type} triggered: {value}',
+                data={'rule_id':str(rule_id),'metric_key':anomaly_type,'resource_key':resource_key,'severity':severity,'value':value,'state':'firing'},
+            ))
+            added_signal=True
+        else:
+            signal.state='firing';signal.severity=severity;signal.last_value=value;signal.last_seen=now;signal.recovered_at=None
         await self.session.commit();await self.session.refresh(inc)
         # Repairable initial pipeline: if the process crashes after committing the
         # Incident but before queuing notification/investigation, the next firing
@@ -114,6 +174,10 @@ class IncidentService:
             self._queue_alert(inc,anomaly_type,resource_key,severity,value,now,getattr(project,'name','') or '',kind='escalated',dedupe_suffix=f'escalated:{severity}',prefix='🔺 **告警升级**\n\n')
             await self.session.commit()
             await self._enqueue_reinvestigation(inc,f'upgrade:{severity}')
+        elif not is_new and added_signal:
+            # The first notification stays concise. New correlated evidence is
+            # consumed by a fresh Agent pass and lands in the same message thread.
+            await self._enqueue_reinvestigation(inc,f'signal:{rule_id}')
         return inc
 
     def _queue_alert(self,inc:Incident,anomaly_type:str,resource_key:str,severity:str,value:float,now,
@@ -141,17 +205,56 @@ class IncidentService:
             dedupe_key=f'incident:{inc.id}:{dedupe_suffix}',
         ))
 
-    async def touch_firing(self,incident:Incident,severity:str,value:float)->Incident:
+    async def touch_firing(self,incident:Incident,severity:str,value:float,rule_id:UUID|None=None,resource_key:str='default')->Incident:
         """Refresh an already firing Incident without re-running the Agent every poll."""
         now=datetime.now().astimezone()
         incident.last_seen=now
         incident.summary=f'{incident.anomaly_type} still firing: {value}'
         upgraded=_SEVERITY_RANK.get(severity,0)>_SEVERITY_RANK.get(incident.severity,0)
         if upgraded:incident.severity=severity
+        if rule_id is not None:
+            signal=await self.session.scalar(select(IncidentSignal).where(
+                IncidentSignal.incident_id==incident.id,
+                IncidentSignal.rule_id==rule_id,
+                IncidentSignal.resource_key==resource_key,
+            ).limit(1))
+            if signal:
+                signal.last_seen=now;signal.last_value=value;signal.severity=severity;signal.state='firing';signal.recovered_at=None
         await self.session.commit()
         if upgraded:
             await self._enqueue_reinvestigation(incident,f'upgrade:{severity}')
         return incident
+
+    async def on_recovered(self,project_id:UUID,rule_id:UUID,resource_key:str,anomaly_type:str)->Incident|None:
+        """Recover one detector and close its incident only when all signals recover."""
+        row=await self.session.execute(
+            select(IncidentSignal,Incident)
+            .join(Incident,Incident.id==IncidentSignal.incident_id)
+            .where(
+                Incident.project_id==project_id,
+                Incident.status.in_(['open','investigating','diagnosed']),
+                IncidentSignal.rule_id==rule_id,
+                IncidentSignal.resource_key==resource_key,
+                IncidentSignal.state=='firing',
+            ).order_by(Incident.last_seen.desc()).limit(1)
+        )
+        pair=row.first()
+        if pair is None:return None
+        signal,inc=pair
+        now=datetime.now().astimezone()
+        signal.state='recovered';signal.recovered_at=now;signal.last_seen=now
+        self.session.add(IncidentEvidence(
+            incident_id=inc.id,type='monitoring_signal_recovered',source=f'rule:{rule_id}',
+            summary=f'{anomaly_type} recovered',
+            data={'rule_id':str(rule_id),'metric_key':anomaly_type,'resource_key':resource_key,'state':'recovered'},
+        ))
+        await self.session.flush()
+        active=await self.session.scalar(select(func.count()).select_from(IncidentSignal).where(
+            IncidentSignal.incident_id==inc.id,IncidentSignal.state=='firing'
+        ))
+        await self.session.commit()
+        if int(active or 0)==0:return await self.resolve(inc.id)
+        return inc
 
     async def resolve(self,incident_id:UUID,reason:str='rule_recovered')->Incident|None:
         inc=await self.session.get(Incident,incident_id)
@@ -162,15 +265,21 @@ class IncidentService:
         # Reset the matching detector state so an unchanged abnormal metric can fire again
         # after trigger_for samples instead of entering a permanent blind spot.
         if reason=='manual_resolve':
-            rule=await self.session.scalar(select(MonitoringRule).where(
-                MonitoringRule.project_id==inc.project_id,
-                MonitoringRule.metric_key==inc.anomaly_type,
-                MonitoringRule.resource_key==inc.resource_key,
-            ).order_by(MonitoringRule.id.asc()).limit(1))
-            if rule:
-                rs=await self.session.get(MonitoringRuleState,rule.id)
+            signal_rule_ids=list((await self.session.scalars(select(IncidentSignal.rule_id).where(IncidentSignal.incident_id==inc.id))).all())
+            if not signal_rule_ids:
+                legacy_rule=await self.session.scalar(select(MonitoringRule).where(
+                    MonitoringRule.project_id==inc.project_id,
+                    MonitoringRule.metric_key==inc.anomaly_type,
+                    MonitoringRule.resource_key==inc.resource_key,
+                ).order_by(MonitoringRule.id.asc()).limit(1))
+                signal_rule_ids=[legacy_rule.id] if legacy_rule else []
+            for signal_rule_id in signal_rule_ids:
+                rs=await self.session.get(MonitoringRuleState,signal_rule_id)
                 if rs:
                     rs.state='normal';rs.abnormal_hits=0;rs.recovery_hits=0
+            signals=list((await self.session.scalars(select(IncidentSignal).where(IncidentSignal.incident_id==inc.id))).all())
+            for signal in signals:
+                signal.state='recovered';signal.recovered_at=inc.resolved_at
         await self.session.commit()
         target='default'
         duration=''
@@ -186,7 +295,7 @@ class IncidentService:
         )
         self.session.add(Notification(
             incident_id=inc.id,channel='feishu',target=target,
-            payload={'kind':'resolved','incident_id':str(inc.id),'summary':reason,'text':recovery_text},
+            payload={'kind':'resolved','incident_id':str(inc.id),'severity':'info','summary':reason,'text':recovery_text},
             dedupe_key=f'incident:{inc.id}:resolved'
         ))
         await self.session.commit();return inc

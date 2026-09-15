@@ -70,3 +70,33 @@ async def test_cooldown_is_committed_as_suppressed(monkeypatch):
     assert await sender.send_pending() == 0
     assert note.status == 'suppressed'
     assert session.commits == 2
+
+
+@pytest.mark.asyncio
+async def test_recovery_is_replied_in_the_original_incident_thread(monkeypatch):
+    note = Notification(
+        incident_id=uuid4(), channel='feishu', target='default', status='pending', attempts=0,
+        payload={'kind': 'resolved', 'severity': 'info', 'text': 'recovered'}, dedupe_key='resolved-thread-test',
+    )
+    session = FakeSession([note])
+    sender = FeishuOutboxSender(session)
+    sender.s = settings('chat-1')
+    calls = []
+
+    async def not_cooling_down(*args):
+        return False
+
+    async def thread_id(*args):
+        return 'om-initial-alert'
+
+    async def reply(message_id, text, severity, title):
+        calls.append((message_id, text, severity, title))
+        return 'om-recovery'
+
+    monkeypatch.setattr(sender, '_in_cooldown', not_cooling_down)
+    monkeypatch.setattr(sender, '_incident_thread_message_id', thread_id)
+    sender.client = SimpleNamespace(reply_incident_card=reply)
+
+    assert await sender.send_pending() == 1
+    assert calls == [('om-initial-alert', 'recovered', 'info', '恢复通知')]
+    assert note.payload['root_id'] == 'om-initial-alert'

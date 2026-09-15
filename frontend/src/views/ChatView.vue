@@ -37,10 +37,6 @@ async function create() {
   newProject.value = ''; search.value = ''; showArchived.value = false
   await load(); await open(c.id)
 }
-async function startWith(promptText: string) {
-  if (!active.value) await create()
-  input.value = promptText
-}
 async function open(id: string) {
   active.value = id; messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
   await nextTick(); scrollToBottom()
@@ -174,19 +170,14 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 
       <div ref="messagesEl" class="messages">
         <div v-if="!active" class="empty-state">
-          <div class="empty-icon">◈</div>
+          <img class="empty-icon" src="/favicon.png" alt="" />
             <div class="welcome-kicker">ONCALL AI SRE</div>
             <h2>从一个运维问题开始</h2>
             <p class="muted">普通运维问题可直接咨询；绑定项目后可进一步查询实时日志、指标和服务状态。</p>
-            <div class="prompt-grid">
-              <button class="prompt-card" @click="startWith('检查当前项目的 CPU、内存和磁盘状态')"><b>检查主机状态</b><span>CPU · 内存 · 磁盘</span><i>→</i></button>
-              <button class="prompt-card" @click="startWith('最近有没有异常告警？请给出优先级最高的问题')"><b>梳理当前告警</b><span>Incident · 优先级 · 影响</span><i>→</i></button>
-              <button class="prompt-card" @click="startWith('根据知识库给我一份服务异常排查步骤')"><b>查找排障方案</b><span>知识库 · SOP · 引用</span><i>→</i></button>
-            </div>
         </div>
         <template v-else>
           <div v-for="(m, i) in messages" :key="m.id || i" class="msg-row" :class="m.role === 'user' ? 'user' : 'assistant'">
-            <div v-if="m.role === 'assistant'" class="msg-avatar ai">◈</div>
+            <img v-if="m.role === 'assistant'" class="msg-avatar ai" src="/favicon.png" alt="" />
             <div class="msg-bubble">
               <div v-if="m.role === 'assistant'" class="markdown" v-html="render(m.content)"></div>
               <div v-else>{{ m.content }}</div>
@@ -221,19 +212,12 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 .conv-icon:hover { background: #eaf6f1; border-color: #a9d9c7; color: var(--accent-strong); }
 .conv-icon.danger:hover { background: #fff1f0; border-color: #f2c5c2; color: #c0393f; }
 .empty-state { min-height: 100%; display:flex; flex-direction:column; justify-content:center; text-align: center; padding: 36px 20px 155px; }
-.empty-icon { width: 58px; height: 58px; margin: 0 auto 17px; border-radius: 18px; background: linear-gradient(135deg, #46c59d, #20886c); color: #fff; font-size: 26px; display: grid; place-items: center; box-shadow: 0 15px 36px -18px rgba(25,132,99,.7); }
+.empty-icon { width: 58px; height: 58px; margin: 0 auto 17px; border-radius: 18px; object-fit: contain; display: block; box-shadow: 0 15px 36px -18px rgba(25,132,99,.7); }
 .welcome-kicker { color: var(--accent-strong); font-size: 11px; font-weight: 700; letter-spacing: .14em; margin-bottom: 7px; }
 .empty-state h2 { font-size: 20px; }
 .empty-state > p { max-width: 510px; margin: 0 auto 24px; }
-.prompt-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; width:100%; max-width: 720px; margin: 0 auto; text-align: left; }
-.prompt-card { position: relative; text-align: left; border: 1px solid #dfe9e5; background: #fff; border-radius: 15px; padding: 15px; cursor: pointer; box-shadow: var(--shadow-sm); transition: .15s; }
-.prompt-card:hover { border-color: var(--accent); box-shadow: var(--shadow); transform: translateY(-2px); }
-.prompt-card b, .prompt-card span { display: block; }
-.prompt-card b { font-size: 13px; margin-bottom: 5px; }
-.prompt-card span { font-size: 11px; color: var(--text-3); }
-.prompt-card i { position: absolute; right: 12px; bottom: 12px; color: var(--accent-strong); font-style: normal; }
 .composer-hint{margin:7px auto 0;color:#9aa8a3;font-size:10px;text-align:center}
-@media (max-width: 760px) { .prompt-grid { grid-template-columns: 1fr; max-width: 360px; } .empty-state { padding-top: 55px; } }
+@media (max-width: 760px) { .empty-state { padding-top: 55px; } }
 
 .mobile-conv-toggle { display: none; }
 .conv-scrim { display: none; }

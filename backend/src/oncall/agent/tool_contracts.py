@@ -42,6 +42,23 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "search_logs": {
+        "description": "搜索当前项目容器的 stdout/stderr 日志，可按时间、级别和关键字过滤。只读。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "可选关键字，例如 connection refused"},
+                "level": {"type": "string", "description": "可选日志级别，例如 ERROR"},
+                "since_minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 30},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "query_database_health": {
+        "description": "查询当前项目 PostgreSQL 的连接、长事务、锁等待、慢 SQL 与复制状态。只读。",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
 }
 
 ALLOWED_TOOLS = frozenset(TOOL_SPECS)

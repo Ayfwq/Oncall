@@ -54,6 +54,7 @@ oncall-notification-worker = "oncall.workers.notification_worker:run"
 oncall-rag-worker = "oncall.workers.rag_worker:run"
 oncall-init-admin = "oncall.cli.init_admin:run"
 oncall-doctor = "oncall.cli.doctor:run"
+oncall-collector = "oncall.collector.app:run"
 
 [build-system]
 requires = ["hatchling"]

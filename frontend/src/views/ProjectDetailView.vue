@@ -25,11 +25,13 @@ interface FormConfig {
   poll_interval: number
   service_endpoints: FormEndpoint[]
   metrics_sources: FormMetrics[]
+  log_sources: NonNullable<ProjectConfig['log_sources']>
+  database_profiles: NonNullable<ProjectConfig['database_profiles']>
   rules: FormRule[]
   server?: ProjectConfig['server']
 }
 
-const cfg = ref<FormConfig>({ name: '', server_id: null, description: '', enabled: true, poll_interval: 30, service_endpoints: [], metrics_sources: [], rules: [] })
+const cfg = ref<FormConfig>({ name: '', server_id: null, description: '', enabled: true, poll_interval: 30, service_endpoints: [], metrics_sources: [], log_sources: [], database_profiles: [], rules: [] })
 const quick = ref({ healthUrl: '', metricsUrl: '', pollInterval: 30 })
 
 const HOST_METRICS = [
@@ -45,7 +47,8 @@ const GPU_METRICS = [
 const SERVICE_METRICS = [['service.reachable', '服务可达'], ['service.status_code', 'HTTP 状态码'], ['service.latency_ms', '响应延迟'], ['service.consecutive_failures', '连续失败次数']]
 const APP_METRICS = [['app.up', '应用指标端点可用'], ['app.http.rps', '请求速率'], ['app.http.error_rate', '错误率'], ['app.http.p95_ms', 'P95 延迟'], ['app.http.p99_ms', 'P99 延迟'], ['app.http.availability', '应用可用性']]
 const PROCESS_METRICS = [['process.target.alive', '进程指标可用'], ['process.target.count', '进程数量'], ['process.target.cpu_percent_sum', '进程 CPU'], ['process.target.rss_bytes_sum', '进程内存'], ['process.target.virtual_memory_bytes_sum', '进程虚拟内存'], ['process.target.open_fds_sum', '打开文件数'], ['process.target.uptime_seconds', '进程运行时长']]
-const metricCount = computed(() => HOST_METRICS.length + SERVICE_METRICS.length + APP_METRICS.length + PROCESS_METRICS.length + (cfg.value.server?.gpu_metrics_url ? GPU_METRICS.length : 0))
+const OBSERVABILITY_METRICS = 13
+const metricCount = computed(() => HOST_METRICS.length + SERVICE_METRICS.length + APP_METRICS.length + PROCESS_METRICS.length + (cfg.value.server?.gpu_metrics_url ? GPU_METRICS.length : 0) + (cfg.value.log_sources.length || cfg.value.database_profiles.length ? OBSERVABILITY_METRICS : 0))
 
 function setMessage(text: string, isError = false) { message.value = text; error.value = isError }
 function failText(e: unknown) {
@@ -54,21 +57,16 @@ function failText(e: unknown) {
 }
 function blankEndpoint(url = ''): FormEndpoint { return { id: null, service_id: null, name: '健康检查', url, method: 'GET', expected_status: 200, timeout_ms: 3000, enabled: true } }
 function blankMetrics(url = ''): FormMetrics { return { id: null, service_id: null, name: 'app', url, auth_type: 'none', token: '', scrape_timeout_ms: 5000, route_label: 'handler', enabled: true } }
-function blankRule(metric_key: string, operator: string, trigger_threshold: number, recovery_threshold: number, severity = 'warning', detection_mode: FormRule['detection_mode'] = 'threshold'): FormRule {
-  return { id: null, metric_key, resource_key: 'default', operator, trigger_threshold, trigger_for: 2, recovery_threshold, recovery_for: 2, severity, enabled: true, detection_mode, baseline_window: 60, baseline_min_samples: 12, baseline_z_score: 3, baseline_recovery_z_score: 2, conditions: null }
-}
-function starterRules(): FormRule[] {
-  const rules = [
-    blankRule('host.exporter.up', '==', 0, 0, 'critical'), blankRule('host.cpu.percent', '>', 90, 80), blankRule('host.memory.percent', '>', 90, 80), blankRule('host.disk.usage_percent', '>', 90, 85),
-    blankRule('service.consecutive_failures', '>=', 1, 0.5, 'critical'), blankRule('service.latency_ms', '>', 1000, 700, 'warning', 'hybrid'), blankRule('app.up', '==', 0, 0, 'critical'),
-    blankRule('app.http.p95_ms', '>', 800, 500, 'warning', 'hybrid'), blankRule('app.http.p99_ms', '>', 2000, 1000, 'critical', 'hybrid'), blankRule('app.http.availability', '<', 95, 99),
-    blankRule('process.target.cpu_percent_sum', '>', 10000, 9000, 'warning', 'baseline'), blankRule('process.target.rss_bytes_sum', '>', 1e15, 9e14, 'warning', 'baseline'),
-  ]
-  const errorRule = blankRule('app.http.error_rate', '>', 0.1, 0.05)
-  errorRule.conditions = { all: [{ metric_key: 'app.http.rps', resource_key: 'default', operator: '>', threshold: 1 }, { metric_key: 'app.http.error_rate', resource_key: 'default', operator: '>', threshold: 0.1 }] }
-  rules.splice(7, 0, errorRule)
-  if (cfg.value.server?.gpu_metrics_url) rules.splice(4, 0, blankRule('host.gpu.exporter.up', '==', 0, 0, 'warning'), blankRule('host.gpu.memory_percent', '>', 90, 80), blankRule('host.gpu.temperature_celsius', '>', 85, 75, 'critical'))
-  return rules
+async function resetRules(showMessage = true) {
+  try {
+    const result = await api<{ rules: FormRule[] }>(`/projects/${id}/rules/defaults`)
+    cfg.value.rules = result.rules
+    if (showMessage) setMessage(`已载入后端统一维护的 ${result.rules.length} 条默认规则，请保存后生效`)
+    return true
+  } catch (e) {
+    setMessage('载入默认规则失败：' + failText(e), true)
+    return false
+  }
 }
 function normalize(data: ProjectConfig) {
   cfg.value = {
@@ -76,6 +74,8 @@ function normalize(data: ProjectConfig) {
     server: data.server,
     service_endpoints: (data.service_endpoints || []).map(x => ({ ...x, name: x.name || '健康检查' })),
     metrics_sources: (data.metrics_sources || []).map(x => ({ ...x, name: x.name || 'app', token: '' })),
+    log_sources: data.log_sources || [],
+    database_profiles: data.database_profiles || [],
     rules: (data.rules || []).map(x => ({ ...x })),
   }
   quick.value = { healthUrl: cfg.value.service_endpoints.find(x => x.enabled)?.url || '', metricsUrl: cfg.value.metrics_sources.find(x => x.enabled)?.url || '', pollInterval: cfg.value.poll_interval }
@@ -84,7 +84,7 @@ async function load() {
   loading.value = true
   try { normalize(await api<ProjectConfig>(`/projects/${id}`)) } catch (e) { setMessage('加载失败：' + failText(e), true) } finally { loading.value = false }
 }
-function prepareQuick() {
+async function prepareQuick() {
   if (!quick.value.healthUrl.trim() || !quick.value.metricsUrl.trim()) { setMessage('健康检查地址和 Prometheus /metrics 地址都必填', true); return false }
   const endpoint = cfg.value.service_endpoints.find(x => x.enabled) || blankEndpoint()
   Object.assign(endpoint, { url: quick.value.healthUrl.trim(), enabled: true })
@@ -93,7 +93,7 @@ function prepareQuick() {
   Object.assign(source, { url: quick.value.metricsUrl.trim(), enabled: true })
   if (!cfg.value.metrics_sources.includes(source)) cfg.value.metrics_sources = [source]
   cfg.value.poll_interval = Number(quick.value.pollInterval) || 30
-  if (!cfg.value.rules.length) cfg.value.rules = starterRules()
+  if (!cfg.value.rules.length && !await resetRules(false)) return false
   return true
 }
 function validUrl(value: string) { try { const u = new URL(value); return ['http:', 'https:'].includes(u.protocol) && !!u.hostname } catch { return false } }
@@ -111,19 +111,21 @@ function toPayload() {
     name: cfg.value.name.trim(), server_id: cfg.value.server_id, description: cfg.value.description || '', environment: 'production', enabled: cfg.value.enabled, timezone: 'Asia/Shanghai', poll_interval: Number(cfg.value.poll_interval),
     service_endpoints: cfg.value.service_endpoints.map(x => ({ ...x, token: undefined })),
     metrics_sources: cfg.value.metrics_sources.map(x => ({ ...x, token: x.token || null })),
+    log_sources: cfg.value.log_sources,
+    database_profiles: cfg.value.database_profiles,
     rules: cfg.value.rules,
   }
 }
 async function save() {
-  if (saving.value || !prepareQuick()) return
+  if (saving.value || !await prepareQuick()) return
   const errs = validate(); if (errs.length) { setMessage(errs.join('；'), true); return }
   saving.value = true; setMessage('保存中…')
   try { await api(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(toPayload()) }); setMessage('配置已保存'); await load() } catch (e) { setMessage('保存失败：' + failText(e), true) } finally { saving.value = false }
 }
 async function test() {
-  if (testing.value || !prepareQuick()) return
+  if (testing.value || !await prepareQuick()) return
   const errs = validate(); if (errs.length) { setMessage(errs.join('；'), true); return }
-  testing.value = true; setMessage('正在测试三个采集入口…')
+  testing.value = true; setMessage('正在测试服务器、应用、日志和数据库采集…')
   try {
     snapshot.value = await api<SnapshotDTO>(`/projects/${id}/test`, { method: 'POST', body: JSON.stringify(toPayload()) })
     const statuses = Object.values(snapshot.value.collector_status || {})
@@ -152,19 +154,19 @@ onMounted(load)
           <div class="server-banner"><div class="server-icon">⌁</div><div><b>{{ cfg.server?.name || '未绑定服务器' }}</b><p>服务器采集器：{{ cfg.server?.node_metrics_url || '未配置' }}<span v-if="cfg.server?.gpu_metrics_url"> · 已配置 GPU</span></p></div><el-switch v-model="cfg.enabled" active-text="启用监控" /></div>
         </section>
 
-        <section class="card setup-card"><div class="section-title"><div><span class="step">2</span><div><h2>服务采集入口</h2><p>Oncall 会定时请求这两个地址；不用填写进程、日志或数据库信息。</p></div></div></div>
+        <section class="card setup-card"><div class="section-title"><div><span class="step">2</span><div><h2>服务采集入口</h2><p>Oncall 会定时请求健康检查和指标地址；Docker 日志与数据库由 Collector 自动采集。</p></div></div></div>
           <el-form-item label="健康检查地址（必填）"><el-input v-model="quick.healthUrl" placeholder="例如：https://stock.example.com/health" /></el-form-item><p class="hint">返回 2xx 且响应时间正常，代表服务探活通过；连续失败会触发告警。</p>
           <el-form-item label="Prometheus /metrics 地址（必填）"><el-input v-model="quick.metricsUrl" placeholder="例如：https://stock.example.com/metrics" /></el-form-item><p class="hint">必须能返回标准 Prometheus 文本格式；系统会从实际返回内容识别应用请求、延迟和 Python 进程指标。</p>
         </section>
 
-        <section class="card setup-card"><div class="section-title"><div><span class="step">3</span><div><h2>告警规则</h2><p>系统只依据当前可采集指标判断异常；保存后可以在快照中验证。</p></div></div><el-button plain size="small" @click="cfg.rules = starterRules()">恢复默认规则</el-button></div>
-          <div class="rule-summary"><div><b>{{ cfg.rules.filter(x => x.enabled).length }}</b><span>条启用规则</span></div><div><b>{{ metricCount }}</b><span>个标准指标{{ cfg.server?.gpu_metrics_url ? '（含 GPU）' : '' }}</span></div><div><b>3</b><span>个采集入口</span></div></div>
+        <section class="card setup-card"><div class="section-title"><div><span class="step">3</span><div><h2>告警规则</h2><p>系统只依据当前可采集指标判断异常；保存后可以在快照中验证。</p></div></div><el-button plain size="small" @click="resetRules()">恢复默认规则</el-button></div>
+          <div class="rule-summary"><div><b>{{ cfg.rules.filter(x => x.enabled).length }}</b><span>条启用规则</span></div><div><b>{{ metricCount }}</b><span>个标准指标{{ cfg.server?.gpu_metrics_url ? '（含 GPU）' : '' }}</span></div><div><b>5</b><span>个采集入口</span></div></div>
           <div class="rule-list"><div v-for="rule in cfg.rules.filter(x => x.enabled)" :key="rule.id || rule.metric_key" class="rule-row"><span class="rule-dot" :class="rule.severity"></span><span class="rule-name">{{ rule.metric_key }}</span><span class="rule-condition">{{ rule.operator }} {{ rule.trigger_threshold }} · 连续 {{ rule.trigger_for }} 次</span><el-tag size="small" effect="plain">{{ rule.detection_mode === 'threshold' ? '阈值' : '阈值 + 基线' }}</el-tag></div></div>
         </section>
         <section v-if="snapshot" class="card setup-card"><div class="section-title"><div><h2>最近采集快照</h2><p>{{ snapshot.observed_at }}</p></div></div><div class="collector-status"><span v-for="(v,k) in snapshot.collector_status" :key="k" :class="v.ok ? 'ok' : 'bad'">{{ k }} · {{ v.ok ? '正常' : '失败' }}</span></div><pre>{{ JSON.stringify(snapshot.signals, null, 2) }}</pre></section>
       </main>
       <aside>
-        <section class="card side-card"><div class="side-label">监控范围</div><div class="metric-total">{{ metricCount }}<small> 项</small></div><p>从服务器采集器、健康检查和应用 `/metrics` 汇总而来。</p><div class="metric-group"><b>服务器 · {{ HOST_METRICS.length }} 项</b><span v-for="m in HOST_METRICS" :key="m[0]">{{ m[1] }}</span></div><div v-if="cfg.server?.gpu_metrics_url" class="metric-group gpu"><b>GPU · {{ GPU_METRICS.length }} 项</b><span v-for="m in GPU_METRICS" :key="m[0]">{{ m[1] }}</span></div><div class="metric-group"><b>服务 · {{ SERVICE_METRICS.length }} 项</b><span v-for="m in SERVICE_METRICS" :key="m[0]">{{ m[1] }}</span></div><div class="metric-group"><b>应用 · {{ APP_METRICS.length + PROCESS_METRICS.length }} 项</b><span>请求、错误率、P95/P99、可用性</span><span>Python 进程 CPU、内存、句柄、存活</span></div></section>
+        <section class="card side-card"><div class="side-label">监控范围</div><div class="metric-total">{{ metricCount }}<small> 项</small></div><p>从服务器采集器、健康检查、应用 `/metrics`、Docker 日志和 PostgreSQL 汇总而来。</p><div class="metric-group"><b>服务器 · {{ HOST_METRICS.length }} 项</b><span v-for="m in HOST_METRICS" :key="m[0]">{{ m[1] }}</span></div><div v-if="cfg.server?.gpu_metrics_url" class="metric-group gpu"><b>GPU · {{ GPU_METRICS.length }} 项</b><span v-for="m in GPU_METRICS" :key="m[0]">{{ m[1] }}</span></div><div class="metric-group"><b>服务 · {{ SERVICE_METRICS.length }} 项</b><span v-for="m in SERVICE_METRICS" :key="m[0]">{{ m[1] }}</span></div><div class="metric-group"><b>应用 · {{ APP_METRICS.length + PROCESS_METRICS.length }} 项</b><span>请求、错误率、P95/P99、可用性</span><span>Python 进程 CPU、内存、句柄、存活</span></div><div v-if="cfg.log_sources.length || cfg.database_profiles.length" class="metric-group observability"><b>日志 / 数据库 · {{ OBSERVABILITY_METRICS }} 项</b><span>错误日志、异常堆栈、连接数、锁等待、慢 SQL 能力</span></div></section>
         <section class="card side-card tip-card"><b>配置顺序</b><ol><li>先在服务器页面配置 Node Exporter（可选 GPU Exporter）。</li><li>选择服务器并填写本项目两个 URL。</li><li>点击“测试采集”，通过后保存并启用。</li></ol></section>
       </aside>
     </div>

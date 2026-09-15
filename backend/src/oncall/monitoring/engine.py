@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -9,13 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.dtos import SnapshotDTO
-from oncall.application.incident_service import IncidentService, incident_fingerprint
+from oncall.application.incident_service import IncidentService
 from oncall.application.project_service import ProjectService
 from oncall.domain.enums import RuleState
 from oncall.infrastructure.db.models import (
     AlertEvent,
     Conversation,
-    Incident,
     MetricSample,
     MonitoringBaseline,
     MonitoringRule,
@@ -23,11 +23,13 @@ from oncall.infrastructure.db.models import (
     MonitoringRun,
 )
 from oncall.integrations.base import CollectResult
+from oncall.integrations.observability import RemoteObservabilityIntegration
 from oncall.integrations.prometheus import PrometheusIntegration
 from oncall.integrations.server_exporters import ServerExportersIntegration
 from oncall.integrations.service import ServiceIntegration
 from oncall.jobs.queue import JobQueue
 from oncall.monitoring.detector import Detector, RuleConfig, RuleRuntimeState, compare
+from oncall.monitoring.alert_policy import should_open_incident
 from oncall.monitoring.signals import SUPPORTED_SIGNALS
 
 
@@ -43,6 +45,25 @@ def baseline_z_score(value: float, mean: float, std: float, operator: str) -> fl
     if std <= max(1e-9, abs(mean) * 1e-6):
         return float('inf') if directional > max(1e-6, abs(mean) * 1e-6) else 0.0
     return directional / std
+
+
+def new_log_counts(current_rows: list[dict], previous_rows: list[dict]) -> tuple[int, int]:
+    """Count only newly observed error/exception lines in overlapping windows."""
+    previous_lines = {
+        (str(row.get('container', '')), str(row.get('line', '')))
+        for row in previous_rows if isinstance(row, dict)
+    }
+    new_lines = [
+        row for row in current_rows
+        if isinstance(row, dict) and (str(row.get('container', '')), str(row.get('line', ''))) not in previous_lines
+    ]
+    error_count = sum(1 for row in new_lines if re.search(r'\b(ERROR|FATAL|PANIC)\b', str(row.get('line', '')), re.I))
+    exception_count = sum(
+        1 for row in new_lines
+        if 'Traceback (most recent call last)' in str(row.get('line', ''))
+        or re.search(r'\w+(Error|Exception):', str(row.get('line', '')))
+    )
+    return error_count, exception_count
 
 
 class MonitoringEngine:
@@ -72,6 +93,7 @@ class MonitoringEngine:
             ServerExportersIntegration(cfg.server),
             ServiceIntegration(cfg.service_endpoints),
             PrometheusIntegration(self.session, project_id, cfg.metrics_sources, persist_state=persist_state),
+            RemoteObservabilityIntegration(cfg.server, cfg.log_sources, cfg.database_profiles),
         ]
 
         async def collect_one(integration):
@@ -94,6 +116,23 @@ class MonitoringEngine:
 
         previous = await self._previous_run(project_id)
         previous_snapshot = (previous.snapshot or {}) if previous else {}
+
+        # The collector intentionally returns a short overlapping log window so
+        # no lines are lost around poll boundaries. Alert counters must only
+        # include lines not present in the previous snapshot; otherwise one
+        # exception burst would be counted again on every poll.
+        current_log_result = ((resources.get('observability') or {}).get('logs') or {})
+        previous_log_result = (((previous_snapshot.get('resources') or {}).get('observability') or {}).get('logs') or {})
+        if current_log_result.get('ok'):
+            error_count, exception_count = new_log_counts(
+                current_log_result.get('lines') or [], previous_log_result.get('lines') or []
+            )
+            signals['log.error_count'] = float(error_count)
+            signals['log.exception_count'] = float(exception_count)
+            current_log_result['window_error_count'] = current_log_result.get('error_count', 0)
+            current_log_result['window_exception_count'] = current_log_result.get('exception_count', 0)
+            current_log_result['error_count'] = error_count
+            current_log_result['exception_count'] = exception_count
 
         # Node Exporter exposes cumulative counters. Convert them to rates using
         # the previous completed snapshot, including after worker restarts.
@@ -291,20 +330,19 @@ class MonitoringEngine:
                     },
                 ))
             await self.session.commit()
+            actionable = should_open_incident(effective_metric)
             if transition.became_firing:
-                await incident_service.on_firing(project_id, rule.id, effective_resource, effective_metric, effective_severity, reported_value)
+                if actionable:
+                    await incident_service.on_firing(project_id, rule.id, effective_resource, effective_metric, effective_severity, reported_value)
             elif transition.became_recovered:
-                fingerprint = incident_fingerprint(project_id, rule.id, effective_resource, effective_metric)
-                incident = await self.session.scalar(select(Incident).where(Incident.project_id == project_id, Incident.fingerprint == fingerprint, Incident.status != 'resolved').order_by(Incident.first_seen.desc()).limit(1))
-                if incident:
-                    await incident_service.resolve(incident.id)
-            elif runtime.state.value == 'firing':
-                fingerprint = incident_fingerprint(project_id, rule.id, effective_resource, effective_metric)
-                incident = await self.session.scalar(select(Incident).where(Incident.project_id == project_id, Incident.fingerprint == fingerprint, Incident.status.in_(['open', 'investigating', 'diagnosed'])).order_by(Incident.first_seen.desc()).limit(1))
+                if actionable:
+                    await incident_service.on_recovered(project_id, rule.id, effective_resource, effective_metric)
+            elif runtime.state.value == 'firing' and actionable:
+                incident = await incident_service.active_incident_for_signal(project_id, rule.id, effective_resource)
                 if not incident:
                     incident = await incident_service.on_firing(project_id, rule.id, effective_resource, effective_metric, effective_severity, reported_value)
                 else:
-                    await incident_service.touch_firing(incident, effective_severity, reported_value)
+                    await incident_service.touch_firing(incident, effective_severity, reported_value, rule.id, effective_resource)
                 now = datetime.now().astimezone()
                 if incident and incident.last_investigated_at and now - incident.last_investigated_at >= timedelta(seconds=self.settings.incident_stale_reinvestigate_seconds):
                     conversation = await self.session.scalar(select(Conversation).where(Conversation.incident_id == incident.id).order_by(Conversation.created_at.asc()).limit(1))

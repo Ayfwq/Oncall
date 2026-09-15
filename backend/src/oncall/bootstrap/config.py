@@ -48,10 +48,14 @@ class Settings(BaseSettings):
     feishu_event_max_attempts: int = Field(default=5, ge=1, le=100)
     feishu_outbox_claim_seconds: int = Field(default=300, ge=10, le=86400)
     web_origin: str = 'http://127.0.0.1:5173'
-    monitor_default_interval_seconds: int = Field(default=300, ge=10)
+    monitor_default_interval_seconds: int = Field(default=30, ge=10)
     metric_retention_days: int = Field(default=30, ge=1)
     knowledge_max_upload_mb: int = Field(default=50, ge=1, le=500)
     incident_stale_reinvestigate_seconds: int = Field(default=3600, ge=300)
+    # Newly firing rules for the same project are folded into the active
+    # incident during this window.  Rules remain independent detector inputs;
+    # this setting only controls the user-facing incident/notification fanout.
+    incident_correlation_window_seconds: int = Field(default=120, ge=0, le=3600)
     notification_cooldown_seconds: int = Field(default=1800, ge=0)
     session_days: int = 30
     job_lease_seconds: int = 120

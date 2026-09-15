@@ -13,9 +13,10 @@ import time
 import pytest
 from helpers import SYNTH, make_project_with_rule, project_incidents, rule_id, synth_snapshot
 from oncall.application.incident_service import IncidentService, incident_fingerprint
-from oncall.infrastructure.db.models import Incident
+from oncall.infrastructure.db.models import Incident, IncidentSignal, MonitoringRule
 from oncall.infrastructure.db.session import SessionFactory
 from oncall.monitoring.engine import MonitoringEngine
+from sqlalchemy import func, select
 
 
 async def test_fingerprint_stable_deterministic():
@@ -56,6 +57,45 @@ async def test_on_firing_creates_single_incident_and_refreshes_last_seen(db, tes
 
     rows = await project_incidents(db, project.id, rid)
     assert len(rows) == 1, "sustained firing must not create duplicate Incidents"
+
+
+@pytest.mark.integration
+async def test_related_rules_share_one_incident_until_every_signal_recovers(db, test_user):
+    project = await make_project_with_rule(db, test_user)
+    first_rule = await rule_id(db, project.id)
+    second = MonitoringRule(
+        project_id=project.id,
+        metric_key="zz.test.related",
+        resource_key="default",
+        operator=">",
+        trigger_threshold=1,
+        recovery_threshold=0,
+        trigger_for=1,
+        recovery_for=1,
+        severity="critical",
+    )
+    db.add(second)
+    await db.commit()
+    await db.refresh(second)
+
+    svc = IncidentService(db)
+    inc_a = await svc.on_firing(project.id, first_rule, "default", SYNTH, "warning", 10)
+    inc_b = await svc.on_firing(project.id, second.id, "default", "zz.test.related", "critical", 20)
+
+    assert inc_b.id == inc_a.id
+    assert inc_b.severity == "critical"
+    signal_count = await db.scalar(
+        select(func.count()).select_from(IncidentSignal).where(IncidentSignal.incident_id == inc_a.id)
+    )
+    assert signal_count == 2
+
+    await svc.on_recovered(project.id, first_rule, "default", SYNTH)
+    await db.refresh(inc_a)
+    assert inc_a.status != "resolved"
+
+    await svc.on_recovered(project.id, second.id, "default", "zz.test.related")
+    await db.refresh(inc_a)
+    assert inc_a.status == "resolved"
 
 
 @pytest.mark.integration

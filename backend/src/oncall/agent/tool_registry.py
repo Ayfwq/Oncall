@@ -15,9 +15,8 @@ from oncall.agent.tool_contracts import ALLOWED_TOOLS, validate_tool_args
 from oncall.application.project_service import ProjectService
 from oncall.domain.schemas import ToolResult
 from oncall.infrastructure.db.models import MetricSample, RetrievalTrace, ToolRun
-from oncall.integrations.prometheus import PrometheusIntegration
+from oncall.integrations.observability import RemoteObservabilityIntegration
 from oncall.integrations.service import ServiceIntegration
-from oncall.integrations.server_exporters import ServerExportersIntegration
 from oncall.rag.retrieval import KnowledgeRetriever
 from oncall.security.redact import redact_text
 
@@ -82,6 +81,11 @@ class ToolRegistry:
             if self._retriever is None:self._retriever=KnowledgeRetriever()
             return await self._retriever.search(str(args.get('query','')),ctx.project_id,top_k=int(args.get('top_k',5)))
         cfg=await ProjectService(self.session).runtime_config(ctx.project_id)
+        if name in {'search_logs','query_database_health'}:
+            observability=RemoteObservabilityIntegration(cfg.server,cfg.log_sources,cfg.database_profiles)
+            if name=='search_logs':
+                return await observability.search_logs(str(args.get('query','')),str(args.get('level') or '') or None,int(args.get('since_minutes',30)),int(args.get('limit',200)))
+            return await observability.query_database()
         if name=='query_current_metrics':
             from oncall.monitoring.engine import MonitoringEngine
             snapshot=await MonitoringEngine(self.session).collect(ctx.project_id, persist_state=False)

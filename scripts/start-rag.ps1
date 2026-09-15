@@ -1,1 +1,3 @@
-uv run oncall-rag-worker
+$root=(Resolve-Path "$PSScriptRoot\..").Path
+Set-Location $root
+& "$root\.venv\Scripts\oncall-rag-worker.exe"

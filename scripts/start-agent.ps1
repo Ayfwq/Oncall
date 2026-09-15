@@ -1,1 +1,3 @@
-uv run oncall-agent-worker
+$root=(Resolve-Path "$PSScriptRoot\..").Path
+Set-Location $root
+& "$root\.venv\Scripts\oncall-agent-worker.exe"

@@ -58,6 +58,8 @@ class MonitoredServer(Base):
     name: Mapped[str] = mapped_column(String(200))
     node_metrics_url: Mapped[str] = mapped_column(Text)
     gpu_metrics_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    collector_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encrypted_collector_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
@@ -313,6 +315,31 @@ class Incident(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_investigated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     __table_args__ = (Index('ix_incident_open_fingerprint', 'project_id', 'fingerprint', 'status'),)
+
+
+class IncidentSignal(Base):
+    """A detector signal attached to a correlated user-facing incident.
+
+    Several rules may fire for one outage (for example database saturation,
+    API latency and exception logs).  Persisting membership lets the engine
+    send one notification thread and resolve it only after every contributing
+    detector has recovered.
+    """
+    __tablename__ = 'incident_signals'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('incidents.id', ondelete='CASCADE'), index=True)
+    rule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('monitoring_rules.id', ondelete='CASCADE'), index=True)
+    resource_key: Mapped[str] = mapped_column(String(200), default='default')
+    anomaly_type: Mapped[str] = mapped_column(String(160))
+    severity: Mapped[str] = mapped_column(String(20), default='warning')
+    state: Mapped[str] = mapped_column(String(20), default='firing', index=True)
+    last_value: Mapped[float] = mapped_column(Float, default=0)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        UniqueConstraint('incident_id', 'rule_id', 'resource_key', name='uq_incident_signal_rule_resource'),
+    )
 
 
 class IncidentEvidence(Base):

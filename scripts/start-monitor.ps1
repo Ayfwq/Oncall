@@ -1,1 +1,3 @@
-uv run oncall-monitor-worker
+$root=(Resolve-Path "$PSScriptRoot\..").Path
+Set-Location $root
+& "$root\.venv\Scripts\oncall-monitor-worker.exe"

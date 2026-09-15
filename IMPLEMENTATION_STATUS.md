@@ -17,7 +17,7 @@
 | Unified OncallAgent（LangGraph） | DONE（Real E2E） | PostgreSQL checkpointer + 真实 LLM + 流式 token |
 | 4 Read-only Tools | DONE（Code + Offline） | 当前指标、指标历史、服务健康、知识库 |
 | Monitoring Engine | DONE（Real E2E） | 多项目真实采集 + detector 状态机 |
-| 远程 Python 28/34 signals | DONE（Code + Offline） | 28 个基础远程指标；配置 GPU 后增加 6 个 GPU 指标；采集路径已做 allow-list |
+| 远程 Python 41/47 signals | DONE（Code + Offline） | 41 个基础远程指标（含日志与 PostgreSQL）；配置 GPU 后增加 6 个 GPU 指标；采集路径已做 allow-list |
 | Python 快速接入 | DONE（Code + Offline） | 创建页/`POST /api/projects/onboard/python` 绑定服务器、健康检查和 Prometheus，并自动生成基础规则 |
 | Prometheus 应用指标 | DONE（Code + Offline） | 多源抓取时间隔离、请求加权错误率、RPS/P95/P99/可用性 |
 | 历史基线规则 | DONE（Code + Offline） | threshold/baseline/hybrid，持久化正常窗口，异常值不回写基线 |

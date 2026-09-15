@@ -71,11 +71,11 @@ class FeishuClient:
         }
         return await self._send(receive_id,'interactive',card,receive_id_type)
 
-    async def reply_incident_card(self,message_id:str,text:str,severity:str='warning')->str:
+    async def reply_incident_card(self,message_id:str,text:str,severity:str='warning',title:str='诊断报告')->str:
         template='red' if severity=='critical' else 'orange' if severity=='warning' else 'blue'
         card={
             'config':{'wide_screen_mode':True},
-            'header':{'template':template,'title':{'tag':'plain_text','content':'Oncall Incident 诊断报告'}},
+            'header':{'template':template,'title':{'tag':'plain_text','content':f'Oncall Incident {title}'}},
             'elements':[{'tag':'markdown','content':str(text)[:18000]},{'tag':'note','elements':[{'tag':'plain_text','content':'可直接回复本消息，继续围绕本次告警追问'}]}],
         }
         return await self._reply(message_id,'interactive',card)
@@ -191,14 +191,15 @@ class FeishuOutboxSender:
                 text=n.payload.get('text') or f"Oncall Incident: {n.payload.get('summary','')}"
                 kind=n.payload.get('kind')
                 severity=n.payload.get('severity','warning')
-                if kind=='diagnosis':
+                if kind in ('diagnosis','escalated','resolved'):
                     thread_message_id=await self._incident_thread_message_id(n)
                     if thread_message_id:
-                        message_id=await self.client.reply_incident_card(thread_message_id,text,severity)
+                        title={'diagnosis':'诊断报告','escalated':'告警升级','resolved':'恢复通知'}.get(kind,'进展更新')
+                        message_id=await self.client.reply_incident_card(thread_message_id,text,severity,title)
                         n.payload={**n.payload,'root_id':thread_message_id}
                     else:
                         message_id=await self.client.send_incident_card(target,text,severity,rid_type)
-                elif kind in ('triggered','escalated'):
+                elif kind=='triggered':
                     message_id=await self.client.send_alert_card(target,text,severity,rid_type)
                 else:
                     message_id=await self.client.send_text(target,text,rid_type)

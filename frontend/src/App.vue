@@ -37,7 +37,7 @@ async function logout() {
     <div v-if="$route.path !== '/login' && navOpen" class="nav-scrim" @click="navOpen = false"></div>
     <aside v-if="$route.path !== '/login'" class="sidebar" :class="{ 'is-open': navOpen }">
       <div class="brand">
-        <span class="brand-mark">◈</span>
+        <img class="brand-mark" src="/favicon.png" alt="" />
         <span class="brand-name">Oncall</span>
         <span class="brand-sub">AI SRE</span>
       </div>
@@ -75,6 +75,7 @@ async function logout() {
     <main class="main" :class="{ 'chat-main': route.path === '/' }">
       <header v-if="$route.path !== '/login'" class="topbar">
         <button class="mobile-menu" aria-label="打开菜单" @click="navOpen = !navOpen">☰</button>
+        <img class="topbar-brand" src="/favicon.png" alt="" />
         <div class="topbar-title"><span>{{ pageTitle }}</span><small>本地智能运维控制台</small></div>
         <div class="topbar-actions">
           <span class="runtime-pill"><i></i> 本地服务正常</span>
