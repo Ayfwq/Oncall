@@ -4,7 +4,8 @@
 Requires: pip install paramiko
 Usage:   python deploy/sync.py [--sync-only]
          --sync-only  upload files but skip running update.sh on the server
-Env:     ONCALL_HOST / ONCALL_SSH_USER / ONCALL_SSH_PASSWORD (optional overrides)
+Env:     ONCALL_HOST / ONCALL_SSH_USER (optional overrides)
+         ONCALL_SSH_PASSWORD (required)
 """
 import os
 import select
@@ -16,7 +17,7 @@ import paramiko
 
 HOST = os.environ.get("ONCALL_HOST", "8.138.47.45")
 USER = os.environ.get("ONCALL_SSH_USER", "root")
-PWD = os.environ.get("ONCALL_SSH_PASSWORD", "Hwq020223@")
+PWD = os.environ.get("ONCALL_SSH_PASSWORD")
 REMOTE = "/opt/oncall-ai-sre/current"
 
 EXCLUDE_DIRS = {
@@ -88,6 +89,10 @@ def upload_tree(sftp, local_root: str, remote_root: str) -> None:
 
 
 def main() -> int:
+    if not PWD:
+        print("ONCALL_SSH_PASSWORD is required", file=sys.stderr)
+        return 2
+
     sync_only = "--sync-only" in sys.argv
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(root)
