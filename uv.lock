@@ -1257,14 +1257,13 @@ wheels = [
 ]
 
 [[package]]
-name = "oncall-ai-sre"
+name = "pulseops"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "alembic" },
     { name = "apscheduler" },
-    { name = "argon2-cffi" },
     { name = "asyncpg" },
     { name = "cryptography" },
     { name = "docker" },
@@ -1308,7 +1307,6 @@ requires-dist = [
     { name = "aiofiles", specifier = ">=24,<25" },
     { name = "alembic", specifier = ">=1.16,<2" },
     { name = "apscheduler", specifier = ">=3.11,<4" },
-    { name = "argon2-cffi", specifier = ">=25,<26" },
     { name = "asyncpg", specifier = ">=0.30,<0.31" },
     { name = "cryptography", specifier = ">=45,<46" },
     { name = "docker", specifier = ">=7.1,<8" },

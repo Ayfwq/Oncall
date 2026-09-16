@@ -36,5 +36,5 @@ async def loop():
 
 def run():
     s=get_settings()
-    configure_logging(s.log_level,s.log_dir,s.log_retention_days)
+    configure_logging(s.log_level,s.log_dir,s.log_retention_days,'rag-worker')
     asyncio.run(loop())

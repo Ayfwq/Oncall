@@ -6,7 +6,6 @@ Runs safely in ONCALL_ENV=development and uses only read-only Agent tools.
 from __future__ import annotations
 
 import argparse
-import os
 import time
 import uuid
 import httpx
@@ -36,26 +35,37 @@ def stream_final(client:httpx.Client,path:str,content:str,timeout:float)->str:
 def main()->int:
     ap=argparse.ArgumentParser();ap.add_argument('--base-url',default='http://127.0.0.1:9900');ap.add_argument('--timeout',type=float,default=120)
     args=ap.parse_args();base=args.base_url.rstrip('/')
-    username=os.getenv('ONCALL_ADMIN_USERNAME','admin');password=os.getenv('ONCALL_ADMIN_PASSWORD','change-me-now')
     client=httpx.Client(base_url=base,timeout=httpx.Timeout(min(args.timeout, 30)),follow_redirects=True)
     project_id=None
+    server_id=None
     try:
         print('[1/10] health')
         h=expect(client.get('/api/health')).json();assert h.get('database'),h
-        print('[2/10] login')
-        expect(client.post('/api/auth/login',json={'username':username,'password':password}))
+        print('[2/10] no-login workspace')
         ready=expect(client.get('/api/settings/readiness')).json();print(' readiness:',ready)
         assert ready['environment']=='development','dev incident trigger is disabled outside development'
 
-        print('[3/10] create project')
+        print('[3/10] create server + project')
         suffix=uuid.uuid4().hex[:8]
+        # The smoke test must be self-contained.  The exporter URL is a valid
+        # project configuration placeholder; the synthetic incident path below
+        # does not require a real remote host, while the monitoring integration
+        # itself is covered by the local integration test suite.
+        server=expect(client.post('/api/servers',json={
+            'name':f'Smoke Server {suffix}',
+            'node_metrics_url':'http://127.0.0.1:9100/metrics',
+            'enabled':False,
+        })).json()
+        server_id=server['id']
         project={
-            'name':f'Oncall Smoke {suffix}','description':'automated local E2E smoke','poll_interval':300,
-            'process_targets':[],'log_sources':[],'docker_targets':[],'database_profiles':[],'service_endpoints':[],
+            'name':f'Oncall Smoke {suffix}','server_id':server_id,
+            'description':'automated local E2E smoke','poll_interval':300,'enabled':False,
+            'log_sources':[],'database_profiles':[],'service_endpoints':[],'metrics_sources':[],
             'rules':[{'metric_key':'host.cpu.percent','resource_key':'default','operator':'>','trigger_threshold':99,'trigger_for':2,'recovery_threshold':90,'recovery_for':2,'severity':'warning','enabled':True}],
         }
         project_id=expect(client.post('/api/projects',json=project)).json()['id']
-        snap=expect(client.post(f'/api/projects/{project_id}/test')).json();assert 'host.cpu.percent' in snap.get('signals',{}),snap
+        detail=expect(client.get(f'/api/projects/{project_id}')).json()
+        assert detail.get('server_id')==server_id and detail.get('rules'),detail
 
         print('[4/10] create/search/rename conversation')
         conv=expect(client.post('/api/conversations',json={'title':f'Smoke Chat {suffix}','project_id':project_id})).json();cid=conv['id']
@@ -92,11 +102,16 @@ def main()->int:
 
         print('[10/10] cleanup')
         expect(client.delete(f'/api/projects/{project_id}'));project_id=None
+        if server_id:
+            expect(client.delete(f'/api/servers/{server_id}'));server_id=None
         print('E2E SMOKE: PASS')
         return 0
     finally:
         if project_id:
             try:client.delete(f'/api/projects/{project_id}')
+            except Exception:pass
+        if server_id:
+            try:client.delete(f'/api/servers/{server_id}')
             except Exception:pass
         client.close()
 

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    One-shot Feishu bot setup for Oncall AI SRE.
+    One-shot Feishu bot setup for PulseOps.
 
 .DESCRIPTION
     Writes the Feishu block into .env, validates credentials against the

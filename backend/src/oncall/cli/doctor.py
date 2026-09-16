@@ -34,7 +34,6 @@ async def main():
     print('[INFO] Rerank',s.rerank_model or '<not configured>','configured='+str(bool(s.rerank_base_url and s.rerank_api_key and s.rerank_model)))
     print('[INFO] Feishu enabled='+str(s.feishu_enabled),'configured='+str(bool(s.feishu_app_id and s.feishu_app_secret and s.feishu_default_receive_id)))
     if not s.secret_master_key:print('[WARN] ONCALL_SECRET_MASTER_KEY is empty; acceptable only for development')
-    if s.admin_password=='change-me-now':print('[WARN] default admin password is still configured')
     raise SystemExit(0 if ok else 1)
 
 

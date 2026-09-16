@@ -1,8 +1,3 @@
-export interface AuthUser {
-  id: string
-  username: string
-}
-
 export type ConversationType = 'chat' | 'incident'
 
 export interface Conversation {
@@ -265,7 +260,7 @@ export interface Readiness {
     default_receive_id_configured: boolean
     auto_bind_supported: boolean
   }
-  security: { secret_master_key_configured: boolean; default_admin_password_in_use: boolean }
+  security: { secret_master_key_configured: boolean }
   storage: { database: string; milvus_uri: string; data_dir: string }
 }
 

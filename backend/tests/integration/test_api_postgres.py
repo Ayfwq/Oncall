@@ -1,16 +1,14 @@
 """HTTP-level integration tests against the live API + PostgreSQL.
 
 These tests exercise the real FastAPI routes over HTTP (http://127.0.0.1:9900),
-authenticate with the admin cookie session, verify database rows after writes,
-verify owner scoping (401 unauthenticated / 404 cross-user), and clean up every
-row they create so the suite is repeatable.
+verify database rows after writes, and clean up every row they create so the
+single-workspace no-login suite is repeatable.
 
 Run from the repo root:
     uv run pytest backend/tests/integration -q
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import uuid
 from datetime import datetime, timedelta
@@ -29,19 +27,15 @@ from oncall.infrastructure.db.models import (
     MetricSample,
     MonitoringRun,
     Project,
-    Session,
     User,
 )
 from oncall.infrastructure.db.session import SessionFactory
-from oncall.security.passwords import hash_password
 from sqlalchemy import select
 
 pytestmark = pytest.mark.integration
 
 BASE_URL = os.environ.get("ITEST_BASE_URL", "http://127.0.0.1:9900")
 SETTINGS = get_settings()
-ADMIN_USER = SETTINGS.admin_username
-ADMIN_PASS = SETTINGS.admin_password
 
 # A rule keyed on a metric that never appears in real snapshots, so the background
 # monitor worker can never fire it: incidents are only ever created by the dev
@@ -105,7 +99,6 @@ class Cleanup:
         self.conversations: list[str] = []
         self.documents: list[str] = []
         self.job_ids: list[str] = []
-        self.user_ids: list[str] = []
 
     def track_project(self, pid: str) -> str:
         self.projects.append(pid)
@@ -126,10 +119,6 @@ class Cleanup:
     def track_job(self, jid: str) -> str:
         self.job_ids.append(jid)
         return jid
-
-    def track_user(self, uid: str) -> str:
-        self.user_ids.append(uid)
-        return uid
 
     async def run(self) -> None:
         for cid in reversed(self.conversations):
@@ -157,98 +146,24 @@ class Cleanup:
                 job = await db.get(BackgroundJob, UUID(jid))
                 if job:
                     await db.delete(job)
-            for uid in self.user_ids:
-                user = await db.get(User, UUID(uid))
-                if user:
-                    await db.delete(user)
             await db.commit()
-        try:
-            await self.client.post("/api/auth/logout")
-        except Exception:
-            pass
 
 
 @pytest.fixture
 async def admin_client():
     async with httpx.AsyncClient(base_url=BASE_URL, follow_redirects=True, timeout=60.0) as client:
-        r = await client.post("/api/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASS})
-        assert r.status_code == 200, f"admin login failed: {r.status_code} {r.text[:200]}"
         cleanup = Cleanup(client)
         yield client, cleanup
         await cleanup.run()
 
 
-@pytest.fixture
-async def second_user():
-    """A second user created directly in PostgreSQL (there is no registration API)."""
-    username = f"itest-{uuid.uuid4().hex[:10]}@example.com"
-    password = uuid.uuid4().hex  # never printed
-    async with SessionFactory() as db:
-        user = User(username=username, password_hash=hash_password(password))
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-        uid = str(user.id)
-    client = httpx.AsyncClient(base_url=BASE_URL, follow_redirects=True, timeout=60.0)
-    r = await client.post("/api/auth/login", json={"username": username, "password": password})
-    assert r.status_code == 200, "second user login failed"
-    cleanup = Cleanup(client)
-    cleanup.track_user(uid)
-    try:
-        yield client, cleanup, username, uid
-    finally:
-        await cleanup.run()
-        await client.aclose()
-
-
-async def _admin_id(client: httpx.AsyncClient) -> str:
-    r = await client.get("/api/auth/me")
+async def _local_id(client: httpx.AsyncClient) -> str:
+    r = await client.get("/api/settings/readiness")
     assert r.status_code == 200
-    return r.json()["id"]
-
-
-# --------------------------------------------------------------------------- auth
-
-
-async def test_auth_login_logout_me_and_session_rows():
-    async with httpx.AsyncClient(base_url=BASE_URL, follow_redirects=True, timeout=30.0) as anon:
-        for url in (
-            "/api/auth/me",
-            "/api/conversations",
-            "/api/projects",
-            "/api/incidents",
-            "/api/knowledge/documents",
-            "/api/settings/readiness",
-            "/api/settings/tool-contracts",
-        ):
-            assert (await anon.get(url)).status_code == 401, url
-        assert (await anon.post("/api/auth/login", json={"username": ADMIN_USER, "password": "definitely-wrong"})).status_code == 401
-        assert (await anon.post("/api/auth/logout")).status_code == 200  # no-op without a session
-
-    async with httpx.AsyncClient(base_url=BASE_URL, follow_redirects=True, timeout=30.0) as client:
-        r = await client.post("/api/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASS})
-        assert r.status_code == 200
-        body = r.json()
-        assert body["username"] == ADMIN_USER
-
-        token = client.cookies.get("oncall_session")
-        assert token
-
-        r = await client.get("/api/auth/me")
-        assert r.status_code == 200
-        assert r.json()["id"] == body["id"] and r.json()["username"] == ADMIN_USER
-
-        # DB: a session row holding the sha256 token hash exists and is unexpired
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
-        row = await _scalar(select(Session).where(Session.token_hash == token_hash))
-        assert row is not None
-        assert row.expires_at > datetime.now().astimezone()
-
-        r = await client.post("/api/auth/logout")
-        assert r.status_code == 200
-        assert (await client.get("/api/auth/me")).status_code == 401
-        # DB: the session row was deleted
-        assert await _scalar(select(Session).where(Session.token_hash == token_hash)) is None
+    async with SessionFactory() as db:
+        user = await db.scalar(select(User).order_by(User.created_at.asc()).limit(1))
+    assert user is not None
+    return str(user.id)
 
 
 async def test_health_is_public():
@@ -269,10 +184,10 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
     pid = cleanup.track_project(p["id"])
     assert p["name"] == name
 
-    # DB row exists and is owned by admin
-    admin_id = await _admin_id(client)
+    # DB row exists and is owned by the local workspace
+    local_id = await _local_id(client)
     row = await _scalar(select(Project).where(Project.id == UUID(pid)))
-    assert row is not None and str(row.user_id) == admin_id and row.name == name
+    assert row is not None and str(row.user_id) == local_id and row.name == name
 
     # list contains it
     assert pid in [x["id"] for x in (await client.get("/api/projects")).json()]
@@ -350,36 +265,6 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
     assert (await client.post(f"/api/projects/{pid}/test")).status_code == 404
 
 
-async def test_projects_owner_scope_and_unauthenticated(admin_client, second_user):
-    client, cleanup = admin_client
-    sclient, scleanup, _, _ = second_user
-
-    apid = cleanup.track_project((await _create_project(client, f"itest-admin-{uuid.uuid4().hex[:8]}", _cleanup=cleanup))["id"])
-    spid = scleanup.track_project((await _create_project(sclient, f"itest-user2-{uuid.uuid4().hex[:8]}", _cleanup=scleanup))["id"])
-
-    # admin cannot touch user2's project
-    assert (await client.get(f"/api/projects/{spid}")).status_code == 404
-    # FastAPI validates the request body before the ownership check; an
-    # incomplete update payload is therefore a client-side 422.
-    assert (await client.put(f"/api/projects/{spid}", json={"name": "x", "poll_interval": 60})).status_code == 422
-    assert (await client.delete(f"/api/projects/{spid}")).status_code == 404
-    assert (await client.post(f"/api/projects/{spid}/test")).status_code == 404
-    assert (await client.get(f"/api/projects/{spid}/snapshot")).status_code == 404
-    assert (await client.get("/api/monitoring/metrics", params={"project_id": spid, "metric_key": "x"})).status_code == 404
-    assert (await client.post("/api/dev/incidents/trigger", json={"project_id": spid})).status_code == 404
-
-    # user2 cannot touch admin's project
-    assert (await sclient.get(f"/api/projects/{apid}")).status_code == 404
-    assert (await sclient.delete(f"/api/projects/{apid}")).status_code == 404
-    assert (await sclient.post(f"/api/projects/{apid}/test")).status_code == 404
-
-    # each user's list is scoped
-    admin_ids = [x["id"] for x in (await client.get("/api/projects")).json()]
-    user2_ids = [x["id"] for x in (await sclient.get("/api/projects")).json()]
-    assert apid in admin_ids and spid not in admin_ids
-    assert spid in user2_ids and apid not in user2_ids
-
-
 # ------------------------------------------------------------------- conversations
 
 
@@ -397,10 +282,10 @@ async def test_conversations_crud_search_archive_messages_stream(admin_client):
     assert rb.status_code == 200
     cid_b = cleanup.track_conversation(rb.json()["id"])
 
-    # DB rows owned by admin
-    admin_id = await _admin_id(client)
+    # DB rows owned by the local workspace
+    local_id = await _local_id(client)
     ca = await _scalar(select(Conversation).where(Conversation.id == UUID(cid_a)))
-    assert ca is not None and str(ca.user_id) == admin_id and ca.title == title_a and str(ca.project_id) == pid
+    assert ca is not None and str(ca.user_id) == local_id and ca.title == title_a and str(ca.project_id) == pid
 
     # list + search
     ids = [c["id"] for c in (await client.get("/api/conversations")).json()]
@@ -453,30 +338,6 @@ async def test_conversations_crud_search_archive_messages_stream(admin_client):
     assert (await client.get(f"/api/conversations/{cid_b}/messages")).status_code == 404
     assert (await client.delete(f"/api/conversations/{cid_b}")).status_code == 404
     assert await _scalar(select(Conversation).where(Conversation.id == UUID(cid_b))) is None
-
-
-async def test_conversations_owner_scope(admin_client, second_user):
-    client, cleanup = admin_client
-    sclient, scleanup, _, _ = second_user
-    acid = cleanup.track_conversation((await client.post("/api/conversations", json={"title": f"admin-conv-{uuid.uuid4().hex[:8]}"})).json()["id"])
-    scid = scleanup.track_conversation((await sclient.post("/api/conversations", json={"title": f"user2-conv-{uuid.uuid4().hex[:8]}"})).json()["id"])
-
-    # admin cannot touch user2's conversation
-    assert (await client.patch(f"/api/conversations/{scid}", json={"title": "x"})).status_code == 404
-    assert (await client.delete(f"/api/conversations/{scid}")).status_code == 404
-    assert (await client.get(f"/api/conversations/{scid}/messages")).status_code == 404
-    assert (await client.post(f"/api/conversations/{scid}/messages:stream", json={"content": "hi"})).status_code == 404
-
-    # user2 cannot touch admin's conversation
-    assert (await sclient.patch(f"/api/conversations/{acid}", json={"title": "x"})).status_code == 404
-    assert (await sclient.delete(f"/api/conversations/{acid}")).status_code == 404
-    assert (await sclient.get(f"/api/conversations/{acid}/messages")).status_code == 404
-
-    # lists are scoped
-    admin_ids = [c["id"] for c in (await client.get("/api/conversations")).json()]
-    user2_ids = [c["id"] for c in (await sclient.get("/api/conversations")).json()]
-    assert acid in admin_ids and scid not in admin_ids
-    assert scid in user2_ids and acid not in user2_ids
 
 
 # ----------------------------------------------------------------------- incidents
@@ -583,36 +444,6 @@ async def test_incidents_lifecycle_via_dev_trigger(admin_client):
         await db.commit()
 
 
-async def test_incidents_owner_scope(admin_client, second_user):
-    client, cleanup = admin_client
-    sclient, scleanup, _, _ = second_user
-    spid = scleanup.track_project((await _create_project(sclient, f"itest-inc-user2-{uuid.uuid4().hex[:8]}", _cleanup=scleanup))["id"])
-    r = await sclient.post("/api/dev/incidents/trigger", json={"project_id": spid, "metric_key": "zz.test.synthetic", "value": 3000.0})
-    assert r.status_code == 200
-    iid = r.json()["incident_id"]
-    icid = r.json()["conversation_id"]
-    scleanup.track_conversation(icid)
-
-    # admin cannot see or act on user2's incident
-    assert (await client.get(f"/api/incidents/{iid}")).status_code == 404
-    assert (await client.get(f"/api/incidents/{iid}/trace")).status_code == 404
-    assert (await client.post(f"/api/incidents/{iid}/investigate")).status_code == 404
-    assert (await client.post(f"/api/incidents/{iid}/resolve")).status_code == 404
-    assert (await client.post(f"/api/incidents/{iid}/conversation")).status_code == 404
-    assert (await client.post(f"/api/dev/incidents/{iid}/recover")).status_code == 404
-    assert iid not in [x["id"] for x in (await client.get("/api/incidents")).json()]
-
-    # user2 can see it
-    assert (await sclient.get(f"/api/incidents/{iid}")).status_code == 200
-
-    # drop the dev-enqueued 'initial' investigation job referencing this incident
-    async with SessionFactory() as db:
-        jobs = (await db.scalars(select(BackgroundJob).where(BackgroundJob.payload["incident_id"].astext == iid))).all()
-        for job in jobs:
-            await db.delete(job)
-        await db.commit()
-
-
 # ----------------------------------------------------------------------- knowledge
 
 
@@ -635,10 +466,10 @@ async def test_knowledge_documents_upload_jobs_reindex_delete(admin_client):
     assert r2.status_code == 200
     assert r2.json()["version_id"] == vid and r2.json()["job_id"] == jid
 
-    # DB rows: document (admin-owned), version with 64-hex checksum, rag_ingest job
-    admin_id = await _admin_id(client)
+    # DB rows: document (local-workspace-owned), version with 64-hex checksum, rag_ingest job
+    local_id = await _local_id(client)
     doc = await _scalar(select(KnowledgeDocument).where(KnowledgeDocument.title == filename))
-    assert doc is not None and str(doc.user_id) == admin_id
+    assert doc is not None and str(doc.user_id) == local_id
     cleanup.track_document(str(doc.id))
     ver = await _scalar(select(KnowledgeDocumentVersion).where(KnowledgeDocumentVersion.id == UUID(vid)))
     assert ver is not None and ver.document_id == doc.id and len(ver.checksum) == 64
@@ -670,50 +501,6 @@ async def test_knowledge_documents_upload_jobs_reindex_delete(admin_client):
     assert await _scalar(select(KnowledgeDocument).where(KnowledgeDocument.id == doc.id)) is None
     assert (await client.delete(f"/api/knowledge/documents/{doc.id}")).status_code == 404
     assert str(doc.id) not in [d["id"] for d in (await client.get("/api/knowledge/documents")).json()]
-
-
-async def test_knowledge_owner_scope_and_errors(admin_client, second_user):
-    client, cleanup = admin_client
-    sclient, scleanup, _, _ = second_user
-    spid = scleanup.track_project((await _create_project(sclient, f"itest-kd-user2-{uuid.uuid4().hex[:8]}", _cleanup=scleanup))["id"])
-
-    # scope to another user's project -> 404; malformed scope -> 400; bad ext -> 400
-    r = await client.post(
-        "/api/knowledge/documents",
-        files={"file": (f"bad-scope-{uuid.uuid4().hex[:8]}.md", b"# x", "text/markdown")},
-        data={"project_scope": spid},
-    )
-    assert r.status_code == 404
-    r = await client.post(
-        "/api/knowledge/documents",
-        files={"file": (f"bad-scope-uuid-{uuid.uuid4().hex[:8]}.md", b"# x", "text/markdown")},
-        data={"project_scope": "not-a-uuid"},
-    )
-    assert r.status_code == 400
-    r = await client.post(
-        "/api/knowledge/documents",
-        files={"file": (f"bad-ext-{uuid.uuid4().hex[:8]}.exe", b"MZ", "application/octet-stream")},
-    )
-    assert r.status_code == 400
-
-    # user2 uploads a document; admin cannot see, delete or reindex it
-    r = await sclient.post(
-        "/api/knowledge/documents",
-        files={"file": (f"user2-doc-{uuid.uuid4().hex[:8]}.md", b"# u2", "text/markdown")},
-    )
-    assert r.status_code == 200
-    up = r.json()
-    u2_jid = up["job_id"]
-    u2_docs = (await sclient.get("/api/knowledge/documents")).json()
-    u2_doc_id = u2_docs[0]["id"]
-    scleanup.track_document(u2_doc_id)
-    scleanup.track_job(u2_jid)
-
-    admin_doc_ids = [d["id"] for d in (await client.get("/api/knowledge/documents")).json()]
-    assert u2_doc_id not in admin_doc_ids
-    assert (await client.delete(f"/api/knowledge/documents/{u2_doc_id}")).status_code == 404
-    assert (await client.post(f"/api/knowledge/documents/{u2_doc_id}/reindex")).status_code == 404
-    assert (await client.get(f"/api/knowledge/jobs/{u2_jid}")).status_code == 404
 
 
 # ------------------------------------------------------------------------ settings

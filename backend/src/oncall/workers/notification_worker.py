@@ -39,7 +39,7 @@ async def loop() -> None:
 
 def run() -> None:
     settings = get_settings()
-    configure_logging(settings.log_level, settings.log_dir, settings.log_retention_days)
+    configure_logging(settings.log_level, settings.log_dir, settings.log_retention_days, 'notification-worker')
     asyncio.run(loop())
 
 

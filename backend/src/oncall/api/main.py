@@ -14,7 +14,6 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
-    Response,
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,8 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.api.deps import current_user
 from oncall.application.agent_service import AgentService
-from oncall.application.auth_service import AuthService
 from oncall.application.conversation_service import ConversationService
+from oncall.application.workspace_service import ensure_local_user
 from oncall.application.dtos import (
     ChatMessageDTO,
     ConversationCreateDTO,
@@ -37,7 +36,6 @@ from oncall.application.dtos import (
     MetricsSourceDTO,
     MonitoredServerCreateDTO,
     MonitoredServerDTO,
-    PasswordChangeDTO,
     ProjectCreateDTO,
     ProjectRuntimeConfig,
     PythonProjectOnboardDTO,
@@ -69,7 +67,7 @@ from oncall.infrastructure.db.models import (
 from oncall.infrastructure.db.session import SessionFactory, get_session
 
 logger=logging.getLogger(__name__)
-s=get_settings();configure_logging(s.log_level, s.log_dir, s.log_retention_days)
+s=get_settings();configure_logging(s.log_level, s.log_dir, s.log_retention_days, 'api')
 
 def _uuid(value, what='id'):
     """Parse a path/query UUID; malformed ids are 404, matching the routes' semantics."""
@@ -82,7 +80,7 @@ def _uuid(value, what='id'):
 
 async def _collector_check(server:MonitoredServerDTO)->dict:
     if not server.collector_url:
-        return {'ok':False,'error':'未配置 Oncall Collector 地址'}
+        return {'ok':False,'error':'未配置 PulseOps Collector 地址'}
     try:
         async with httpx.AsyncClient(timeout=8,trust_env=False) as client:
             response=await client.get(server.collector_url.rstrip('/')+'/health',headers={'X-Oncall-Token':server.collector_token or ''})
@@ -104,8 +102,8 @@ async def lifespan(app:FastAPI):
     except Exception as e:
         app.state.checkpointer_error=str(e)
         logger.error('langgraph checkpointer unavailable: %s', e)
-    async with SessionFactory() as db: await AuthService(db).ensure_admin()
-    logger.info('admin account ensured')
+    async with SessionFactory() as db: await ensure_local_user(db)
+    logger.info('local workspace ready')
     app.state.feishu_ws_thread=None
     if s.feishu_enabled:
         try:
@@ -124,8 +122,8 @@ async def lifespan(app:FastAPI):
     logger.info('stopping oncall api')
     if getattr(app.state,'checkpointer_cm',None):await app.state.checkpointer_cm.__aexit__(None,None,None)
 
-app=FastAPI(title='Oncall AI SRE',version='1.0.0',lifespan=lifespan)
-app.add_middleware(CORSMiddleware,allow_origins=[s.web_origin],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
+app=FastAPI(title='PulseOps · 巡脉智能运维平台',version='1.0.0',lifespan=lifespan)
+app.add_middleware(CORSMiddleware,allow_origins=[s.web_origin],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
 
 @app.middleware('http')
 async def request_id_middleware(request:Request,call_next):
@@ -155,34 +153,6 @@ async def health(request:Request):
         db_error=str(exc)
         logger.error('health check database probe failed: %s', exc)
     return {'ok':db_ok,'database':db_ok,'database_error':db_error,'checkpointer':bool(request.app.state.checkpointer),'checkpointer_error':getattr(request.app.state,'checkpointer_error',None),'feishu_ws_error':getattr(request.app.state,'feishu_ws_error',None)}
-
-@app.post('/api/auth/login')
-async def login(payload:dict,request:Request,response:Response,db:AsyncSession=Depends(get_session)):
-    username=payload.get('username','')
-    result=await AuthService(db).login(username,payload.get('password',''))
-    if not result:
-        logger.info('login failed for user %s', username)
-        raise HTTPException(401,'invalid credentials')
-    user,token=result
-    logger.info('login succeeded for user %s', user.username)
-    response.set_cookie('oncall_session',token,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=s.session_days*86400);return {'id':str(user.id),'username':user.username}
-
-@app.post('/api/auth/logout')
-async def logout(response:Response,request:Request,db:AsyncSession=Depends(get_session)):
-    await AuthService(db).logout(request.cookies.get('oncall_session'));response.delete_cookie('oncall_session');return {'ok':True}
-
-@app.post('/api/auth/password')
-async def change_password(dto:PasswordChangeDTO,request:Request,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
-    token=request.cookies.get('oncall_session')
-    ok=await AuthService(db).change_password(user,dto.current_password,dto.new_password,token)
-    if not ok:raise HTTPException(400,'current password is incorrect')
-    logger.info('password changed for user %s', user.username)
-    return {'ok':True,'message':'password changed; other sessions were signed out'}
-
-@app.get('/api/auth/me')
-async def me(user=Depends(current_user)):
-    return {'id':str(user.id),'username':user.username}
-
 
 @app.get('/api/servers')
 async def list_servers(user=Depends(current_user),db:AsyncSession=Depends(get_session)):
@@ -657,7 +627,7 @@ async def settings_readiness(user=Depends(current_user)):
             'default_receive_id_configured':bool(s.feishu_default_receive_id),
             'auto_bind_supported':True,
         },
-        'security':{'secret_master_key_configured':bool(s.secret_master_key),'default_admin_password_in_use':s.admin_password=='change-me-now'},
+        'security':{'secret_master_key_configured':bool(s.secret_master_key)},
         'storage':{'database':'postgresql' if s.database_url.startswith('postgresql') else 'other','milvus_uri':s.milvus_uri,'data_dir':str(s.data_dir)},
     }
 

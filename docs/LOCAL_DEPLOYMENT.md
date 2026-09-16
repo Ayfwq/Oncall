@@ -1,6 +1,6 @@
-# Local Deployment — Oncall AI SRE
+# Local Deployment — PulseOps · 巡脉智能运维平台
 
-本指南覆盖在 Windows 本机从零部署 Oncall 的完整步骤。架构为**模块化单体 + 多进程**：PostgreSQL/Milvus 等基础设施跑在 Docker，Oncall 的 4 个 Python 进程跑在 Windows 宿主机；被监控项目通过远程服务器的 exporter、健康检查和 `/metrics` 接入。
+本指南覆盖在 Windows 本机从零部署 PulseOps 的完整步骤。架构为**模块化单体 + 多进程**：PostgreSQL/Milvus 等基础设施跑在 Docker，PulseOps 的 4 个 Python 进程跑在 Windows 宿主机；被监控项目通过远程服务器的 exporter、健康检查和 `/metrics` 接入。平台默认使用单工作区免登录模式。
 
 ## 0. 前置条件
 
@@ -21,7 +21,6 @@ Copy-Item .env.example .env
 
 ```env
 ONCALL_SECRET_MASTER_KEY=<随机长密钥>
-ONCALL_ADMIN_PASSWORD=<新管理员密码>
 ```
 
 真实 LLM（可选；缺省为 Mock Provider，可离线联调工程链路）：
@@ -56,7 +55,6 @@ Compose 仅运行 PostgreSQL / Milvus / etcd / MinIO。
 ```powershell
 uv sync --all-extras
 uv run alembic -c backend/alembic.ini upgrade head
-uv run oncall-init-admin
 ```
 
 ## 4. 前端
@@ -120,7 +118,9 @@ Web  http://localhost:5173
 API  http://127.0.0.1:9900
 ```
 
-登录账号：`.env` 中 `ONCALL_ADMIN_PASSWORD` 对应的管理员（用户名 `admin`）。
+打开 Web 地址即可进入 PulseOps，不需要登录账号或密码。
+
+免登录模式默认面向本机或可信内网使用；如果要暴露到公网，请先在反向代理或网络边界层补充访问控制。
 
 ## 8. 常见问题
 

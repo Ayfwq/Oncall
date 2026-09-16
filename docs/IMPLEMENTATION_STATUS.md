@@ -1,6 +1,6 @@
 # Oncall 实现状态矩阵
 
-生成日期：2026-08-19
+生成日期：2026-09-16
 
 状态定义：
 
@@ -15,16 +15,16 @@
 | Conversation / Message | DONE（Real E2E） | 创建/搜索/归档/删除 + 重启持久化 |
 | Context Summary（防失忆） | DONE（Real E2E） | 45 条消息触发真实 LLM 摘要，二次压缩 no-op |
 | Unified OncallAgent（LangGraph） | DONE（Real E2E） | PostgreSQL checkpointer + 真实 LLM + 流式 token |
-| 4 Read-only Tools | DONE（Code + Offline） | 当前指标、指标历史、服务健康、知识库 |
+| 8 Read-only Tools | DONE（Code + Offline） | 事故上下文、当前指标、批量历史、服务健康、日志、数据库、容器运行资源、知识库；参数校验、项目隔离与调用审计齐全 |
 | Monitoring Engine | DONE（Real E2E） | 多项目真实采集 + detector 状态机 |
 | 远程 Python 41/47 signals | DONE（Code + Offline） | 41 个基础远程指标（含日志与 PostgreSQL）；配置 GPU 后增加 6 个 GPU 指标；采集路径已做 allow-list |
 | Python 快速接入 | DONE（Code + Offline） | 创建页/`POST /api/projects/onboard/python` 绑定服务器、健康检查和 Prometheus，并自动生成基础规则 |
 | Prometheus 应用指标 | DONE（Code + Offline） | 多源抓取时间隔离、请求加权错误率、RPS/P95/P99/可用性 |
 | 历史基线规则 | DONE（Code + Offline） | threshold/baseline/hybrid，持久化正常窗口，异常值不回写基线 |
 | NVIDIA GPU 主机指标 | DONE（Code + Offline） | 配置 DCGM URL 后加入 6 项；无 GPU 时不进入规则 |
-| 采集 Integrations | DONE（Code + Offline） | 只保留 server/service/prometheus 三条远程采集路径 |
+| 采集 Integrations | DONE（Code + Offline） | server/service/prometheus/observability 四条远程采集路径；日志、数据库和运行资源由受 Token 保护的 Collector 提供 |
 | Rule State Machine | DONE（Real E2E） | hysteresis + PG 持久化 + fresh-session 重启恢复 |
-| Incident Manager | DONE（Real E2E） | FIRING→Resolved→再异常 E2E + severity 升级重调查 |
+| Incident Manager | DONE（Real E2E） | FIRING→Resolved→再异常 E2E + severity 升级重调查；首告、事故会话与调查任务同事务提交 |
 | Durable Job Queue | DONE（Real E2E） | PG lease/reclaim + 并发删除不崩 worker（Core UPDATE 幂等） |
 | Evidence / Diagnosis | DONE（Real E2E） | 真实 LLM 报告 + Incident 被删时的 FK 兜底 |
 | ToolRun / RetrievalTrace | DONE（Real E2E） | trace 持久化 + RAG citation refs |
@@ -44,7 +44,7 @@
 | Real LLM E2E | DONE（Real E2E） | 见 RELEASE_VALIDATION.md |
 | Real Feishu E2E | **BLOCKED** | 无飞书 App ID/Secret/receive_id |
 | AutoGEO 实机采集 | **BLOCKED** | 本机不存在 `D:\GEO` 应用 |
-| 生产 Embedding / Rerank | DONE（Real API） | 硅基流动 BGE-M3 + bge-reranker-v2-m3 API 通过；待服务启动后重建唯一索引 |
+| 生产 Embedding / Rerank | DONE（Real API） | 硅基流动 BGE-M3 + bge-reranker-v2-m3 API 已通过；本机 RAG 回归索引已重建，生产部署后按目标知识库执行一次重建 |
 
 ## 结论
 

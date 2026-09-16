@@ -36,16 +36,9 @@ class User(Base):
     __tablename__ = 'users'
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     username: Mapped[str] = mapped_column(String(120), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-
-
-class Session(Base):
-    __tablename__ = 'sessions'
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # Kept only for compatibility with existing databases. PulseOps runs as a
+    # single local workspace and never reads or verifies this legacy field.
+    password_hash: Mapped[str] = mapped_column(Text, default='auth-disabled')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

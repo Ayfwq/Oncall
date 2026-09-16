@@ -1,9 +1,19 @@
-# Release Validation — Oncall AI SRE
+# Release Validation — PulseOps · 巡脉智能运维平台
 
-生成时间：2026-08-19
+初始验证：2026-08-19；最新复验：2026-09-16
 环境：Windows 本地开发机（Docker Desktop / WSL2 Linux 容器）
 
 > 本文件只记录**在本机真实执行过**的命令与结果。未执行的项（真实飞书、AutoGEO 实机、生产 Embedding/Rerank）在文末单列，不做任何“视同通过”的推断。
+
+## 最新复验（2026-09-16）
+
+- 后端全量测试：**106 passed in 68.72s**（0 失败）。
+- 前端：`vue-tsc -b && vite build` 通过。
+- 在线 API：数据库、LangGraph Checkpointer 和 `/api/settings/tool-contracts` 正常，工具契约为 8 个。
+- Collector：`/health`、数据库诊断和 `/v1/runtime/diagnose` 正常；实际读取 Docker 容器 CPU、内存、重启和 OOM 字段。
+- API、Monitoring Worker、Agent Worker、Notification Worker、RAG Worker 和 Collector 已按当前代码重启。
+- 并发删除保护：Agent 审计写入与 RAG 入库在父对象被删除时安全降级，不再阻断 Worker。
+- 首次 Incident 的事件、会话、飞书 outbox 和调查任务同事务提交；空知识库不会调用远程 rerank。
 
 ## 1. 环境与依赖
 
@@ -23,9 +33,8 @@ uv sync --all-extras
 docker compose up -d
 # → postgres(healthy) / milvus / etcd / minio 全部 up
 uv run alembic -c backend/alembic.ini upgrade head
-# → 33 张业务表 + alembic_version=0001
-uv run oncall-init-admin
-# → 管理员账号就绪
+# → 33 张业务表 + 当前 Alembic head（0004）
+# → 数据库结构就绪；PulseOps 自动准备本地工作区
 ```
 
 ## 2. 真实 LLM（OpenAI-compatible）
@@ -37,7 +46,7 @@ uv run oncall-init-admin
 | 用例 | 结果 |
 |---|---|
 | `POST /v1/chat/completions` 自述 | 200，正常返回 |
-| 工具调用（`检查宿主机 CPU 和内存`） | Agent 正确返回 `query_host_metrics` 工具调用并基于真实返回作答 |
+| 工具调用（`检查宿主机 CPU 和内存`） | 当前 Agent 使用 `query_current_metrics` 读取真实指标并作答（旧验证记录中的 `query_host_metrics` 已移除） |
 | 无项目绑定时的诚实降级 | 工具返回“需要绑定 Project”，Agent 明确说明“未获取到数据”，**未编造指标** |
 
 ## 3. 自动化测试（pytest，真实 PostgreSQL + Milvus + 本机集成）
@@ -46,14 +55,14 @@ uv run oncall-init-admin
 .venv\Scripts\python.exe -m pytest backend/tests -q
 ```
 
-结果：**76 passed in 55.31s**（0 失败）。
+结果：**106 passed in 68.72s**（0 失败）。
 
 覆盖范围（均为真实执行）：
 
-- **API 集成（12）**：Auth、Projects CRUD、Conversations、Incidents（trigger/investigate/resolve/trace）、Knowledge（upload/job/reindex/delete）、Settings、401/404、畸形 UUID 全量 404。
-- **监控（36）**：6 类 Integration 真实采集（Host CPU/内存/磁盘、Process、Docker 容器状态、PostgreSQL 连接/慢查询/锁、HTTP 服务健康、日志文件统计与正则扫描）；32 baseline signals；Detector 状态机（NORMAL→PENDING→FIRING→RECOVERING→NORMAL + hysteresis + RECOVERING 再异常回 FIRING）；Incident 生命周期 + fingerprint + 重启恢复 + severity 升级重新调查。
-- **RAG（12）**：Milvus collection 实体、RRF、citation 结构、ToolRegistry→RetrievalTrace 持久化、embedding 契约、7 个参数化检索回归。
-- **单元（16）**：信号契约、tool 契约、hysteresis、fingerprint、RRF、脱敏、Mock 安全决策、飞书线程解析、通知重试/cooldown 策略、路由契约。
+- 覆盖 API 集成：Projects CRUD、Conversations、Incidents（trigger/investigate/resolve/trace）、Knowledge（upload/job/reindex/delete）、Settings、404 和畸形 UUID。
+- 覆盖监控采集与规则：Host/Process/Docker/PostgreSQL/HTTP/日志、基线与 hysteresis 状态机、Incident 生命周期、重启恢复、severity 升级重新调查和首次告警事务一致性。
+- 覆盖 RAG：Milvus collection、RRF、citation、ToolRegistry→RetrievalTrace、embedding/rerank 契约和参数化检索回归；空知识库跳过远程 rerank。
+- 覆盖 Agent/渠道契约：8 个工具、参数校验、项目隔离、飞书线程/通知重试、路由、脱敏和 Mock 安全降级。
 
 ## 4. RAG 端到端（Docling → Milvus → RRF → Rerank → Citation）
 

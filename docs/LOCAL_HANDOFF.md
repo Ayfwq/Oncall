@@ -1,6 +1,6 @@
-# Oncall AI SRE - CodeX 本地联调与 Release 收口手册
+# PulseOps · 巡脉智能运维平台 - CodeX 本地联调与 Release 收口手册
 
-日期：2026-08-18
+日期：2026-09-16（当前代码基线）
 
 ## 1. CodeX 的任务边界
 
@@ -16,7 +16,6 @@ CodeX 的主要职责是：在用户真实 Windows 开发机安装依赖、启�
 
 ```env
 ONCALL_SECRET_MASTER_KEY=<random-secret>
-ONCALL_ADMIN_PASSWORD=<strong-password>
 ```
 
 真实 LLM（OpenAI-compatible 示例）：
@@ -39,7 +38,6 @@ Copy-Item .env.example .env
 docker compose up -d
 uv sync --all-extras
 uv run alembic -c backend/alembic.ini upgrade head
-uv run oncall-init-admin
 
 cd frontend
 npm install
@@ -170,7 +168,7 @@ ONCALL_MODEL_PROVIDER=mock
 
 ## 11. 后端 API Release Gate
 
-当前代码定义 33 个路由，已有静态路由契约测试，但在本地必须再用真 PostgreSQL 做 HTTP 级测试。至少覆盖：Auth、Projects、Conversations/Messages、Incidents/Trace、Metrics、Knowledge/Jobs、Settings、dev synthetic incident（development only）。
+当前代码定义 29 个业务路由，已有静态路由契约测试，但在本地必须再用真 PostgreSQL 做 HTTP 级测试。至少覆盖：Projects、Conversations/Messages、Incidents/Trace、Metrics、Knowledge/Jobs、Settings、dev synthetic incident（development only）。平台为单工作区免登录模式。
 
 推荐补充 `httpx.AsyncClient + ASGITransport` 或启动实际 API 的 integration tests；所有写接口测试后要检查 DB 实际行与 owner scope。
 

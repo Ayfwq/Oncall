@@ -10,8 +10,7 @@ import ast
 from pathlib import Path
 
 EXPECTED={
-('GET','/api/health'),('POST','/api/auth/login'),('POST','/api/auth/logout'),('GET','/api/auth/me'),
-('POST','/api/auth/password'),
+('GET','/api/health'),
 ('GET','/api/servers'),('POST','/api/servers'),('POST','/api/servers/test'),('PUT','/api/servers/{sid}'),('POST','/api/servers/{sid}/test'),('DELETE','/api/servers/{sid}'),
 ('GET','/api/conversations'),('POST','/api/conversations'),('PATCH','/api/conversations/{cid}'),('DELETE','/api/conversations/{cid}'),('GET','/api/conversations/{cid}/messages'),('POST','/api/conversations/{cid}/messages:stream'),
 ('GET','/api/projects'),('POST','/api/projects'),('POST','/api/projects/onboard/python'),('POST','/api/projects/onboard/python/test'),('PUT','/api/projects/{pid}'),('GET','/api/projects/{pid}'),('GET','/api/projects/{pid}/rules/defaults'),('DELETE','/api/projects/{pid}'),('POST','/api/projects/{pid}/test'),('POST','/api/projects/{pid}/metrics/discover'),('POST','/api/projects/{pid}/metrics/apply'),('GET','/api/projects/{pid}/snapshot'),

@@ -7,6 +7,8 @@ from oncall.bootstrap.config import get_settings
 
 class Reranker:
     async def rerank(self, query: str, items: list[dict], top_k: int = 5) -> list[dict]:
+        if not items:
+            return []
         s = get_settings()
         if not s.rerank_base_url or not s.rerank_api_key or not s.rerank_model:
             raise RuntimeError("remote reranker is not configured")

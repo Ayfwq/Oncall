@@ -82,5 +82,5 @@ async def loop()->None:
 
 def run()->None:
     s=get_settings()
-    configure_logging(s.log_level,s.log_dir,s.log_retention_days)
+    configure_logging(s.log_level,s.log_dir,s.log_retention_days,'monitor-worker')
     asyncio.run(loop())

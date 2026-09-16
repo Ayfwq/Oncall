@@ -1,7 +1,7 @@
 [project]
-name = "oncall-ai-sre"
+name = "pulseops"
 version = "1.0.0"
-description = "Local-first AI SRE platform with deterministic monitoring, incident investigation, RAG and Feishu/Web chat."
+description = "Local-first intelligent operations platform with deterministic monitoring, incident investigation, RAG and Feishu/Web chat."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -26,7 +26,6 @@ dependencies = [
   "torchvision==0.21.0",
   "pymilvus>=2.6,<2.7",
   "lark-oapi>=1.4,<2",
-  "argon2-cffi>=25,<26",
   "cryptography>=45,<46",
   "python-multipart>=0.0.20,<0.1",
   "aiofiles>=24,<25",
@@ -52,7 +51,6 @@ oncall-monitor-worker = "oncall.workers.monitor_worker:run"
 oncall-agent-worker = "oncall.workers.agent_worker:run"
 oncall-notification-worker = "oncall.workers.notification_worker:run"
 oncall-rag-worker = "oncall.workers.rag_worker:run"
-oncall-init-admin = "oncall.cli.init_admin:run"
 oncall-doctor = "oncall.cli.doctor:run"
 oncall-collector = "oncall.collector.app:run"
 

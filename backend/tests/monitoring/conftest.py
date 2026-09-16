@@ -12,7 +12,6 @@ import uuid
 
 import pytest
 from oncall.infrastructure.db.models import BackgroundJob, Incident, Project, User
-from oncall.security.passwords import hash_password
 from sqlalchemy import delete, select
 
 # Project root (backend/tests/monitoring/conftest.py -> repo root)
@@ -66,7 +65,7 @@ async def db(pg_ready, service_gate):
 async def test_user(db) -> User:
     """A dedicated user per test; deleted on teardown (cascades to all data)."""
     username = f"test_{uuid.uuid4().hex[:12]}"
-    user = User(username=username, password_hash=hash_password("test-password"))
+    user = User(username=username)
     db.add(user)
     await db.commit()
     await db.refresh(user)

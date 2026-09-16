@@ -6,19 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
 import httpx
 
-from oncall.bootstrap.config import get_settings
-
 API = "http://127.0.0.1:9900"
 DOCS_DIR = Path(__file__).parent / "docs"
-USERNAME = "admin"
-PASSWORD = os.environ.get("ONCALL_ADMIN_PASSWORD") or get_settings().admin_password
 
 DOCS = [
     "cpu-high-load-sop.md",
@@ -39,12 +34,6 @@ SEARCH_QUERIES = [
 
 def log(*args) -> None:
     print(f"[{time.strftime('%H:%M:%S')}]", *args, flush=True)
-
-
-async def login(client: httpx.AsyncClient) -> None:
-    r = await client.post(f"{API}/api/auth/login", json={"username": USERNAME, "password": PASSWORD})
-    r.raise_for_status()
-    log("login ok ->", r.json())
 
 
 async def upload(client: httpx.AsyncClient, path: Path) -> dict:
@@ -72,7 +61,6 @@ async def wait_job(client: httpx.AsyncClient, job_id: str, timeout: float = 180)
 
 async def main() -> None:
     async with httpx.AsyncClient(base_url=API, timeout=30) as client:
-        await login(client)
         log("uploading docs ...")
         jobs = []
         for name in DOCS:

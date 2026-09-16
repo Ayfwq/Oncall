@@ -9,7 +9,7 @@ the bot once.
 
 Open **https://open.feishu.cn/app** and sign in.
 
-1. **Create app** → **企业自建应用** → name it (e.g. "Oncall AI SRE") →
+1. **Create app** → **企业自建应用** → name it (e.g. "PulseOps") →
    create.
 2. Open the app → **凭证与基础信息** → copy the **App ID** (`cli_xxx`)
    and **App Secret** (you'll paste both into the script next).

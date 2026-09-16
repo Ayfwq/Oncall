@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
-import type { AuthUser, FeishuReceiveType, FeishuSettings, Readiness } from '../types'
+import type { FeishuReceiveType, FeishuSettings, Readiness } from '../types'
 
 interface FeishuForm {
   enabled: boolean
@@ -13,12 +13,9 @@ interface FeishuForm {
 }
 
 const readiness = ref<Readiness | null>(null)
-const me = ref<AuthUser | null>(null)
 const feishu = ref<FeishuForm>({ enabled: false, app_id: '', app_secret: '', app_secret_configured: false, default_receive_id: '', default_receive_id_type: 'chat_id' })
 const error = ref('')
 const message = ref('')
-const password = ref({ current_password: '', new_password: '', confirm_password: '' })
-const savingPassword = ref(false)
 const savingFeishu = ref(false)
 
 function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e) }
@@ -26,26 +23,12 @@ function errorText(e: unknown): string { return e instanceof Error ? e.message :
 async function load() {
   error.value = ''
   try {
-    const [r, m, f] = await Promise.all([
-      api<Readiness>('/settings/readiness'), api<AuthUser>('/auth/me'), api<FeishuSettings>('/settings/feishu'),
+    const [r, f] = await Promise.all([
+      api<Readiness>('/settings/readiness'), api<FeishuSettings>('/settings/feishu'),
     ])
     readiness.value = r
-    me.value = m
     feishu.value = { ...f, app_secret: '' }
   } catch (e) { error.value = errorText(e) }
-}
-
-async function changePassword() {
-  error.value = ''; message.value = ''
-  if (password.value.new_password.length < 6) { error.value = '新密码至少需要 6 位'; return }
-  if (password.value.new_password !== password.value.confirm_password) { error.value = '两次输入的新密码不一致'; return }
-  savingPassword.value = true
-  try {
-    const result = await api<{ ok: boolean; message: string }>('/auth/password', { method: 'POST', body: JSON.stringify(password.value) })
-    message.value = result.message || '密码已修改'
-    password.value = { current_password: '', new_password: '', confirm_password: '' }
-  } catch (e) { error.value = errorText(e) }
-  finally { savingPassword.value = false }
 }
 
 async function saveFeishu() {
@@ -74,7 +57,7 @@ onMounted(load)
 <template>
   <div class="page settings-page">
     <div class="page-head">
-      <div><h1>设置</h1><p class="sub">账号安全和飞书接入都可以在这里完成配置</p></div>
+      <div><h1>设置</h1><p class="sub">配置巡脉工作区、模型能力和飞书接入</p></div>
       <el-button @click="load">刷新</el-button>
     </div>
     <p v-if="error" style="color: var(--danger)">{{ error }}</p>
@@ -82,14 +65,9 @@ onMounted(load)
 
     <div class="settings-stack settings-forms">
       <div class="card">
-        <h3>登录管理</h3>
-        <p class="muted">当前账号：{{ me?.username || '加载中…' }}（本地管理员）</p>
-        <el-form label-position="top" @submit.prevent="changePassword">
-          <el-form-item label="当前密码"><el-input v-model="password.current_password" type="password" show-password /></el-form-item>
-          <el-form-item label="新密码"><el-input v-model="password.new_password" type="password" show-password placeholder="至少 6 位" /></el-form-item>
-          <el-form-item label="确认新密码"><el-input v-model="password.confirm_password" type="password" show-password /></el-form-item>
-          <el-button type="primary" :loading="savingPassword" @click="changePassword">修改密码</el-button>
-        </el-form>
+        <h3>本地工作区</h3>
+        <p class="muted">当前部署为单工作区模式，打开页面即可使用，无需登录或维护账户密码。</p>
+        <div style="margin-top: 14px"><span class="badge ok">已启用</span><span class="badge neutral" style="margin-left: 6px">免登录模式</span></div>
       </div>
 
       <div class="card">

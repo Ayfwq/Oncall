@@ -11,7 +11,7 @@ def test_has_single_remote_python_signal_contract():
 
 
 def test_has_only_remote_read_tools():
-    assert ALLOWED_TOOLS == {'query_current_metrics', 'query_metric_history', 'query_service_health', 'search_knowledge', 'search_logs', 'query_database_health'}
+    assert ALLOWED_TOOLS == {'query_incident_context', 'query_current_metrics', 'query_metric_history', 'query_service_health', 'search_knowledge', 'search_logs', 'query_database_health', 'query_runtime_resources'}
 
 
 def test_feishu_message_parser_preserves_incident_thread_anchor():

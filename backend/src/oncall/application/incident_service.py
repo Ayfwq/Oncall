@@ -7,7 +7,6 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from oncall.application.conversation_service import ConversationService
 from oncall.infrastructure.db.models import (
     Conversation,
     Incident,
@@ -153,22 +152,32 @@ class IncidentService:
             added_signal=True
         else:
             signal.state='firing';signal.severity=severity;signal.last_value=value;signal.last_seen=now;signal.recovered_at=None
-        await self.session.commit();await self.session.refresh(inc)
-        # Repairable initial pipeline: if the process crashes after committing the
-        # Incident but before queuing notification/investigation, the next firing
-        # observation fills in whichever durable records are missing.
+        # Keep the initial incident pipeline atomic.  A process restart between
+        # separate commits used to leave a durable Incident without its first
+        # Feishu notification or investigation job.  The rows below are now
+        # flushed into one transaction and committed together; the existing
+        # idempotency keys still make retries safe.
         project=await self.session.get(Project,project_id)
         project_name=getattr(project,'name','') or ''
         conv=await self.session.scalar(select(Conversation).where(Conversation.incident_id==inc.id).order_by(Conversation.created_at.asc()).limit(1))
         if conv is None and project is not None:
-            conv=await ConversationService(self.session).create(project.user_id,title=f'🚨 {anomaly_type}',project_id=project_id,incident_id=inc.id,type_='incident')
+            conv=Conversation(user_id=project.user_id,title=f'🚨 {anomaly_type}',project_id=project_id,incident_id=inc.id,type='incident')
+            self.session.add(conv)
+            await self.session.flush()
         initial_key=f'incident:{inc.id}:triggered'
         initial_note=await self.session.scalar(select(Notification.id).where(Notification.dedupe_key==initial_key))
         if initial_note is None:
             self._queue_alert(inc,anomaly_type,resource_key,severity,value,now,project_name,kind='triggered',dedupe_suffix='triggered')
-            await self.session.commit()
         if conv:
-            await JobQueue(self.session).enqueue('incident_investigate',{'incident_id':str(inc.id),'conversation_id':str(conv.id)},idempotency_key=f'incident_investigate:{inc.id}:initial',priority=20)
+            await JobQueue(self.session).enqueue(
+                'incident_investigate',
+                {'incident_id':str(inc.id),'conversation_id':str(conv.id)},
+                idempotency_key=f'incident_investigate:{inc.id}:initial',
+                priority=20,
+                commit=False,
+            )
+        await self.session.commit()
+        await self.session.refresh(inc)
         if not is_new and upgraded:
             project=await self.session.get(Project,project_id)
             self._queue_alert(inc,anomaly_type,resource_key,severity,value,now,getattr(project,'name','') or '',kind='escalated',dedupe_suffix=f'escalated:{severity}',prefix='🔺 **告警升级**\n\n')
@@ -267,12 +276,12 @@ class IncidentService:
         if reason=='manual_resolve':
             signal_rule_ids=list((await self.session.scalars(select(IncidentSignal.rule_id).where(IncidentSignal.incident_id==inc.id))).all())
             if not signal_rule_ids:
-                legacy_rule=await self.session.scalar(select(MonitoringRule).where(
+                matching_rule=await self.session.scalar(select(MonitoringRule).where(
                     MonitoringRule.project_id==inc.project_id,
                     MonitoringRule.metric_key==inc.anomaly_type,
                     MonitoringRule.resource_key==inc.resource_key,
                 ).order_by(MonitoringRule.id.asc()).limit(1))
-                signal_rule_ids=[legacy_rule.id] if legacy_rule else []
+                signal_rule_ids=[matching_rule.id] if matching_rule else []
             for signal_rule_id in signal_rule_ids:
                 rs=await self.session.get(MonitoringRuleState,signal_rule_id)
                 if rs:

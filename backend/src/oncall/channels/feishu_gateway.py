@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from oncall.application.agent_service import AgentService
 from oncall.application.conversation_service import ConversationService
+from oncall.application.workspace_service import ensure_local_user
 from oncall.channels.feishu_events import FeishuInboundMessage, parse_lark_message
 from oncall.infrastructure.db.models import (
     ChannelBinding,
@@ -26,7 +27,7 @@ class FeishuGateway:
     async def _first_user(self, db) -> User:
         user = await db.scalar(select(User).order_by(User.created_at.asc()).limit(1))
         if not user:
-            raise RuntimeError("Oncall has no local user. Run oncall-init-admin first.")
+            user = await ensure_local_user(db)
         return user
 
     async def _conversation_for_message(self, db, msg: FeishuInboundMessage) -> Conversation:
@@ -95,7 +96,7 @@ class FeishuGateway:
                 else:
                     conv=await self._conversation_for_message(db,msg)
                     state=await AgentService(db,self.checkpointer).run(conv.id,msg.text,channel='feishu')
-                    reply=state.get('final_response') or 'Oncall 未生成有效回复。'
+                    reply=state.get('final_response') or 'PulseOps 未生成有效回复。'
 
                 if msg.message_id and not await db.get(FeishuMessageLink,msg.message_id):
                     db.add(FeishuMessageLink(

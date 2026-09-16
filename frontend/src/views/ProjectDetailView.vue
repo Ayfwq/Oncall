@@ -154,7 +154,7 @@ onMounted(load)
           <div class="server-banner"><div class="server-icon">⌁</div><div><b>{{ cfg.server?.name || '未绑定服务器' }}</b><p>服务器采集器：{{ cfg.server?.node_metrics_url || '未配置' }}<span v-if="cfg.server?.gpu_metrics_url"> · 已配置 GPU</span></p></div><el-switch v-model="cfg.enabled" active-text="启用监控" /></div>
         </section>
 
-        <section class="card setup-card"><div class="section-title"><div><span class="step">2</span><div><h2>服务采集入口</h2><p>Oncall 会定时请求健康检查和指标地址；Docker 日志与数据库由 Collector 自动采集。</p></div></div></div>
+        <section class="card setup-card"><div class="section-title"><div><span class="step">2</span><div><h2>服务采集入口</h2><p>PulseOps 会定时请求健康检查和指标地址；Docker 日志与数据库由 Collector 自动采集。</p></div></div></div>
           <el-form-item label="健康检查地址（必填）"><el-input v-model="quick.healthUrl" placeholder="例如：https://stock.example.com/health" /></el-form-item><p class="hint">返回 2xx 且响应时间正常，代表服务探活通过；连续失败会触发告警。</p>
           <el-form-item label="Prometheus /metrics 地址（必填）"><el-input v-model="quick.metricsUrl" placeholder="例如：https://stock.example.com/metrics" /></el-form-item><p class="hint">必须能返回标准 Prometheus 文本格式；系统会从实际返回内容识别应用请求、延迟和 Python 进程指标。</p>
         </section>

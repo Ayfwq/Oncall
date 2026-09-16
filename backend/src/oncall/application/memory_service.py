@@ -33,7 +33,7 @@ class ConversationMemoryService:
         transcript='\n'.join(f'{m.role}: {m.content}' for m in old)
         seed=(latest.summary+'\n\n') if latest else ''
         prompt=(
-            '请把以下 Oncall 运维会话压缩成可供后续 Agent 使用的事实摘要。保留：用户目标、项目/服务名称、'
+            '请把以下 PulseOps 运维会话压缩成可供后续 Agent 使用的事实摘要。保留：用户目标、项目/服务名称、'
             '已经确认的故障事实、执行过的检查、结论、未解决问题；不要编造。\n\n'+seed+transcript
         )
         summary_text=await self.model.summarize(prompt)

@@ -9,7 +9,7 @@ if (!(Test-Path (Join-Path $venv 'oncall-api.exe'))) {
   exit 1
 }
 
-Write-Host "Starting Oncall processes in separate PowerShell windows..."
+Write-Host "Starting PulseOps processes in separate PowerShell windows..."
 foreach ($svc in @('oncall-api','oncall-monitor-worker','oncall-agent-worker','oncall-notification-worker','oncall-rag-worker')) {
   $exe = Join-Path $venv "$svc.exe"
   Start-Process powershell -ArgumentList '-NoExit','-Command',"Set-Location '$root'; & '$exe'"

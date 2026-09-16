@@ -20,7 +20,7 @@ async function upload() {
   busy.value = true; message.value = '上传并解析中…'
   try {
     const fd = new FormData(); fd.append('file', file.value)
-    const r = await fetch('/api/knowledge/documents', { method: 'POST', credentials: 'include', body: fd })
+    const r = await fetch('/api/knowledge/documents', { method: 'POST', body: fd })
     if (!r.ok) throw new Error(await r.text())
     const x = (await r.json()) as { job_id: string }
     message.value = '已上传，正在 Docling 解析并写入 Milvus…'

@@ -66,7 +66,7 @@ class FeishuClient:
         text=str(text)[:18000]
         card={
             'config':{'wide_screen_mode':True},
-            'header':{'template':template,'title':{'tag':'plain_text','content':'Oncall Incident 监测报告'}},
+            'header':{'template':template,'title':{'tag':'plain_text','content':'PulseOps Incident 监测报告'}},
             'elements':[{'tag':'markdown','content':text},{'tag':'note','elements':[{'tag':'plain_text','content':'可直接回复本消息，继续围绕本次告警追问'}]}],
         }
         return await self._send(receive_id,'interactive',card,receive_id_type)
@@ -75,7 +75,7 @@ class FeishuClient:
         template='red' if severity=='critical' else 'orange' if severity=='warning' else 'blue'
         card={
             'config':{'wide_screen_mode':True},
-            'header':{'template':template,'title':{'tag':'plain_text','content':f'Oncall Incident {title}'}},
+            'header':{'template':template,'title':{'tag':'plain_text','content':f'PulseOps Incident {title}'}},
             'elements':[{'tag':'markdown','content':str(text)[:18000]},{'tag':'note','elements':[{'tag':'plain_text','content':'可直接回复本消息，继续围绕本次告警追问'}]}],
         }
         return await self._reply(message_id,'interactive',card)
@@ -87,7 +87,7 @@ class FeishuClient:
         label={'critical':'严重','warning':'警告','info':'提示'}.get(severity,severity)
         card={
             'config':{'wide_screen_mode':True},
-            'header':{'template':template,'title':{'tag':'plain_text','content':f'🚨 Oncall 告警 · {label}'}},
+            'header':{'template':template,'title':{'tag':'plain_text','content':f'🚨 PulseOps 告警 · {label}'}},
             'elements':[{'tag':'markdown','content':str(text)[:18000]},
                         {'tag':'note','elements':[{'tag':'plain_text','content':'正在自动调查原因；可直接回复本消息继续追问'}]}],
         }
@@ -188,7 +188,7 @@ class FeishuOutboxSender:
                 await self.session.commit()
                 continue
             try:
-                text=n.payload.get('text') or f"Oncall Incident: {n.payload.get('summary','')}"
+                text=n.payload.get('text') or f"PulseOps Incident: {n.payload.get('summary','')}"
                 kind=n.payload.get('kind')
                 severity=n.payload.get('severity','warning')
                 if kind in ('diagnosis','escalated','resolved'):

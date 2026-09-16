@@ -5,8 +5,6 @@ BASE = 'http://127.0.0.1:9900'
 TARGETS = {'rfc9293-tcp.pdf', 'rfc9110-http-semantics.pdf', 'postgresql-17-manual.pdf'}
 
 c = httpx.Client(base_url=BASE, timeout=60)
-c.post('/api/auth/login', json={'username': 'admin', 'password': os.environ.get('ONCALL_ADMIN_PASSWORD') or 'oncall-local-dev'})
-
 seen = None
 for i in range(360):  # up to ~3 hours
     try:

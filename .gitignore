@@ -23,6 +23,7 @@ frontend/dist/
 logs/
 runtime-logs/
 frontend/frontend-build.log
+scripts/rag_e2e/results.json
 work/
 .deploy/
 .deploy_tmp/

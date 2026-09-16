@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from oncall.agent.prompts import DECISION_SCHEMA, STREAM_ANSWER_PROMPT, SYSTEM_PROMPT
 from oncall.bootstrap.config import get_settings
 from oncall.domain.schemas import AgentDecision, DiagnosisReport
+from oncall.monitoring.signals import SUPPORTED_SIGNALS
 
 
 class ModelProvider:
@@ -31,10 +32,16 @@ class MockProvider(ModelProvider):
         mode=context.get('mode','chat');called_keys=set(context.get('called_tools',[]));called={x.split(':',1)[0] for x in called_keys};msg=(context.get('user_message') or '').lower();incident=context.get('incident_context') or {}
         if mode=='chat':
             if context.get('intent') == 'casual_chat':
-                return AgentDecision(action='final',answer='你好，我是 Oncall AI SRE，可以协助回答运维问题、检索知识库，并在绑定项目后查询实时运行状态。')
-            realtime=any(k in msg for k in ['cpu','内存','memory','磁盘','gpu','进程','日志','docker','数据库','postgres','健康','health','指标','现在','当前'])
-            if realtime and context.get('project_id') and 'query_current_metrics' not in called:
-                return AgentDecision(action='tool',rationale='需要读取远程项目的真实运行状态',tool_name='query_current_metrics',tool_args={})
+                return AgentDecision(action='final',answer='你好，我是 PulseOps（巡脉智能运维平台）的 AI 助手，可以协助回答运维问题、检索知识库，并在绑定项目后查询实时运行状态。')
+            realtime=any(k in msg for k in ['cpu','内存','memory','磁盘','gpu','进程','日志','log','报错','docker','数据库','postgres','接口','api','健康','health','指标','现在','当前'])
+            if realtime and context.get('project_id'):
+                if any(k in msg for k in ['日志','log','报错','exception']):name,args='search_logs',{'since_minutes':30,'limit':200,'group_by_signature':True}
+                elif any(k in msg for k in ['数据库','postgres','锁','慢 sql','慢sql']):name,args='query_database_health',{}
+                elif any(k in msg for k in ['容器','docker','进程','oom','重启']):name,args='query_runtime_resources',{}
+                elif any(k in msg for k in ['接口','api','健康','health']):name,args='query_service_health',{}
+                else:name,args='query_current_metrics',{}
+                if name not in called:
+                    return AgentDecision(action='tool',rationale='需要读取远程项目的真实运行状态',tool_name=name,tool_args=args)
             if 'search_knowledge' not in called:
                 return AgentDecision(action='tool',rationale='先检索运维知识库',tool_name='search_knowledge',tool_args={'query':context.get('user_message','')})
             ev=context.get('evidence',[]);summary='；'.join(x.get('summary','') for x in ev[-3:]) or '知识库暂未提供可用内容'
@@ -44,20 +51,36 @@ class MockProvider(ModelProvider):
                 answer=f'基于当前可用信息：{summary}\n\n当前为通用运维问答模式。'
             return AgentDecision(action='final',answer=answer)
         if mode=='follow_up':
-            realtime=any(k in msg for k in ['现在','当前','cpu','内存','memory','gpu','进程','日志','指标','docker','数据库','health','健康','恢复'])
+            realtime=any(k in msg for k in ['现在','当前','cpu','内存','memory','gpu','进程','日志','log','报错','指标','docker','数据库','postgres','接口','api','health','健康','恢复'])
             if realtime and context.get('project_id'):
-                name='query_current_metrics'; args={}
+                if any(k in msg for k in ['日志','log','报错','exception']):name,args='search_logs',{'since_minutes':30,'limit':200,'group_by_signature':True}
+                elif any(k in msg for k in ['数据库','postgres','锁','慢 sql','慢sql']):name,args='query_database_health',{}
+                elif any(k in msg for k in ['容器','docker','进程','oom','重启']):name,args='query_runtime_resources',{}
+                elif any(k in msg for k in ['接口','api','健康','health']):name,args='query_service_health',{}
+                else:name,args='query_current_metrics',{}
                 if name not in called:return AgentDecision(action='tool',rationale='追问涉及实时状态，需要复查',tool_name=name,tool_args=args)
             prev=context.get('incident_context') or {};ev=context.get('evidence',[])
             summary='；'.join(x.get('summary','') for x in ev[-4:])
             return AgentDecision(action='final',answer=f"这是同一个 Incident 的后续追问。当前事故：{prev.get('summary','')}。已掌握证据：{summary or '暂无新增实时证据'}。如需确认当前状态，我可以继续调用只读工具复查。")
         # investigation/deep
-        sequence=['query_current_metrics','search_logs','query_database_health','search_knowledge']
+        sequence=['query_incident_context','query_current_metrics']
         anomaly=str(incident.get('anomaly_type',''))
-        if 'service.' in anomaly:sequence=['query_service_health','query_current_metrics','search_logs','query_database_health','search_knowledge']
+        if anomaly in SUPPORTED_SIGNALS:sequence.append('query_metric_history')
+        if anomaly.startswith('service.') or anomaly.startswith('app.'):
+            sequence.extend(['query_service_health','search_logs','query_runtime_resources'])
+        elif anomaly.startswith('db.'):
+            sequence.extend(['query_database_health','search_logs'])
+        elif anomaly.startswith('log.'):
+            sequence.extend(['search_logs','query_runtime_resources'])
+        else:
+            sequence.extend(['query_runtime_resources','search_logs'])
+        sequence.append('search_knowledge')
         for name in sequence:
             if name not in called:
-                args={'query':f"{anomaly} 远程 Python 服务运维处理方案"} if name=='search_knowledge' else ({'level':'ERROR','since_minutes':30,'limit':200} if name=='search_logs' else {})
+                if name=='search_knowledge':args={'query':f"{anomaly} 远程 Python 服务运维处理方案"}
+                elif name=='search_logs':args={'level':'ERROR','since_minutes':30,'limit':200,'group_by_signature':True}
+                elif name=='query_metric_history':args={'metrics':[anomaly],'minutes':30,'include_samples':False}
+                else:args={}
                 return AgentDecision(action='tool',rationale=f'收集 {name} 证据',tool_name=name,tool_args=args)
         evidence=context.get('evidence',[]);summaries=[x.get('summary','') for x in evidence if x.get('summary')]
         report=DiagnosisReport(summary=f"检测到 {anomaly or '运行异常'}",severity=incident.get('severity','warning'),affected_service=incident.get('project_name'),symptoms=[incident.get('summary','异常触发')],evidence=summaries[-8:],root_cause='当前证据显示存在运行异常；Mock 模型不会虚构更具体根因，配置真实 LLM 后将基于 Evidence 进行因果判断。',confidence=0.55 if summaries else 0.2,remediation=['按照报告中的 Evidence 逐项确认异常资源','参考知识库命中的 SOP 进行人工处置','当前不自动执行有副作用操作'],verification=['重新检查触发指标已越过 recovery threshold','确认服务健康检查恢复并持续两个监测周期正常'],risks=['执行任何重启/终止进程前先确认业务任务状态'],knowledge_refs=context.get('knowledge_refs',[]),unknowns=[] if summaries else ['缺少有效工具证据'])
@@ -115,7 +138,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
     async def summarize(self,text:str)->str:
         messages=[
-            {'role':'system','content':'你是 Oncall 的会话记忆压缩器。只保留可验证事实、用户目标、已执行检查、结论和未决事项；不要编造。'},
+            {'role':'system','content':'你是 PulseOps 的会话记忆压缩器。只保留可验证事实、用户目标、已执行检查、结论和未决事项；不要编造。'},
             {'role':'user','content':text[:50000]},
         ]
         return (await self._chat(messages,0.0))[:12000]

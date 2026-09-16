@@ -29,7 +29,14 @@ class KnowledgeRetriever:
             vector=(await self.embedder.embed([query]))[0]
             scope=str(project_id) if project_id else None
             dense,bm25=await __import__('asyncio').gather(self.index.dense_search(vector,scope,20),self.index.bm25_search(query,scope,20))
-            candidates=rrf([dense,bm25])[:30];items=await self.reranker.rerank(query,candidates,top_k=top_k)
+            candidates=rrf([dense,bm25])[:30]
+            # An empty knowledge base is a valid state during onboarding.  Do
+            # not send an empty documents array to the remote reranker (some
+            # providers reject it with HTTP 400); return an auditable empty hit
+            # set and let the Agent continue with monitoring evidence.
+            if not candidates:
+                return ToolResult(ok=True,summary='知识库暂无相关内容',data=[])
+            items=await self.reranker.rerank(query,candidates,top_k=top_k)
             return ToolResult(ok=True,summary=f'知识库命中 {len(items)} 条',data=items)
         except Exception as e:
             return ToolResult(ok=False,summary='知识库检索不可用',error_code='RAG_UNAVAILABLE',data={'error':redact_text(str(e))})

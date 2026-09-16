@@ -7,8 +7,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from oncall.bootstrap.config import get_settings
-
 pytestmark = pytest.mark.integration
 
 API = 'http://127.0.0.1:9900'
@@ -106,10 +104,7 @@ def exporter_server():
 
 
 async def test_server_first_remote_python_onboarding_end_to_end(exporter_server):
-    settings = get_settings()
     async with httpx.AsyncClient(base_url=API, timeout=20, trust_env=False) as client:
-        login = await client.post('/api/auth/login', json={'username': settings.admin_username, 'password': settings.admin_password})
-        assert login.status_code == 200
         server_id = project_id = None
         try:
             created_server = await client.post('/api/servers', json={

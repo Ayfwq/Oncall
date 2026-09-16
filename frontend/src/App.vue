@@ -1,45 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { api } from './api'
-import { useAuthStore } from './stores/auth'
-const router = useRouter()
+import { ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 const route = useRoute()
 const navOpen = ref(false)
-const auth = useAuthStore()
-const me = computed(() => auth.user || { username: 'admin' })
-const pageTitle = computed(() => {
-  if (route.path.startsWith('/projects')) return '监控项目'
-  if (route.path.startsWith('/incidents')) return '告警中心'
-  if (route.path.startsWith('/knowledge')) return '知识库'
-  if (route.path.startsWith('/settings')) return '系统设置'
-  return 'AI 运维工作台'
-})
 watch(() => route.path, () => { navOpen.value = false })
-function handleUnauthorized() {
-  auth.setUser(null)
-  if (route.path !== '/login') router.push('/login')
-}
-onMounted(() => {
-  auth.load()
-  window.addEventListener('oncall:unauthorized', handleUnauthorized)
-})
-onBeforeUnmount(() => window.removeEventListener('oncall:unauthorized', handleUnauthorized))
-async function logout() {
-  try { await api('/auth/logout', { method: 'POST' }) } catch { /* ignore */ }
-  auth.setUser(null)
-  router.push('/login')
-}
 </script>
 
 <template>
   <div class="app">
-    <div v-if="$route.path !== '/login' && navOpen" class="nav-scrim" @click="navOpen = false"></div>
-    <aside v-if="$route.path !== '/login'" class="sidebar" :class="{ 'is-open': navOpen }">
+    <div v-if="navOpen" class="nav-scrim" @click="navOpen = false"></div>
+    <aside class="sidebar" :class="{ 'is-open': navOpen }">
       <div class="brand">
-        <img class="brand-mark" src="/favicon.png" alt="" />
-        <span class="brand-name">Oncall</span>
-        <span class="brand-sub">AI SRE</span>
+        <img class="brand-mark" src="/pulseops-icon.png" alt="巡脉图标" />
+        <span class="brand-name">PulseOps</span>
+        <span class="brand-sub">巡脉</span>
       </div>
       <nav class="nav">
         <router-link to="/" class="nav-item">
@@ -63,25 +37,9 @@ async function logout() {
           <span>设置</span>
         </router-link>
       </nav>
-      <div class="sidebar-footer">
-        <div class="avatar">A</div>
-        <div class="who">
-          <b>{{ me.username }}</b>
-          <span>本地管理员</span>
-          <button class="logout" @click="logout">退出</button>
-        </div>
-      </div>
     </aside>
     <main class="main" :class="{ 'chat-main': route.path === '/' }">
-      <header v-if="$route.path !== '/login'" class="topbar">
-        <button class="mobile-menu" aria-label="打开菜单" @click="navOpen = !navOpen">☰</button>
-        <img class="topbar-brand" src="/favicon.png" alt="" />
-        <div class="topbar-title"><span>{{ pageTitle }}</span><small>本地智能运维控制台</small></div>
-        <div class="topbar-actions">
-          <span class="runtime-pill"><i></i> 本地服务正常</span>
-          <button class="topbar-icon" title="刷新当前页面" @click="router.go(0)">↻</button>
-        </div>
-      </header>
+      <button class="mobile-menu" aria-label="打开菜单" @click="navOpen = !navOpen">☰</button>
       <router-view />
     </main>
   </div>

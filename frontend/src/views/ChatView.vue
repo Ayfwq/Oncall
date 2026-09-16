@@ -9,7 +9,7 @@ import type { ChatMessage, Conversation, ProjectSummary } from '../types'
 const route = useRoute()
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const convs = ref<Conversation[]>([]), projects = ref<ProjectSummary[]>([]), active = ref(''), messages = ref<ChatMessage[]>([]), input = ref('')
-const busy = ref(false), newProject = ref(''), search = ref(''), showArchived = ref(false), statusLine = ref('')
+const busy = ref(false), newProject = ref(''), search = ref(''), showArchived = ref(false), statusLine = ref(''), error = ref('')
 const mobileListOpen = ref(false)
 const messagesEl = ref<HTMLElement | null>(null)
 let scrollQueued = false
@@ -32,10 +32,20 @@ async function load() {
   projects.value = await api('/projects')
   if (!active.value && convs.value[0]) await open(convs.value[0].id)
 }
-async function create() {
+async function createConversation() {
   const c = await api<Conversation>('/conversations', { method: 'POST', body: JSON.stringify({ title: '新对话', project_id: newProject.value || null }) })
   newProject.value = ''; search.value = ''; showArchived.value = false
-  await load(); await open(c.id)
+  await load()
+  await open(c.id)
+  return c
+}
+async function create() {
+  error.value = ''
+  try {
+    await createConversation()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
 }
 async function open(id: string) {
   active.value = id; messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
@@ -70,8 +80,19 @@ async function remove() {
 function onCmd(cmd: string) { if (cmd === 'rename') rename(); else if (cmd === 'archive') archive(); else if (cmd === 'remove') remove() }
 
 async function send() {
-  if (!input.value.trim() || !active.value || busy.value) return
-  const text = input.value; input.value = ''
+  const text = input.value.trim()
+  if (!text || busy.value) return
+  error.value = ''
+  if (!active.value) {
+    try {
+      await createConversation()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e)
+      return
+    }
+  }
+  if (!active.value) return
+  input.value = ''
   messages.value.push({ role: 'user', content: text })
   const streamingMsg: ChatMessage = { role: 'assistant', content: '' }
   messages.value.push(streamingMsg)
@@ -170,14 +191,14 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 
       <div ref="messagesEl" class="messages">
         <div v-if="!active" class="empty-state">
-          <img class="empty-icon" src="/favicon.png" alt="" />
-            <div class="welcome-kicker">ONCALL AI SRE</div>
+          <img class="empty-icon" src="/pulseops-icon.png" alt="巡脉图标" />
+            <div class="welcome-kicker">PULSEOPS · 巡脉智能运维</div>
             <h2>从一个运维问题开始</h2>
             <p class="muted">普通运维问题可直接咨询；绑定项目后可进一步查询实时日志、指标和服务状态。</p>
         </div>
         <template v-else>
           <div v-for="(m, i) in messages" :key="m.id || i" class="msg-row" :class="m.role === 'user' ? 'user' : 'assistant'">
-            <img v-if="m.role === 'assistant'" class="msg-avatar ai" src="/favicon.png" alt="" />
+            <img v-if="m.role === 'assistant'" class="msg-avatar ai" src="/pulseops-icon.png" alt="巡脉图标" />
             <div class="msg-bubble">
               <div v-if="m.role === 'assistant'" class="markdown" v-html="render(m.content)"></div>
               <div v-else>{{ m.content }}</div>
@@ -185,7 +206,7 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
             <div v-if="m.role === 'user'" class="msg-avatar me">A</div>
           </div>
         </template>
-        <div v-if="busy" class="status-line"><span class="dot"></span>{{ statusLine || 'Oncall 正在分析…' }}</div>
+        <div v-if="busy" class="status-line"><span class="dot"></span>{{ statusLine || 'PulseOps 正在分析…' }}</div>
       </div>
 
       <div class="composer">
@@ -195,7 +216,8 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </button>
         </div>
-        <p class="composer-hint">Oncall 会结合监控数据与知识库回答，请在执行变更前核实建议。</p>
+        <p v-if="error" class="chat-error">{{ error }}</p>
+        <p class="composer-hint">PulseOps 会结合监控数据与知识库回答，请在执行变更前核实建议。</p>
       </div>
     </section>
   </div>
@@ -216,6 +238,7 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 .welcome-kicker { color: var(--accent-strong); font-size: 11px; font-weight: 700; letter-spacing: .14em; margin-bottom: 7px; }
 .empty-state h2 { font-size: 20px; }
 .empty-state > p { max-width: 510px; margin: 0 auto 24px; }
+.chat-error{margin:7px auto 0;color:#c0393f;font-size:12px;text-align:center;max-width:680px}
 .composer-hint{margin:7px auto 0;color:#9aa8a3;font-size:10px;text-align:center}
 @media (max-width: 760px) { .empty-state { padding-top: 55px; } }
 

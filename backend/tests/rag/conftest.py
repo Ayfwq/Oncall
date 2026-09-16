@@ -81,12 +81,11 @@ async def rag_kb(rag_ready, service_gate):
     from oncall.infrastructure.db.session import SessionFactory
     from oncall.rag.ingestion import KnowledgeIngestor
     from oncall.rag.milvus_store import MilvusKnowledgeIndex
-    from oncall.security.passwords import hash_password
     from sqlalchemy import delete
 
     username = f"ragtest_{uuid.uuid4().hex[:8]}"
     async with SessionFactory() as session:
-        user = User(username=username, password_hash=hash_password("test-password"))
+        user = User(username=username)
         session.add(user)
         await session.commit()
         await session.refresh(user)

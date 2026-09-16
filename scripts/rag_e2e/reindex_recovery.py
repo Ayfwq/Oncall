@@ -10,17 +10,12 @@ Run with:  uv run --no-sync python scripts/rag_e2e/reindex_recovery.py
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import time
 
 import httpx
 
-from oncall.bootstrap.config import get_settings
-
 API = "http://127.0.0.1:9900"
-USERNAME = "admin"
-PASSWORD = os.environ.get("ONCALL_ADMIN_PASSWORD") or get_settings().admin_password
 
 EXPECTED_TITLES = [
     "cpu-high-load-sop.md",
@@ -68,8 +63,6 @@ async def main() -> None:
 
     # ---- 2. reindex via the API (worker consumes knowledge_reindex) ----
     async with httpx.AsyncClient(base_url=API, timeout=30) as hx:
-        r = await hx.post(f"{API}/api/auth/login", json={"username": USERNAME, "password": PASSWORD})
-        r.raise_for_status()
         docs = (await hx.get(f"{API}/api/knowledge/documents")).json()
         by_title = {d["title"]: d for d in docs}
         missing = [t for t in EXPECTED_TITLES if t not in by_title]

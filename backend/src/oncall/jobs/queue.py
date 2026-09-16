@@ -12,12 +12,33 @@ from oncall.infrastructure.db.models import BackgroundJob
 class JobQueue:
     def __init__(self, session: AsyncSession): self.session=session
 
-    async def enqueue(self,type_:str,payload:dict,idempotency_key:str|None=None,priority:int=100)->BackgroundJob:
+    async def enqueue(
+        self,
+        type_: str,
+        payload: dict,
+        idempotency_key: str | None = None,
+        priority: int = 100,
+        *,
+        commit: bool = True,
+    ) -> BackgroundJob:
+        """Persist a durable job.
+
+        ``commit=False`` is used when a job is part of a larger business
+        transaction (for example: incident + conversation + notification +
+        investigation).  The row is flushed so its id is available, while the
+        caller owns the final commit.  Existing callers keep the historical
+        commit-per-job behaviour by default.
+        """
         if idempotency_key:
             existing=await self.session.scalar(select(BackgroundJob).where(BackgroundJob.idempotency_key==idempotency_key))
             if existing:return existing
         job=BackgroundJob(type=type_,payload=payload,idempotency_key=idempotency_key,priority=priority)
-        self.session.add(job);await self.session.commit();await self.session.refresh(job);return job
+        self.session.add(job)
+        if commit:
+            await self.session.commit();await self.session.refresh(job)
+        else:
+            await self.session.flush()
+        return job
 
     async def claim(self,types:list[str],lease_seconds:int=120)->BackgroundJob|None:
         now=datetime.now().astimezone()

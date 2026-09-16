@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import time
+from typing import Literal
 from urllib.parse import urlsplit
 
 import asyncpg
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from oncall.security.redact import redact_text
 
-app = FastAPI(title="Oncall Collector", docs_url=None, redoc_url=None)
+app = FastAPI(title="PulseOps Collector", docs_url=None, redoc_url=None)
 
 
 def _auth(authorization: str | None = Header(default=None), x_oncall_token: str | None = Header(default=None)) -> None:
@@ -38,6 +39,15 @@ class LogQuery(DiscoverRequest):
 
 class DatabaseRequest(BaseModel):
     dsn: str
+    checks: list[Literal["availability", "connections", "long_transactions", "lock_waits", "blocking_chain", "deadlocks", "replication", "slow_queries", "cache_hit"]] = Field(default_factory=list, max_length=9)
+    slow_query_limit: int = Field(default=10, ge=1, le=50)
+
+
+class RuntimeQuery(DiscoverRequest):
+    compose_project: str | None = None
+    services: list[str] = Field(default_factory=list, max_length=20)
+    checks: list[Literal["status", "cpu", "memory", "restarts", "oom", "processes", "ports"]] = Field(default_factory=list, max_length=7)
+    top_n: int = Field(default=5, ge=1, le=20)
 
 
 def _docker_client():
@@ -118,9 +128,8 @@ def _logs_sync(req: LogQuery) -> dict:
     discovery = _discover_sync(req.target_urls)
     client = _docker_client()
     try:
-        containers = client.containers.list()
         selected = []
-        for c in containers:
+        for c in client.containers.list():
             row = _container_row(c)
             if req.compose_project and row.get("compose_project") != req.compose_project:
                 continue
@@ -152,6 +161,66 @@ def _logs_sync(req: LogQuery) -> dict:
         client.close()
 
 
+def _runtime_sync(req: RuntimeQuery) -> dict:
+    discovery = _discover_sync(req.target_urls)
+    discovered_ids={x["id"] for x in discovery.get("containers",[])}
+    checks=set(req.checks or ["status","cpu","memory","restarts","oom","processes","ports"])
+    client=_docker_client()
+    try:
+        selected=[]
+        for container in client.containers.list(all=True):
+            row=_container_row(container)
+            if req.compose_project and row.get("compose_project") != req.compose_project: continue
+            if req.services and row.get("compose_service") not in req.services: continue
+            if not req.compose_project and row["id"] not in discovered_ids: continue
+            selected.append(container)
+        rows=[]
+        for container in selected:
+            container.reload()
+            attrs=container.attrs
+            state=attrs.get("State",{})
+            base=_container_row(container)
+            row={"id":base["id"],"name":base["name"],"service":base.get("compose_service")}
+            if "status" in checks: row["status"]=base["status"]
+            if "restarts" in checks: row["restart_count"]=int(attrs.get("RestartCount",0) or 0)
+            if "oom" in checks: row["oom_killed"]=bool(state.get("OOMKilled",False))
+            if "ports" in checks: row["ports"]=base["ports"]
+            if checks & {"cpu","memory"} and base["status"]=="running":
+                try:
+                    stats=container.stats(stream=False)
+                except Exception as exc:
+                    stats={}
+                    row["stats_error"]=redact_text(str(exc))
+                cpu_delta=float(stats.get("cpu_stats",{}).get("cpu_usage",{}).get("total_usage",0))-float(stats.get("precpu_stats",{}).get("cpu_usage",{}).get("total_usage",0))
+                system_delta=float(stats.get("cpu_stats",{}).get("system_cpu_usage",0))-float(stats.get("precpu_stats",{}).get("system_cpu_usage",0))
+                online=float(stats.get("cpu_stats",{}).get("online_cpus",1) or 1)
+                if "cpu" in checks and stats: row["cpu_percent"]=(cpu_delta/system_delta*online*100.0) if system_delta>0 and cpu_delta>=0 else 0.0
+                memory=stats.get("memory_stats",{})
+                usage=float(memory.get("usage",0) or 0)-float(memory.get("stats",{}).get("cache",0) or 0)
+                limit=float(memory.get("limit",0) or 0)
+                if "memory" in checks and stats: row.update({"memory_bytes":max(0.0,usage),"memory_limit_bytes":limit,"memory_percent":max(0.0,usage)/limit*100.0 if limit else 0.0})
+            if "processes" in checks and base["status"]=="running":
+                try:
+                    top=container.top(ps_args="-eo pid,ppid,user,%cpu,%mem,comm,args")
+                    titles=top.get("Titles",[])
+                    row["processes"]=[dict(zip(titles,item)) for item in top.get("Processes",[])[:req.top_n]]
+                except Exception as exc:  # process visibility differs by Docker platform
+                    row["processes_error"]=redact_text(str(exc))
+            rows.append(row)
+        rows.sort(key=lambda x:(float(x.get("cpu_percent",0)),float(x.get("memory_percent",0))),reverse=True)
+        return {"ok":bool(selected),"containers":rows,"checks":sorted(checks),"error":None if selected else discovery.get("error")}
+    finally:
+        client.close()
+
+
+@app.post("/v1/runtime/diagnose", dependencies=[Depends(_auth)])
+async def runtime(req: RuntimeQuery):
+    try:
+        return await asyncio.to_thread(_runtime_sync,req)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok":False,"containers":[],"error":redact_text(str(exc))}
+
+
 @app.post("/v1/logs/search", dependencies=[Depends(_auth)])
 async def logs(req: LogQuery):
     try:
@@ -160,34 +229,44 @@ async def logs(req: LogQuery):
         return {"ok": False, "lines": [], "error": redact_text(str(exc))}
 
 
-async def _database(dsn: str) -> dict:
+async def _database(dsn: str, checks: list[str] | None = None, slow_query_limit: int = 10) -> dict:
     conn = await asyncpg.connect(dsn=dsn, timeout=6, statement_cache_size=0)
     try:
-        max_connections = int(await conn.fetchval("SHOW max_connections"))
-        active = int(await conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid()"))
-        long_transactions = int(await conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE xact_start IS NOT NULL AND now()-xact_start > interval '5 minutes' AND pid <> pg_backend_pid()"))
-        lock_waits = int(await conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock'"))
-        stats = await conn.fetchrow("SELECT COALESCE(sum(deadlocks),0) deadlocks, CASE WHEN sum(blks_hit)+sum(blks_read)=0 THEN 100 ELSE 100.0*sum(blks_hit)/(sum(blks_hit)+sum(blks_read)) END cache_hit FROM pg_stat_database")
-        in_recovery = bool(await conn.fetchval("SELECT pg_is_in_recovery()"))
-        lag = await conn.fetchval("SELECT CASE WHEN pg_is_in_recovery() THEN COALESCE(EXTRACT(EPOCH FROM now()-pg_last_xact_replay_timestamp()),0) ELSE 0 END")
-        has_statements = bool(await conn.fetchval("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_stat_statements')"))
+        requested=set(checks or ["availability","connections","long_transactions","lock_waits","blocking_chain","deadlocks","replication","slow_queries","cache_hit"])
+        signals={"db.up":1.0} if "availability" in requested else {}
+        if "connections" in requested:
+            max_connections=int(await conn.fetchval("SHOW max_connections"))
+            active=int(await conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid()"))
+            signals.update({"db.connections.active":float(active),"db.connections.max":float(max_connections),"db.connections.utilization_percent":active/max_connections*100.0 if max_connections else 0.0})
+        if "long_transactions" in requested:
+            signals["db.long_transactions"]=float(await conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE xact_start IS NOT NULL AND now()-xact_start > interval '5 minutes' AND pid <> pg_backend_pid()"))
+        if "lock_waits" in requested:
+            signals["db.lock_waits"]=float(await conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock'"))
+        if requested & {"deadlocks","cache_hit"}:
+            stats=await conn.fetchrow("SELECT COALESCE(sum(deadlocks),0) deadlocks, CASE WHEN sum(blks_hit)+sum(blks_read)=0 THEN 100 ELSE 100.0*sum(blks_hit)/(sum(blks_hit)+sum(blks_read)) END cache_hit FROM pg_stat_database")
+            if "deadlocks" in requested: signals["db.deadlocks_total"]=float(stats["deadlocks"])
+            if "cache_hit" in requested: signals["db.cache_hit_percent"]=float(stats["cache_hit"] or 0)
+        in_recovery=False
+        if "replication" in requested:
+            in_recovery=bool(await conn.fetchval("SELECT pg_is_in_recovery()"))
+            lag=await conn.fetchval("SELECT CASE WHEN pg_is_in_recovery() THEN COALESCE(EXTRACT(EPOCH FROM now()-pg_last_xact_replay_timestamp()),0) ELSE 0 END")
+            signals["db.replication_lag_seconds"]=float(lag or 0)
+        blocking=[]
+        if "blocking_chain" in requested:
+            blocking_rows=await conn.fetch("SELECT blocked.pid blocked_pid, blocking.pid blocking_pid, left(blocked.query,300) blocked_query, left(blocking.query,300) blocking_query FROM pg_stat_activity blocked JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) blocker(pid) ON true JOIN pg_stat_activity blocking ON blocking.pid=blocker.pid LIMIT 20")
+            blocking=[{"blocked_pid":int(r["blocked_pid"]),"blocking_pid":int(r["blocking_pid"]),"blocked_query":redact_text(r["blocked_query"] or ""),"blocking_query":redact_text(r["blocking_query"] or "")} for r in blocking_rows]
         slow: list[dict] = []
-        if has_statements:
-            rows = await conn.fetch("SELECT calls, round(mean_exec_time::numeric,2) mean_ms, round(total_exec_time::numeric,2) total_ms, left(query,300) query FROM pg_stat_statements WHERE query NOT ILIKE '%pg_stat_statements%' ORDER BY mean_exec_time DESC LIMIT 10")
-            slow = [{"calls": int(r["calls"]), "mean_ms": float(r["mean_ms"]), "total_ms": float(r["total_ms"]), "query": redact_text(r["query"])} for r in rows]
-        signals = {
-            "db.up": 1.0,
-            "db.connections.active": float(active),
-            "db.connections.max": float(max_connections),
-            "db.connections.utilization_percent": active / max_connections * 100.0 if max_connections else 0.0,
-            "db.long_transactions": float(long_transactions),
-            "db.lock_waits": float(lock_waits),
-            "db.deadlocks_total": float(stats["deadlocks"]),
-            "db.cache_hit_percent": float(stats["cache_hit"] or 0),
-            "db.replication_lag_seconds": float(lag or 0),
-            "db.slow_queries": float(len(slow)),
-        }
-        return {"ok": True, "signals": signals, "slow_queries": slow, "capabilities": {"activity": True, "locks": True, "slow_sql": has_statements, "replication": in_recovery}}
+        has_statements=None
+        if "slow_queries" in requested:
+            has_statements=bool(await conn.fetchval("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_stat_statements')"))
+            if has_statements:
+                rows=await conn.fetch("SELECT calls, round(mean_exec_time::numeric,2) mean_ms, round(total_exec_time::numeric,2) total_ms, left(query,300) query FROM pg_stat_statements WHERE query NOT ILIKE '%pg_stat_statements%' ORDER BY mean_exec_time DESC LIMIT $1",slow_query_limit)
+                slow=[{"calls":int(r["calls"]),"mean_ms":float(r["mean_ms"]),"total_ms":float(r["total_ms"]),"query":redact_text(r["query"])} for r in rows]
+            signals["db.slow_queries"]=float(len(slow))
+        result={"ok":True,"signals":signals,"capabilities":{"checked":sorted(requested),"activity":bool(requested & {"connections","long_transactions"}),"locks":bool(requested & {"lock_waits","blocking_chain"}),"slow_sql":has_statements,"replication":in_recovery if "replication" in requested else None}}
+        if "slow_queries" in requested: result["slow_queries"]=slow
+        if "blocking_chain" in requested: result["blocking_chain"]=blocking
+        return result
     finally:
         await conn.close()
 
@@ -195,7 +274,7 @@ async def _database(dsn: str) -> dict:
 @app.post("/v1/database/diagnose", dependencies=[Depends(_auth)])
 async def database(req: DatabaseRequest):
     try:
-        return await _database(req.dsn)
+        return await _database(req.dsn,req.checks,req.slow_query_limit)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "signals": {"db.up": 0.0}, "error": redact_text(str(exc))}
 

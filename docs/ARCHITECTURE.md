@@ -1,5 +1,7 @@
 # Architecture Baseline
 
+当前代码对应的可视化总图见 [pulseops-architecture-v2.svg](pulseops-architecture-v2.svg)；Agent、记忆、工具和异步编排的逐节点说明见 [PULSEOPS_AGENT_GUIDE.md](PULSEOPS_AGENT_GUIDE.md)。
+
 ## 不可违反的边界
 
 1. Detector 是确定性代码；LLM 只负责问答、调查、解释与诊断。
@@ -13,7 +15,7 @@
 
 ## Runtime
 
-- `oncall-api`: REST/SSE/Web auth；交互 Agent。
+- `oncall-api`: REST/SSE/Web Gateway；PulseOps 交互 Agent（单工作区免登录）。
 - `oncall-monitor-worker`: 项目巡检、Detector、Incident。
 - `oncall-agent-worker`: `incident_investigate` durable jobs。
 - `oncall-rag-worker`: Docling ingestion / indexing。

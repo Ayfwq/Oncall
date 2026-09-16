@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import delete, select, text, update
+from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.bootstrap.config import get_settings
@@ -97,13 +98,35 @@ class KnowledgeIngestor:
             # A document may be deleted while a durable RAG job is still running. Never
             # let that race crash the worker or wedge the session in a broken transaction.
             await self.session.rollback()
-            ver2=await self.session.get(KnowledgeDocumentVersion,version_id)
-            if ver2 is None:
+            # A queued ingest can outlive a document deletion. Use bulk
+            # updates so a concurrent delete produces rowcount=0 instead of
+            # SQLAlchemy's StaleDataError, and treat that race as a no-op.
+            doc_id=await self.session.scalar(
+                select(KnowledgeDocumentVersion.document_id).where(
+                    KnowledgeDocumentVersion.id==version_id
+                )
+            )
+            if doc_id is None:
                 return  # document/version removed concurrently; nothing left to persist
-            doc2=await self.session.get(KnowledgeDocument,ver2.document_id)
-            ver2.status='failed';ver2.error=str(e)[:8000]
-            if doc2 is not None:doc2.status='failed'
-            await self.session.commit();raise
+            version_update=await self.session.execute(
+                update(KnowledgeDocumentVersion)
+                .where(KnowledgeDocumentVersion.id==version_id)
+                .values(status='failed',error=str(e)[:8000])
+            )
+            if version_update.rowcount == 0:
+                await self.session.rollback()
+                return
+            await self.session.execute(
+                update(KnowledgeDocument)
+                .where(KnowledgeDocument.id==doc_id)
+                .values(status='failed')
+            )
+            try:
+                await self.session.commit()
+            except StaleDataError:
+                await self.session.rollback()
+                return
+            raise
 
     def _convert(self,path:Path)->dict:
         from docling.chunking import HybridChunker

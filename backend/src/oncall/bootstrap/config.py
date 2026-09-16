@@ -24,8 +24,6 @@ class Settings(BaseSettings):
     milvus_token: str = 'root:Milvus'
     data_dir: Path = Path('./data')
     secret_master_key: str = ''
-    admin_username: str = 'admin'
-    admin_password: str = 'change-me-now'
     model_provider: str = 'openai-compatible'
     model_base_url: str = 'https://api.siliconflow.cn/v1'
     model_api_key: str = ''
@@ -57,7 +55,6 @@ class Settings(BaseSettings):
     # this setting only controls the user-facing incident/notification fanout.
     incident_correlation_window_seconds: int = Field(default=120, ge=0, le=3600)
     notification_cooldown_seconds: int = Field(default=1800, ge=0)
-    session_days: int = 30
     job_lease_seconds: int = 120
     job_poll_seconds: float = 1.0
     # Alert delivery runs in its own worker. Keep this short so a fresh alert lands
@@ -70,8 +67,6 @@ class Settings(BaseSettings):
         if self.env.lower()=='production':
             if not self.secret_master_key:
                 raise ValueError('ONCALL_SECRET_MASTER_KEY is required in production')
-            if self.admin_password=='change-me-now':
-                raise ValueError('default admin password is forbidden in production')
             if self.model_provider!='mock' and not self.model_api_key:
                 raise ValueError('real model provider requires ONCALL_MODEL_API_KEY')
             if self.feishu_enabled and not (self.feishu_app_id and self.feishu_app_secret):

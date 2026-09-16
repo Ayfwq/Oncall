@@ -2,15 +2,10 @@ import os, sys, time
 import httpx
 
 BASE = os.environ.get('ONCALL_API', 'http://127.0.0.1:9900')
-USERNAME = 'admin'
-PASSWORD = os.environ.get('ONCALL_ADMIN_PASSWORD') or 'oncall-local-dev'
 
 
 def main(files):
     with httpx.Client(base_url=BASE, timeout=60) as c:
-        r = c.post('/api/auth/login', json={'username': USERNAME, 'password': PASSWORD})
-        r.raise_for_status()
-
         for path in files:
             name = os.path.basename(path)
             print(f'--- uploading {name} ---')

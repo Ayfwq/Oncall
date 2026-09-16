@@ -478,18 +478,6 @@ class ChatMessageDTO(BaseModel):
     channel: str = 'web'
 
 
-class PasswordChangeDTO(BaseModel):
-    current_password: str = Field(min_length=1, max_length=200)
-    new_password: str = Field(min_length=6, max_length=200)
-    confirm_password: str = Field(min_length=6, max_length=200)
-
-    @model_validator(mode='after')
-    def passwords_match(self) -> PasswordChangeDTO:
-        if self.new_password != self.confirm_password:
-            raise ValueError('new password and confirmation do not match')
-        return self
-
-
 class FeishuSettingsDTO(BaseModel):
     enabled: bool = False
     app_id: str = Field(default='', max_length=200)

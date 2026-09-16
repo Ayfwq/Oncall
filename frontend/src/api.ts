@@ -13,17 +13,8 @@ export class ApiError extends Error {
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const r = await fetch('/api' + path, {
     ...init,
-    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
   })
-  if (r.status === 401) {
-    // The initial auth probe and login itself are expected to see 401s. They
-    // must not race with a successful login and redirect the user away again.
-    if (path !== '/auth/me' && path !== '/auth/login') {
-      window.dispatchEvent(new CustomEvent('oncall:unauthorized'))
-    }
-    throw new ApiError(401, 'unauthorized')
-  }
   if (!r.ok) throw new ApiError(r.status, await r.text())
   return r.json()
 }
@@ -37,7 +28,6 @@ export async function streamChat(
 ): Promise<void> {
   const r = await fetch(`/api/conversations/${id}/messages:stream`, {
     method: 'POST',
-    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
   })
