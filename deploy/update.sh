@@ -74,9 +74,13 @@ if [ "$NEED_MIGRATE" = 1 ]; then
 fi
 
 RECREATE=()
-[ "$NEED_BACKEND_BUILD" = 1 ] && RECREATE+=(api monitor-worker agent-worker rag-worker)
-[ "$NEED_BACKEND_RESTART" = 1 ] && RECREATE+=(api monitor-worker agent-worker rag-worker)
-[ "$NEED_FRONTEND_BUILD" = 1 ] && RECREATE+=(frontend)
+if [ "$NEED_BACKEND_BUILD" = 1 ] || [ "$NEED_BACKEND_RESTART" = 1 ]; then
+  # Recreate every backend process, including notifications. Recreate the
+  # frontend proxy too so nginx resolves the API container's new address.
+  RECREATE+=(api monitor-worker notification-worker agent-worker rag-worker frontend)
+elif [ "$NEED_FRONTEND_BUILD" = 1 ]; then
+  RECREATE+=(frontend)
+fi
 if [ "${#RECREATE[@]}" -gt 0 ]; then
   "${COMPOSE[@]}" up -d --no-deps --force-recreate "${RECREATE[@]}"
 fi
