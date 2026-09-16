@@ -159,6 +159,8 @@ services:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
     command: /opt/venv/bin/oncall-monitor-worker
+    healthcheck:
+      disable: true
     restart: unless-stopped
     pid: host
     volumes:
@@ -182,6 +184,8 @@ services:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
     command: /opt/venv/bin/python -m oncall.workers.notification_worker
+    healthcheck:
+      disable: true
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
@@ -200,6 +204,8 @@ services:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
     command: /opt/venv/bin/oncall-agent-worker
+    healthcheck:
+      disable: true
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
@@ -220,6 +226,8 @@ services:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
     <<: *backend-environment
     command: /opt/venv/bin/oncall-rag-worker
+    healthcheck:
+      disable: true
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
