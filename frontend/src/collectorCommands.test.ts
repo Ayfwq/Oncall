@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import {
   COLLECTOR_IMAGE,
+  DCGM_EXPORTER_IMAGE,
   NODE_EXPORTER_IMAGE,
   collectorInstallCommand,
   collectorVerifyCommand,
+  gpuExporterInstallCommand,
+  gpuExporterVerifyCommand,
   nodeExporterInstallCommand,
   nodeExporterVerifyCommand,
   shellQuote,
@@ -41,6 +44,19 @@ describe('collector commands', () => {
     expect(verifyCommand).toContain("grep -q '^node_exporter_build_info'")
     expect(verifyCommand).toContain("echo '系统指标采集器安装成功'")
     expect(verifyCommand).toContain("echo '系统指标采集器安装失败'; exit 1")
+  })
+
+  it('installs and verifies DCGM Exporter with real GPU metrics', () => {
+    const installCommand = gpuExporterInstallCommand()
+    const verifyCommand = gpuExporterVerifyCommand()
+
+    expect(installCommand).toContain(`docker pull ${DCGM_EXPORTER_IMAGE}`)
+    expect(installCommand).toContain('docker rm -f oncall-dcgm-exporter')
+    expect(installCommand).toContain('--gpus all')
+    expect(installCommand).toContain("echo 'GPU 采集器安装命令执行成功，请继续运行验证命令'")
+    expect(verifyCommand).toContain("grep -q '^DCGM_FI_DEV_GPU_UTIL'")
+    expect(verifyCommand).toContain("echo 'GPU 采集器安装成功'")
+    expect(verifyCommand).toContain("echo 'GPU 采集器安装失败，请检查 NVIDIA 驱动和容器日志'; exit 1")
   })
 
   it('quotes manually entered shell metacharacters', () => {

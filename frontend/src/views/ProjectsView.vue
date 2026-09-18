@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import { collectorInstallCommand, collectorVerifyCommand, nodeExporterInstallCommand, nodeExporterVerifyCommand } from '../collectorCommands'
+import { collectorInstallCommand, collectorVerifyCommand, gpuExporterInstallCommand, gpuExporterVerifyCommand, nodeExporterInstallCommand, nodeExporterVerifyCommand } from '../collectorCommands'
 import type { MonitoredServer, ProjectDraftTestResult, ProjectSummary, ServerTestResult } from '../types'
 
 const route = useRoute()
@@ -36,7 +36,8 @@ const testResult = ref<ProjectDraftTestResult | null>(null)
 
 const nodeCommand = nodeExporterInstallCommand()
 const nodeCheckCommand = nodeExporterVerifyCommand()
-const gpuCommand = `docker run -d --name oncall-dcgm-exporter --restart unless-stopped --gpus all --cap-add SYS_ADMIN -p 9400:9400 nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless`
+const gpuCommand = gpuExporterInstallCommand()
+const gpuCheckCommand = gpuExporterVerifyCommand()
 const collectorCommand = computed(() => collectorInstallCommand(serverForm.value.collector_token.trim()))
 const collectorCheckCommand = computed(() => collectorVerifyCommand(serverForm.value.collector_token.trim()))
 const serverSignature = computed(() => `${serverForm.value.node_metrics_url.trim()}|${serverForm.value.gpu_metrics_url.trim()}|${serverForm.value.collector_url.trim()}|${serverForm.value.collector_token.trim()}`)
@@ -228,7 +229,8 @@ onMounted(load)
               <div class="command-row verify-command-row"><div><b>验证系统指标采集器</b><code>{{ nodeCheckCommand }}</code><small>成功时输出：系统指标采集器安装成功</small></div><el-button size="small" plain @click="copy(nodeCheckCommand)">复制</el-button></div>
               <div class="command-row"><div><b>安装或更新日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button size="small" @click="copy(collectorCommand)">复制</el-button></div>
               <div class="command-row verify-command-row"><div><b>验证 Collector</b><code>{{ collectorCheckCommand }}</code><small>成功时输出：Collector 安装成功</small></div><el-button size="small" plain @click="copy(collectorCheckCommand)">复制</el-button></div>
-              <div class="command-row"><div><b>GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button size="small" @click="copy(gpuCommand)">复制</el-button></div>
+              <div class="command-row"><div><b>安装或更新 GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button size="small" @click="copy(gpuCommand)">复制</el-button></div>
+              <div class="command-row verify-command-row"><div><b>验证 GPU 采集器</b><code>{{ gpuCheckCommand }}</code><small>成功时输出：GPU 采集器安装成功</small></div><el-button size="small" plain @click="copy(gpuCheckCommand)">复制</el-button></div>
               <p class="install-hint">每个采集器先执行安装命令，再执行其下方的灰色验证命令；终端会直接显示安装成功或安装失败。Collector 默认端口为 9910，并需要访问本机 Docker。</p>
             </el-collapse-item></el-collapse>
             <div class="server-form-grid">

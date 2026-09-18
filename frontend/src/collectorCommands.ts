@@ -1,5 +1,6 @@
 export const COLLECTOR_IMAGE = 'ghcr.io/ayfwq/oncall-collector:latest'
 export const NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v1.12.1'
+export const DCGM_EXPORTER_IMAGE = 'nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless'
 
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`
@@ -16,6 +17,19 @@ export function nodeExporterInstallCommand(): string {
 
 export function nodeExporterVerifyCommand(): string {
   return `curl --fail --silent --show-error http://127.0.0.1:9100/metrics | grep -q '^node_exporter_build_info' && echo '系统指标采集器安装成功' || { echo '系统指标采集器安装失败'; exit 1; }`
+}
+
+export function gpuExporterInstallCommand(): string {
+  return [
+    `docker pull ${DCGM_EXPORTER_IMAGE}`,
+    `(docker rm -f oncall-dcgm-exporter >/dev/null 2>&1 || true)`,
+    `docker run -d --name oncall-dcgm-exporter --restart unless-stopped --gpus all --cap-add SYS_ADMIN -p 9400:9400 ${DCGM_EXPORTER_IMAGE}`,
+    `echo 'GPU 采集器安装命令执行成功，请继续运行验证命令'`,
+  ].join(' && ')
+}
+
+export function gpuExporterVerifyCommand(): string {
+  return `curl --fail --silent --show-error http://127.0.0.1:9400/metrics | grep -q '^DCGM_FI_DEV_GPU_UTIL' && echo 'GPU 采集器安装成功' || { echo 'GPU 采集器安装失败，请检查 NVIDIA 驱动和容器日志'; exit 1; }`
 }
 
 export function collectorInstallCommand(token: string): string {
