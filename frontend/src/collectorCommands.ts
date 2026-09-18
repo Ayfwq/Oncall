@@ -16,7 +16,7 @@ export function nodeExporterInstallCommand(): string {
 }
 
 export function nodeExporterVerifyCommand(): string {
-  return `curl --fail --silent --show-error http://127.0.0.1:9100/metrics | grep -q '^node_exporter_build_info' && echo '系统指标采集器安装成功' || { echo '系统指标采集器安装失败'; exit 1; }`
+  return `curl --fail --silent --show-error --connect-timeout 5 --max-time 10 http://127.0.0.1:9100/metrics | grep -q '^node_exporter_build_info' && echo '系统指标采集器安装成功' || { echo '系统指标采集器安装失败'; exit 1; }`
 }
 
 export function nodeExporterRemoveCommand(): string {
@@ -33,7 +33,7 @@ export function gpuExporterInstallCommand(): string {
 }
 
 export function gpuExporterVerifyCommand(): string {
-  return `curl --fail --silent --show-error http://127.0.0.1:9400/metrics | grep -q '^DCGM_FI_DEV_GPU_UTIL' && echo 'GPU 采集器安装成功' || { echo 'GPU 采集器安装失败，请检查 NVIDIA 驱动和容器日志'; exit 1; }`
+  return `curl --fail --silent --show-error --connect-timeout 5 --max-time 10 http://127.0.0.1:9400/metrics | grep -q '^DCGM_FI_DEV_GPU_UTIL' && echo 'GPU 采集器安装成功' || { echo 'GPU 采集器安装失败，请检查 NVIDIA 驱动和容器日志'; exit 1; }`
 }
 
 export function gpuExporterRemoveCommand(): string {
@@ -51,7 +51,7 @@ export function collectorInstallCommand(token: string): string {
 }
 
 export function collectorVerifyCommand(token: string): string {
-  return `curl --fail --silent --show-error --header ${shellQuote(`X-Oncall-Token: ${token || '<页面自动生成的Token>'}`)} http://127.0.0.1:9910/health | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' && echo 'Collector 安装成功' || { echo 'Collector 安装失败'; exit 1; }`
+  return `curl --fail --silent --show-error --connect-timeout 5 --max-time 10 --header ${shellQuote(`X-Oncall-Token: ${token || '<页面自动生成的Token>'}`)} http://127.0.0.1:9910/health | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' && echo 'Collector 安装成功' || { echo 'Collector 安装失败'; exit 1; }`
 }
 
 export function collectorRemoveCommand(): string {

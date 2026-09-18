@@ -33,6 +33,7 @@ describe('collector commands', () => {
     const command = collectorVerifyCommand('oncall-test-token')
 
     expect(command).toContain("--header 'X-Oncall-Token: oncall-test-token'")
+    expect(command).toContain('--connect-timeout 5 --max-time 10')
     expect(command).toContain("echo 'Collector 安装成功'")
     expect(command).toContain("echo 'Collector 安装失败'; exit 1")
   })
