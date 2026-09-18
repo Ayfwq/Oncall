@@ -5,10 +5,13 @@ import {
   DCGM_EXPORTER_IMAGE,
   NODE_EXPORTER_IMAGE,
   collectorInstallCommand,
+  collectorRemoveCommand,
   collectorVerifyCommand,
   gpuExporterInstallCommand,
+  gpuExporterRemoveCommand,
   gpuExporterVerifyCommand,
   nodeExporterInstallCommand,
+  nodeExporterRemoveCommand,
   nodeExporterVerifyCommand,
   shellQuote,
 } from './collectorCommands'
@@ -34,6 +37,14 @@ describe('collector commands', () => {
     expect(command).toContain("echo 'Collector 安装失败'; exit 1")
   })
 
+  it('removes the Collector container and reports the result', () => {
+    const command = collectorRemoveCommand()
+
+    expect(command).toContain('docker rm -f oncall-collector')
+    expect(command).toContain("echo 'Collector 删除成功'")
+    expect(command).toContain("echo 'Collector 删除失败'")
+  })
+
   it('installs and verifies Node Exporter with human-readable output', () => {
     const installCommand = nodeExporterInstallCommand()
     const verifyCommand = nodeExporterVerifyCommand()
@@ -44,6 +55,10 @@ describe('collector commands', () => {
     expect(verifyCommand).toContain("grep -q '^node_exporter_build_info'")
     expect(verifyCommand).toContain("echo '系统指标采集器安装成功'")
     expect(verifyCommand).toContain("echo '系统指标采集器安装失败'; exit 1")
+
+    const removeCommand = nodeExporterRemoveCommand()
+    expect(removeCommand).toContain('docker rm -f oncall-node-exporter')
+    expect(removeCommand).toContain("echo '系统指标采集器删除成功'")
   })
 
   it('installs and verifies DCGM Exporter with real GPU metrics', () => {
@@ -57,6 +72,10 @@ describe('collector commands', () => {
     expect(verifyCommand).toContain("grep -q '^DCGM_FI_DEV_GPU_UTIL'")
     expect(verifyCommand).toContain("echo 'GPU 采集器安装成功'")
     expect(verifyCommand).toContain("echo 'GPU 采集器安装失败，请检查 NVIDIA 驱动和容器日志'; exit 1")
+
+    const removeCommand = gpuExporterRemoveCommand()
+    expect(removeCommand).toContain('docker rm -f oncall-dcgm-exporter')
+    expect(removeCommand).toContain("echo 'GPU 采集器删除成功'")
   })
 
   it('quotes manually entered shell metacharacters', () => {

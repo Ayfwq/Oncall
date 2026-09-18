@@ -19,6 +19,10 @@ export function nodeExporterVerifyCommand(): string {
   return `curl --fail --silent --show-error http://127.0.0.1:9100/metrics | grep -q '^node_exporter_build_info' && echo '系统指标采集器安装成功' || { echo '系统指标采集器安装失败'; exit 1; }`
 }
 
+export function nodeExporterRemoveCommand(): string {
+  return `if ! command -v docker >/dev/null 2>&1; then echo '系统指标采集器删除失败：未找到 Docker'; exit 1; fi && (docker rm -f oncall-node-exporter >/dev/null 2>&1 || true) && if docker ps -a --format '{{.Names}}' | grep -Fxq 'oncall-node-exporter'; then echo '系统指标采集器删除失败'; exit 1; else echo '系统指标采集器删除成功'; fi`
+}
+
 export function gpuExporterInstallCommand(): string {
   return [
     `docker pull ${DCGM_EXPORTER_IMAGE}`,
@@ -30,6 +34,10 @@ export function gpuExporterInstallCommand(): string {
 
 export function gpuExporterVerifyCommand(): string {
   return `curl --fail --silent --show-error http://127.0.0.1:9400/metrics | grep -q '^DCGM_FI_DEV_GPU_UTIL' && echo 'GPU 采集器安装成功' || { echo 'GPU 采集器安装失败，请检查 NVIDIA 驱动和容器日志'; exit 1; }`
+}
+
+export function gpuExporterRemoveCommand(): string {
+  return `if ! command -v docker >/dev/null 2>&1; then echo 'GPU 采集器删除失败：未找到 Docker'; exit 1; fi && (docker rm -f oncall-dcgm-exporter >/dev/null 2>&1 || true) && if docker ps -a --format '{{.Names}}' | grep -Fxq 'oncall-dcgm-exporter'; then echo 'GPU 采集器删除失败'; exit 1; else echo 'GPU 采集器删除成功'; fi`
 }
 
 export function collectorInstallCommand(token: string): string {
@@ -44,4 +52,8 @@ export function collectorInstallCommand(token: string): string {
 
 export function collectorVerifyCommand(token: string): string {
   return `curl --fail --silent --show-error --header ${shellQuote(`X-Oncall-Token: ${token || '<页面自动生成的Token>'}`)} http://127.0.0.1:9910/health | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' && echo 'Collector 安装成功' || { echo 'Collector 安装失败'; exit 1; }`
+}
+
+export function collectorRemoveCommand(): string {
+  return `if ! command -v docker >/dev/null 2>&1; then echo 'Collector 删除失败：未找到 Docker'; exit 1; fi && (docker rm -f oncall-collector >/dev/null 2>&1 || true) && if docker ps -a --format '{{.Names}}' | grep -Fxq 'oncall-collector'; then echo 'Collector 删除失败'; exit 1; else echo 'Collector 删除成功'; fi`
 }

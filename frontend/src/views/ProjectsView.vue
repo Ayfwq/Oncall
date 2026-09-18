@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import { collectorInstallCommand, collectorVerifyCommand, gpuExporterInstallCommand, gpuExporterVerifyCommand, nodeExporterInstallCommand, nodeExporterVerifyCommand } from '../collectorCommands'
+import { collectorInstallCommand, collectorRemoveCommand, collectorVerifyCommand, gpuExporterInstallCommand, gpuExporterRemoveCommand, gpuExporterVerifyCommand, nodeExporterInstallCommand, nodeExporterRemoveCommand, nodeExporterVerifyCommand } from '../collectorCommands'
 import type { MonitoredServer, ProjectDraftTestResult, ProjectSummary, ServerTestResult } from '../types'
 
 const route = useRoute()
@@ -38,10 +38,13 @@ const testResult = ref<ProjectDraftTestResult | null>(null)
 
 const nodeCommand = nodeExporterInstallCommand()
 const nodeCheckCommand = nodeExporterVerifyCommand()
+const nodeRemoveCommand = nodeExporterRemoveCommand()
 const gpuCommand = gpuExporterInstallCommand()
 const gpuCheckCommand = gpuExporterVerifyCommand()
+const gpuRemoveCommand = gpuExporterRemoveCommand()
 const collectorCommand = computed(() => collectorInstallCommand(serverForm.value.collector_token.trim()))
 const collectorCheckCommand = computed(() => collectorVerifyCommand(serverForm.value.collector_token.trim()))
+const collectorRemoveCommandText = collectorRemoveCommand()
 const serverSignature = computed(() => `${serverForm.value.node_metrics_url.trim()}|${serverForm.value.gpu_metrics_url.trim()}|${serverForm.value.collector_url.trim()}|${serverForm.value.collector_token.trim()}`)
 const canSaveServer = computed(() => Boolean(serverForm.value.name.trim() && serverForm.value.node_metrics_url.trim() && serverForm.value.collector_url.trim() && serverForm.value.collector_token.trim() && serverTest.value?.ok && testedServerSignature.value === serverSignature.value))
 const signature = computed(() => [serverId.value, healthUrl.value.trim(), metricsUrl.value.trim(), databaseUrl.value.trim()].join('|'))
@@ -233,18 +236,21 @@ onMounted(load)
           <div v-else-if="serverMode === 'new'" class="new-server-box">
             <div class="simple-note"><span>系统指标与 Collector 必填</span><p>Collector 自动发现 Docker 日志并执行只读数据库诊断。</p></div>
             <el-collapse class="install-guide"><el-collapse-item title="服务器还没安装采集器？展开查看命令" name="install">
-              <div class="command-row"><div><b>安装或更新系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'node-install' ? 'success' : 'default'" @click="copy(nodeCommand, 'node-install')">{{ copiedCommand === 'node-install' ? '✓' : '复制' }}</el-button></div>
-              <div class="command-row verify-command-row"><div><b>验证系统指标采集器</b><code>{{ nodeCheckCommand }}</code><small>成功时输出：系统指标采集器安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'node-check' ? 'success' : 'default'" @click="copy(nodeCheckCommand, 'node-check')">{{ copiedCommand === 'node-check' ? '✓' : '复制' }}</el-button></div>
-              <div class="command-row"><div><b>安装或更新日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'collector-install' ? 'success' : 'default'" @click="copy(collectorCommand, 'collector-install')">{{ copiedCommand === 'collector-install' ? '✓' : '复制' }}</el-button></div>
-              <div class="command-row verify-command-row"><div><b>验证 Collector</b><code>{{ collectorCheckCommand }}</code><small>成功时输出：Collector 安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'collector-check' ? 'success' : 'default'" @click="copy(collectorCheckCommand, 'collector-check')">{{ copiedCommand === 'collector-check' ? '✓' : '复制' }}</el-button></div>
-              <div class="command-row"><div><b>安装或更新 GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'gpu-install' ? 'success' : 'default'" @click="copy(gpuCommand, 'gpu-install')">{{ copiedCommand === 'gpu-install' ? '✓' : '复制' }}</el-button></div>
-              <div class="command-row verify-command-row"><div><b>验证 GPU 采集器</b><code>{{ gpuCheckCommand }}</code><small>成功时输出：GPU 采集器安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'gpu-check' ? 'success' : 'default'" @click="copy(gpuCheckCommand, 'gpu-check')">{{ copiedCommand === 'gpu-check' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row"><div><b>安装或更新系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'node-install' ? 'success' : 'default'" @click="copy(nodeCommand, 'node-install')">{{ copiedCommand === 'node-install' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row verify-command-row"><div><b>验证系统指标采集器</b><code>{{ nodeCheckCommand }}</code><small>成功时输出：系统指标采集器安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'node-check' ? 'success' : 'default'" @click="copy(nodeCheckCommand, 'node-check')">{{ copiedCommand === 'node-check' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row remove-command-row"><div><b>删除系统指标采集器</b><code>{{ nodeRemoveCommand }}</code><small>执行后会删除 oncall-node-exporter 容器</small></div><el-button class="copy-command-button" size="small" plain type="danger" :class="{ 'copy-command-button--done': copiedCommand === 'node-remove' }" @click="copy(nodeRemoveCommand, 'node-remove')">{{ copiedCommand === 'node-remove' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row"><div><b>安装或更新日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'collector-install' ? 'success' : 'default'" @click="copy(collectorCommand, 'collector-install')">{{ copiedCommand === 'collector-install' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row verify-command-row"><div><b>验证 Collector</b><code>{{ collectorCheckCommand }}</code><small>成功时输出：Collector 安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'collector-check' ? 'success' : 'default'" @click="copy(collectorCheckCommand, 'collector-check')">{{ copiedCommand === 'collector-check' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row remove-command-row"><div><b>删除日志与数据库 Collector</b><code>{{ collectorRemoveCommandText }}</code><small>执行后会删除 oncall-collector 容器</small></div><el-button class="copy-command-button" size="small" plain type="danger" :class="{ 'copy-command-button--done': copiedCommand === 'collector-remove' }" @click="copy(collectorRemoveCommandText, 'collector-remove')">{{ copiedCommand === 'collector-remove' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row"><div><b>安装或更新 GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'gpu-install' ? 'success' : 'default'" @click="copy(gpuCommand, 'gpu-install')">{{ copiedCommand === 'gpu-install' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row verify-command-row"><div><b>验证 GPU 采集器</b><code>{{ gpuCheckCommand }}</code><small>成功时输出：GPU 采集器安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'gpu-check' ? 'success' : 'default'" @click="copy(gpuCheckCommand, 'gpu-check')">{{ copiedCommand === 'gpu-check' ? '✓' : '复制' }}</el-button></div>
+               <div class="command-row remove-command-row"><div><b>删除 GPU 采集器</b><code>{{ gpuRemoveCommand }}</code><small>执行后会删除 oncall-dcgm-exporter 容器</small></div><el-button class="copy-command-button" size="small" plain type="danger" :class="{ 'copy-command-button--done': copiedCommand === 'gpu-remove' }" @click="copy(gpuRemoveCommand, 'gpu-remove')">{{ copiedCommand === 'gpu-remove' ? '✓' : '复制' }}</el-button></div>
             </el-collapse-item></el-collapse>
             <div class="server-form-grid">
               <el-form-item label="服务器名称（必填）" required><el-input v-model="serverForm.name" size="large" placeholder="例如：服务器 B · 股票服务" /></el-form-item>
               <el-form-item label="系统指标地址（必填，默认 9100）" required><el-input v-model="serverForm.node_metrics_url" size="large" placeholder="http://10.0.0.22:9100/metrics" /></el-form-item>
               <el-form-item label="Collector 地址（必填，默认 9910）" required><el-input v-model="serverForm.collector_url" size="large" placeholder="http://10.0.0.22:9910" /></el-form-item>
-              <el-form-item label="Collector Token（自动生成）" required><el-input v-model="serverForm.collector_token" type="password" show-password size="large" placeholder="点击添加新服务器后自动生成，可手动替换" /></el-form-item>
+               <el-form-item label="Collector Token（系统自动生成）" required><el-input v-model="serverForm.collector_token" type="password" show-password readonly size="large" placeholder="点击添加新服务器后自动生成" /></el-form-item>
               <el-form-item label="GPU 指标地址（可选，默认 9400）"><el-input v-model="serverForm.gpu_metrics_url" size="large" placeholder="无 NVIDIA GPU 留空，例如 http://10.0.0.22:9400/metrics" /></el-form-item>
             </div>
             <div v-if="serverTest && testedServerSignature === serverSignature" class="server-test-result" :class="serverTest.ok ? 'passed' : 'failed'"><span>{{ serverTest.ok ? '✓' : '!' }}</span><div><b>{{ serverTest.ok ? '服务器连接正常' : '服务器连接失败' }}</b><small>{{ serverTest.ok ? '已直连并识别 CPU、内存、磁盘和网络指标' : (serverTest.error || '请检查地址和网络') }}</small></div></div>
@@ -305,5 +311,6 @@ onMounted(load)
 .server-form-grid :deep(.el-form-item__content){min-width:0;flex:1}
 @media(max-width:700px){.server-form-grid :deep(.el-form-item){display:block}.server-form-grid :deep(.el-form-item__label){width:auto;padding-right:0;text-align:left;white-space:normal}.server-form-grid :deep(.el-form-item__content){width:100%}}
 .verify-command-row{margin:0 0 5px;padding:9px 10px;border:1px solid #e5e9e7;border-radius:10px;background:#f5f7f6;color:#74817d}.verify-command-row b{color:#65726e}.verify-command-row code{color:#697570;background:#ecefed}.verify-command-row small{display:block;margin-top:5px;color:#929c98;font-size:9px}
+.remove-command-row{margin:0 0 5px;padding:9px 10px;border:1px solid #f0dfe0;border-radius:10px;background:#fff8f8;color:#8b6f72}.remove-command-row b{color:#a05258}.remove-command-row code{color:#8b696d;background:#fff0f1}.remove-command-row small{display:block;margin-top:5px;color:#b18e91;font-size:9px}
 .copy-command-button{min-width:48px}
 </style>
