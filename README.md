@@ -68,7 +68,9 @@ docker compose up -d
 
 Compose 只运行 PostgreSQL/Milvus/etcd/MinIO；远程 Python 项目由目标服务器的 Node Exporter、可选 DCGM Exporter 和项目自身的 `/health`、`/metrics` 提供观测数据。
 
-目标服务器还需运行轻量 Collector，以只读方式发现 Docker stdout 日志并执行预定义 PostgreSQL 诊断：
+目标服务器还需运行轻量 Collector，以只读方式发现 Docker stdout 日志并执行预定义 PostgreSQL 诊断。正式接入时，从“添加服务器”页面复制安装命令；目标服务器只需安装 Docker，不需要本仓库源码或 Compose。页面同时提供携带相同 Token 的验证命令。
+
+Collector 镜像由 `.github/workflows/publish-collector-image.yml` 在 `main` 分支更新或推送 `v*` 标签时自动发布到 `ghcr.io/ayfwq/oncall-collector`。首次发布后，需要在 GitHub Packages 设置中将该包设为 Public。开发本仓库时仍可使用本地构建：
 
 ```bash
 ONCALL_COLLECTOR_TOKEN=<随机令牌> docker compose -f deploy/collector.compose.yaml up -d --build

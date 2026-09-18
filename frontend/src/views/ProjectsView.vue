@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
+import { collectorInstallCommand, collectorVerifyCommand } from '../collectorCommands'
 import type { MonitoredServer, ProjectDraftTestResult, ProjectSummary, ServerTestResult } from '../types'
 
 const route = useRoute()
@@ -35,10 +36,8 @@ const testResult = ref<ProjectDraftTestResult | null>(null)
 
 const nodeCommand = `docker run -d --name oncall-node-exporter --restart unless-stopped --network host --pid host -v "/:/host:ro,rslave" quay.io/prometheus/node-exporter:v1.12.1 --path.rootfs=/host`
 const gpuCommand = `docker run -d --name oncall-dcgm-exporter --restart unless-stopped --gpus all --cap-add SYS_ADMIN -p 9400:9400 nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless`
-const collectorCommand = computed(() => {
-  const token = serverForm.value.collector_token.trim() || '<将自动生成>'
-  return `ONCALL_COLLECTOR_TOKEN=${token} docker compose -f deploy/collector.compose.yaml up -d --build`
-})
+const collectorCommand = computed(() => collectorInstallCommand(serverForm.value.collector_token.trim()))
+const collectorCheckCommand = computed(() => collectorVerifyCommand(serverForm.value.collector_token.trim()))
 const serverSignature = computed(() => `${serverForm.value.node_metrics_url.trim()}|${serverForm.value.gpu_metrics_url.trim()}|${serverForm.value.collector_url.trim()}|${serverForm.value.collector_token.trim()}`)
 const canSaveServer = computed(() => Boolean(serverForm.value.name.trim() && serverForm.value.node_metrics_url.trim() && serverForm.value.collector_url.trim() && serverForm.value.collector_token.trim() && serverTest.value?.ok && testedServerSignature.value === serverSignature.value))
 const signature = computed(() => [serverId.value, healthUrl.value.trim(), metricsUrl.value.trim(), databaseUrl.value.trim()].join('|'))
@@ -225,9 +224,10 @@ onMounted(load)
             <div class="simple-note"><span>系统指标与 Collector 必填</span><p>Collector 自动发现 Docker 日志并执行只读数据库诊断。</p></div>
             <el-collapse class="install-guide"><el-collapse-item title="服务器还没安装采集器？展开查看命令" name="install">
               <div class="command-row"><div><b>系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button size="small" @click="copy(nodeCommand)">复制</el-button></div>
-              <div class="command-row"><div><b>日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button size="small" @click="copy(collectorCommand)">复制</el-button></div>
+              <div class="command-row"><div><b>安装或更新日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button size="small" @click="copy(collectorCommand)">复制</el-button></div>
+              <div class="command-row"><div><b>验证 Collector 安装是否成功</b><code>{{ collectorCheckCommand }}</code></div><el-button size="small" @click="copy(collectorCheckCommand)">复制</el-button></div>
               <div class="command-row"><div><b>GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button size="small" @click="copy(gpuCommand)">复制</el-button></div>
-              <p class="install-hint">在目标 Linux 服务器执行；Collector 默认端口为 9910，并需要访问本机 Docker。</p>
+              <p class="install-hint">依次在目标 Linux 服务器执行安装与验证命令；验证返回 ok: true 即安装成功。Collector 默认端口为 9910，并需要访问本机 Docker。</p>
             </el-collapse-item></el-collapse>
             <div class="server-form-grid">
               <el-form-item label="服务器名称（必填）" required><el-input v-model="serverForm.name" size="large" placeholder="例如：服务器 B · 股票服务" /></el-form-item>
