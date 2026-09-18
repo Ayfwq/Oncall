@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import { collectorInstallCommand, collectorVerifyCommand } from '../collectorCommands'
+import { collectorInstallCommand, collectorVerifyCommand, nodeExporterInstallCommand, nodeExporterVerifyCommand } from '../collectorCommands'
 import type { MonitoredServer, ProjectDraftTestResult, ProjectSummary, ServerTestResult } from '../types'
 
 const route = useRoute()
@@ -34,7 +34,8 @@ const search = ref('')
 const testedSignature = ref('')
 const testResult = ref<ProjectDraftTestResult | null>(null)
 
-const nodeCommand = `docker run -d --name oncall-node-exporter --restart unless-stopped --network host --pid host -v "/:/host:ro,rslave" quay.io/prometheus/node-exporter:v1.12.1 --path.rootfs=/host`
+const nodeCommand = nodeExporterInstallCommand()
+const nodeCheckCommand = nodeExporterVerifyCommand()
 const gpuCommand = `docker run -d --name oncall-dcgm-exporter --restart unless-stopped --gpus all --cap-add SYS_ADMIN -p 9400:9400 nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless`
 const collectorCommand = computed(() => collectorInstallCommand(serverForm.value.collector_token.trim()))
 const collectorCheckCommand = computed(() => collectorVerifyCommand(serverForm.value.collector_token.trim()))
@@ -90,7 +91,7 @@ function projectPayload() {
 }
 
 async function copy(text: string) {
-  try { await navigator.clipboard.writeText(text); show('安装命令已复制') }
+  try { await navigator.clipboard.writeText(text); show('命令已复制') }
   catch { show('浏览器无法自动复制，请手动选择命令', true) }
 }
 
@@ -223,11 +224,12 @@ onMounted(load)
           <div v-else-if="serverMode === 'new'" class="new-server-box">
             <div class="simple-note"><span>系统指标与 Collector 必填</span><p>Collector 自动发现 Docker 日志并执行只读数据库诊断。</p></div>
             <el-collapse class="install-guide"><el-collapse-item title="服务器还没安装采集器？展开查看命令" name="install">
-              <div class="command-row"><div><b>系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button size="small" @click="copy(nodeCommand)">复制</el-button></div>
+              <div class="command-row"><div><b>安装或更新系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button size="small" @click="copy(nodeCommand)">复制</el-button></div>
+              <div class="command-row verify-command-row"><div><b>验证系统指标采集器</b><code>{{ nodeCheckCommand }}</code><small>成功时输出：系统指标采集器安装成功</small></div><el-button size="small" plain @click="copy(nodeCheckCommand)">复制</el-button></div>
               <div class="command-row"><div><b>安装或更新日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button size="small" @click="copy(collectorCommand)">复制</el-button></div>
-              <div class="command-row"><div><b>验证 Collector 安装是否成功</b><code>{{ collectorCheckCommand }}</code></div><el-button size="small" @click="copy(collectorCheckCommand)">复制</el-button></div>
+              <div class="command-row verify-command-row"><div><b>验证 Collector</b><code>{{ collectorCheckCommand }}</code><small>成功时输出：Collector 安装成功</small></div><el-button size="small" plain @click="copy(collectorCheckCommand)">复制</el-button></div>
               <div class="command-row"><div><b>GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button size="small" @click="copy(gpuCommand)">复制</el-button></div>
-              <p class="install-hint">依次在目标 Linux 服务器执行安装与验证命令；验证返回 ok: true 即安装成功。Collector 默认端口为 9910，并需要访问本机 Docker。</p>
+              <p class="install-hint">每个采集器先执行安装命令，再执行其下方的灰色验证命令；终端会直接显示安装成功或安装失败。Collector 默认端口为 9910，并需要访问本机 Docker。</p>
             </el-collapse-item></el-collapse>
             <div class="server-form-grid">
               <el-form-item label="服务器名称（必填）" required><el-input v-model="serverForm.name" size="large" placeholder="例如：服务器 B · 股票服务" /></el-form-item>
@@ -293,4 +295,5 @@ onMounted(load)
 .server-form-grid :deep(.el-form-item__label){width:250px;flex:0 0 250px;padding-right:14px;text-align:left;white-space:nowrap}
 .server-form-grid :deep(.el-form-item__content){min-width:0;flex:1}
 @media(max-width:700px){.server-form-grid :deep(.el-form-item){display:block}.server-form-grid :deep(.el-form-item__label){width:auto;padding-right:0;text-align:left;white-space:normal}.server-form-grid :deep(.el-form-item__content){width:100%}}
+.verify-command-row{margin:0 0 5px;padding:9px 10px;border:1px solid #e5e9e7;border-radius:10px;background:#f5f7f6;color:#74817d}.verify-command-row b{color:#65726e}.verify-command-row code{color:#697570;background:#ecefed}.verify-command-row small{display:block;margin-top:5px;color:#929c98;font-size:9px}
 </style>
