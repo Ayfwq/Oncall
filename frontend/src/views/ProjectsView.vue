@@ -231,7 +231,6 @@ onMounted(load)
               <div class="command-row verify-command-row"><div><b>验证 Collector</b><code>{{ collectorCheckCommand }}</code><small>成功时输出：Collector 安装成功</small></div><el-button size="small" plain @click="copy(collectorCheckCommand)">复制</el-button></div>
               <div class="command-row"><div><b>安装或更新 GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button size="small" @click="copy(gpuCommand)">复制</el-button></div>
               <div class="command-row verify-command-row"><div><b>验证 GPU 采集器</b><code>{{ gpuCheckCommand }}</code><small>成功时输出：GPU 采集器安装成功</small></div><el-button size="small" plain @click="copy(gpuCheckCommand)">复制</el-button></div>
-              <p class="install-hint">每个采集器先执行安装命令，再执行其下方的灰色验证命令；终端会直接显示安装成功或安装失败。Collector 默认端口为 9910，并需要访问本机 Docker。</p>
             </el-collapse-item></el-collapse>
             <div class="server-form-grid">
               <el-form-item label="服务器名称（必填）" required><el-input v-model="serverForm.name" size="large" placeholder="例如：服务器 B · 股票服务" /></el-form-item>
