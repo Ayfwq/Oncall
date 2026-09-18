@@ -30,6 +30,8 @@ const testing = ref(false)
 const loading = ref(false)
 const message = ref('')
 const messageError = ref(false)
+const copiedCommand = ref('')
+let copyResetTimer: ReturnType<typeof setTimeout> | undefined
 const search = ref('')
 const testedSignature = ref('')
 const testResult = ref<ProjectDraftTestResult | null>(null)
@@ -91,8 +93,14 @@ function projectPayload() {
   }
 }
 
-async function copy(text: string) {
-  try { await navigator.clipboard.writeText(text); show('命令已复制') }
+async function copy(text: string, key: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copiedCommand.value = key
+    show('复制成功')
+    if (copyResetTimer) clearTimeout(copyResetTimer)
+    copyResetTimer = setTimeout(() => { copiedCommand.value = '' }, 1800)
+  }
   catch { show('浏览器无法自动复制，请手动选择命令', true) }
 }
 
@@ -225,12 +233,12 @@ onMounted(load)
           <div v-else-if="serverMode === 'new'" class="new-server-box">
             <div class="simple-note"><span>系统指标与 Collector 必填</span><p>Collector 自动发现 Docker 日志并执行只读数据库诊断。</p></div>
             <el-collapse class="install-guide"><el-collapse-item title="服务器还没安装采集器？展开查看命令" name="install">
-              <div class="command-row"><div><b>安装或更新系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button size="small" @click="copy(nodeCommand)">复制</el-button></div>
-              <div class="command-row verify-command-row"><div><b>验证系统指标采集器</b><code>{{ nodeCheckCommand }}</code><small>成功时输出：系统指标采集器安装成功</small></div><el-button size="small" plain @click="copy(nodeCheckCommand)">复制</el-button></div>
-              <div class="command-row"><div><b>安装或更新日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button size="small" @click="copy(collectorCommand)">复制</el-button></div>
-              <div class="command-row verify-command-row"><div><b>验证 Collector</b><code>{{ collectorCheckCommand }}</code><small>成功时输出：Collector 安装成功</small></div><el-button size="small" plain @click="copy(collectorCheckCommand)">复制</el-button></div>
-              <div class="command-row"><div><b>安装或更新 GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button size="small" @click="copy(gpuCommand)">复制</el-button></div>
-              <div class="command-row verify-command-row"><div><b>验证 GPU 采集器</b><code>{{ gpuCheckCommand }}</code><small>成功时输出：GPU 采集器安装成功</small></div><el-button size="small" plain @click="copy(gpuCheckCommand)">复制</el-button></div>
+              <div class="command-row"><div><b>安装或更新系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'node-install' ? 'success' : 'default'" @click="copy(nodeCommand, 'node-install')">{{ copiedCommand === 'node-install' ? '✓' : '复制' }}</el-button></div>
+              <div class="command-row verify-command-row"><div><b>验证系统指标采集器</b><code>{{ nodeCheckCommand }}</code><small>成功时输出：系统指标采集器安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'node-check' ? 'success' : 'default'" @click="copy(nodeCheckCommand, 'node-check')">{{ copiedCommand === 'node-check' ? '✓' : '复制' }}</el-button></div>
+              <div class="command-row"><div><b>安装或更新日志与数据库 Collector（必须）</b><code>{{ collectorCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'collector-install' ? 'success' : 'default'" @click="copy(collectorCommand, 'collector-install')">{{ copiedCommand === 'collector-install' ? '✓' : '复制' }}</el-button></div>
+              <div class="command-row verify-command-row"><div><b>验证 Collector</b><code>{{ collectorCheckCommand }}</code><small>成功时输出：Collector 安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'collector-check' ? 'success' : 'default'" @click="copy(collectorCheckCommand, 'collector-check')">{{ copiedCommand === 'collector-check' ? '✓' : '复制' }}</el-button></div>
+              <div class="command-row"><div><b>安装或更新 GPU 采集器（可选）</b><code>{{ gpuCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'gpu-install' ? 'success' : 'default'" @click="copy(gpuCommand, 'gpu-install')">{{ copiedCommand === 'gpu-install' ? '✓' : '复制' }}</el-button></div>
+              <div class="command-row verify-command-row"><div><b>验证 GPU 采集器</b><code>{{ gpuCheckCommand }}</code><small>成功时输出：GPU 采集器安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'gpu-check' ? 'success' : 'default'" @click="copy(gpuCheckCommand, 'gpu-check')">{{ copiedCommand === 'gpu-check' ? '✓' : '复制' }}</el-button></div>
             </el-collapse-item></el-collapse>
             <div class="server-form-grid">
               <el-form-item label="服务器名称（必填）" required><el-input v-model="serverForm.name" size="large" placeholder="例如：服务器 B · 股票服务" /></el-form-item>
@@ -297,4 +305,5 @@ onMounted(load)
 .server-form-grid :deep(.el-form-item__content){min-width:0;flex:1}
 @media(max-width:700px){.server-form-grid :deep(.el-form-item){display:block}.server-form-grid :deep(.el-form-item__label){width:auto;padding-right:0;text-align:left;white-space:normal}.server-form-grid :deep(.el-form-item__content){width:100%}}
 .verify-command-row{margin:0 0 5px;padding:9px 10px;border:1px solid #e5e9e7;border-radius:10px;background:#f5f7f6;color:#74817d}.verify-command-row b{color:#65726e}.verify-command-row code{color:#697570;background:#ecefed}.verify-command-row small{display:block;margin-top:5px;color:#929c98;font-size:9px}
+.copy-command-button{min-width:48px}
 </style>
