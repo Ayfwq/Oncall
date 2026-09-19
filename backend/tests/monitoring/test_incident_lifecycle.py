@@ -13,7 +13,7 @@ import time
 import pytest
 from helpers import SYNTH, make_project_with_rule, project_incidents, rule_id, synth_snapshot
 from oncall.application.incident_service import IncidentService, incident_fingerprint
-from oncall.infrastructure.db.models import Incident, IncidentSignal, MonitoringRule
+from oncall.infrastructure.db.models import BackgroundJob, Conversation, Incident, IncidentSignal, MonitoringRule, MonitoringRuleState
 from oncall.infrastructure.db.session import SessionFactory
 from oncall.monitoring.engine import MonitoringEngine
 from sqlalchemy import func, select
@@ -134,6 +134,27 @@ async def test_resolve_manual_resets_rule_state(db, test_user):
     await svc.resolve(inc.id, "manual_resolve")
     st = await db.get(MonitoringRuleState, rid)
     assert st.state == "normal" and st.abnormal_hits == 0 and st.recovery_hits == 0
+
+
+@pytest.mark.integration
+async def test_delete_incident_removes_investigation_and_rearms_detector(db, test_user):
+    project = await make_project_with_rule(db, test_user)
+    rid = await rule_id(db, project.id)
+    engine = MonitoringEngine(db)
+    await engine.evaluate_rules(project.id, synth_snapshot(project.id, 5.0))
+    await engine.evaluate_rules(project.id, synth_snapshot(project.id, 6.0))
+    inc = (await project_incidents(db, project.id, rid))[0]
+    conv = await db.scalar(select(Conversation).where(Conversation.incident_id == inc.id))
+    assert conv is not None
+    assert await db.scalar(select(BackgroundJob).where(BackgroundJob.payload['incident_id'].astext == str(inc.id))) is not None
+
+    assert await IncidentService(db).delete(inc.id)
+    assert await db.get(Incident, inc.id) is None
+    assert await db.get(Conversation, conv.id) is None
+    assert await db.scalar(select(BackgroundJob).where(BackgroundJob.payload['incident_id'].astext == str(inc.id))) is None
+    state = await db.get(MonitoringRuleState, rid)
+    assert state is not None and state.state == 'normal' and state.abnormal_hits == 0
+    assert not await IncidentService(db).delete(inc.id)
 
 
 @pytest.mark.integration

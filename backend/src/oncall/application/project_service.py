@@ -33,49 +33,53 @@ from oncall.security.crypto import SecretBox
 def default_remote_python_rules(*, has_gpu: bool, has_health: bool, has_metrics: bool, has_logs: bool = True, has_database: bool = True) -> list[MonitoringRuleDTO]:
     """Build the only supported starter rule set from available data sources."""
     rules = [
-        MonitoringRuleDTO(metric_key='host.exporter.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=2, recovery_for=2, severity='critical'),
-        MonitoringRuleDTO(metric_key='host.cpu.percent', operator='>', trigger_threshold=90, recovery_threshold=80, trigger_for=3, recovery_for=3, severity='warning'),
-        MonitoringRuleDTO(metric_key='host.memory.percent', operator='>', trigger_threshold=90, recovery_threshold=80, trigger_for=3, recovery_for=3, severity='warning'),
-        MonitoringRuleDTO(metric_key='host.disk.usage_percent', operator='>', trigger_threshold=90, recovery_threshold=85, trigger_for=1, recovery_for=2, severity='warning'),
+        MonitoringRuleDTO(metric_key='host.exporter.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=3, recovery_for=2, severity='critical'),
+        MonitoringRuleDTO(metric_key='host.cpu.percent', operator='>', trigger_threshold=95, recovery_threshold=85, trigger_for=5, recovery_for=3, severity='warning'),
+        MonitoringRuleDTO(metric_key='host.memory.percent', operator='>', trigger_threshold=95, recovery_threshold=85, trigger_for=5, recovery_for=3, severity='warning'),
+        MonitoringRuleDTO(metric_key='host.disk.usage_percent', operator='>', trigger_threshold=90, recovery_threshold=85, trigger_for=3, recovery_for=3, severity='warning'),
     ]
     if has_gpu:
         rules.extend([
-            MonitoringRuleDTO(metric_key='host.gpu.exporter.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=2, recovery_for=2, severity='warning'),
-            MonitoringRuleDTO(metric_key='host.gpu.memory_percent', operator='>', trigger_threshold=90, recovery_threshold=80, trigger_for=3, recovery_for=3, severity='warning'),
-            MonitoringRuleDTO(metric_key='host.gpu.temperature_celsius', operator='>', trigger_threshold=85, recovery_threshold=75, trigger_for=3, recovery_for=3, severity='critical'),
+            MonitoringRuleDTO(metric_key='host.gpu.exporter.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=3, recovery_for=2, severity='warning'),
+            MonitoringRuleDTO(metric_key='host.gpu.memory_percent', operator='>', trigger_threshold=95, recovery_threshold=85, trigger_for=5, recovery_for=3, severity='warning'),
+            MonitoringRuleDTO(metric_key='host.gpu.temperature_celsius', operator='>', trigger_threshold=90, recovery_threshold=80, trigger_for=3, recovery_for=3, severity='critical'),
         ])
     if has_health:
         rules.extend([
-            MonitoringRuleDTO(metric_key='service.consecutive_failures', operator='>=', trigger_threshold=1, recovery_threshold=0.5, trigger_for=2, recovery_for=2, severity='critical'),
-            MonitoringRuleDTO(metric_key='service.latency_ms', operator='>', trigger_threshold=1000, recovery_threshold=700, trigger_for=3, recovery_for=3, severity='warning', detection_mode='hybrid'),
+            MonitoringRuleDTO(metric_key='service.consecutive_failures', operator='>=', trigger_threshold=3, recovery_threshold=1, trigger_for=1, recovery_for=2, severity='critical'),
+            MonitoringRuleDTO(metric_key='service.latency_ms', operator='>', trigger_threshold=1500, recovery_threshold=800, trigger_for=4, recovery_for=3, severity='warning', detection_mode='hybrid'),
         ])
     if has_metrics:
         rules.extend([
-            MonitoringRuleDTO(metric_key='app.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=2, recovery_for=2, severity='critical'),
-            MonitoringRuleDTO(metric_key='app.http.error_rate', operator='>', trigger_threshold=0.1, recovery_threshold=0.05, severity='warning', conditions={'all': [
-                {'metric_key': 'app.http.rps', 'resource_key': 'default', 'operator': '>', 'threshold': 1.0},
+            MonitoringRuleDTO(metric_key='app.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=3, recovery_for=2, severity='critical'),
+            MonitoringRuleDTO(metric_key='app.http.error_rate', operator='>', trigger_threshold=0.1, recovery_threshold=0.05, trigger_for=3, recovery_for=2, severity='warning', conditions={'all': [
+                {'metric_key': 'app.http.rps', 'resource_key': 'default', 'operator': '>', 'threshold': 5.0},
                 {'metric_key': 'app.http.error_rate', 'resource_key': 'default', 'operator': '>', 'threshold': 0.1},
             ]}),
-            MonitoringRuleDTO(metric_key='app.http.p95_ms', operator='>', trigger_threshold=800, recovery_threshold=500, severity='warning', detection_mode='hybrid'),
-            MonitoringRuleDTO(metric_key='app.http.p99_ms', operator='>', trigger_threshold=2000, recovery_threshold=1000, severity='critical', detection_mode='hybrid'),
-            MonitoringRuleDTO(metric_key='app.http.availability', operator='<', trigger_threshold=95, recovery_threshold=99, severity='warning'),
-            MonitoringRuleDTO(metric_key='process.target.cpu_percent_sum', operator='>', trigger_threshold=10000, recovery_threshold=9000, trigger_for=3, recovery_for=3, severity='warning', detection_mode='baseline'),
-            MonitoringRuleDTO(metric_key='process.target.rss_bytes_sum', operator='>', trigger_threshold=1e15, recovery_threshold=9e14, trigger_for=3, recovery_for=3, severity='warning', detection_mode='baseline'),
+            MonitoringRuleDTO(metric_key='app.http.p95_ms', operator='>', trigger_threshold=1500, recovery_threshold=800, trigger_for=3, recovery_for=3, severity='warning', detection_mode='hybrid'),
+            MonitoringRuleDTO(metric_key='app.http.p99_ms', operator='>', trigger_threshold=3000, recovery_threshold=1500, trigger_for=3, recovery_for=3, severity='warning', detection_mode='hybrid'),
+            MonitoringRuleDTO(metric_key='app.http.availability', operator='<', trigger_threshold=95, recovery_threshold=99, trigger_for=3, recovery_for=2, severity='warning'),
+            MonitoringRuleDTO(metric_key='process.target.cpu_percent_sum', operator='>', trigger_threshold=10000, recovery_threshold=9000, trigger_for=5, recovery_for=3, severity='warning', detection_mode='baseline'),
+            MonitoringRuleDTO(metric_key='process.target.rss_bytes_sum', operator='>', trigger_threshold=1e15, recovery_threshold=9e14, trigger_for=5, recovery_for=3, severity='warning', detection_mode='baseline'),
         ])
     if has_logs:
         rules.extend([
-            MonitoringRuleDTO(metric_key='log.collector.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=2, recovery_for=2, severity='critical'),
+            MonitoringRuleDTO(metric_key='log.collector.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=3, recovery_for=2, severity='warning'),
             # One exception is evidence, not an incident. Require a burst that
             # persists across two windows before notifying the operator.
-            MonitoringRuleDTO(metric_key='log.exception_count', operator='>=', trigger_threshold=5, recovery_threshold=1, trigger_for=2, recovery_for=2, severity='warning'),
+            MonitoringRuleDTO(metric_key='log.exception_count', operator='>=', trigger_threshold=10, recovery_threshold=1, trigger_for=2, recovery_for=2, severity='warning'),
         ])
     if has_database:
         rules.extend([
             MonitoringRuleDTO(metric_key='db.up', operator='==', trigger_threshold=0, recovery_threshold=0, trigger_for=2, recovery_for=2, severity='critical'),
-            MonitoringRuleDTO(metric_key='db.connections.utilization_percent', operator='>', trigger_threshold=85, recovery_threshold=70, trigger_for=3, recovery_for=2, severity='warning'),
-            MonitoringRuleDTO(metric_key='db.long_transactions', operator='>=', trigger_threshold=1, recovery_threshold=0.5, trigger_for=2, recovery_for=2, severity='warning'),
-            MonitoringRuleDTO(metric_key='db.lock_waits', operator='>=', trigger_threshold=1, recovery_threshold=0.5, trigger_for=2, recovery_for=2, severity='warning'),
-            MonitoringRuleDTO(metric_key='db.replication_lag_seconds', operator='>', trigger_threshold=30, recovery_threshold=10, trigger_for=2, recovery_for=2, severity='critical'),
+            MonitoringRuleDTO(metric_key='db.connections.utilization_percent', operator='>', trigger_threshold=90, recovery_threshold=75, trigger_for=4, recovery_for=3, severity='warning'),
+            # A single transaction can legitimately stay open in a worker for
+            # more than five minutes. Alert only when several remain open for
+            # multiple collection cycles, while keeping the signal available
+            # for diagnosis and the snapshot.
+            MonitoringRuleDTO(metric_key='db.long_transactions', operator='>=', trigger_threshold=3, recovery_threshold=1, trigger_for=3, recovery_for=2, severity='warning'),
+            MonitoringRuleDTO(metric_key='db.lock_waits', operator='>=', trigger_threshold=1, recovery_threshold=0.5, trigger_for=3, recovery_for=2, severity='warning'),
+            MonitoringRuleDTO(metric_key='db.replication_lag_seconds', operator='>', trigger_threshold=60, recovery_threshold=20, trigger_for=3, recovery_for=2, severity='critical'),
         ])
     return rules
 
@@ -163,7 +167,11 @@ class ProjectService:
             poll_interval=dto.poll_interval,
             service_endpoints=[ServiceEndpointDTO(name=f'{dto.name} 健康检查', url=dto.health_url, enabled=True)],
             metrics_sources=[MetricsSourceDTO(name='app', url=dto.metrics_url, enabled=True)],
-            log_sources=[LogSourceDTO(path='docker://auto',parser_config={'target_urls':[dto.health_url,dto.metrics_url]},enabled=True)],
+            log_sources=[LogSourceDTO(path='docker://auto',parser_config={
+                'target_urls':[dto.health_url,dto.metrics_url],
+                'compose_project': dto.compose_project,
+                'services': dto.compose_services,
+            },enabled=True)],
             database_profiles=[db],
             rules=default_remote_python_rules(has_gpu=bool(server.gpu_metrics_url), has_health=True, has_metrics=True, has_logs=True, has_database=True),
         )
@@ -178,19 +186,27 @@ class ProjectService:
         return True
 
     async def _replace_children(self, project_id: UUID, dto: ProjectCreateDTO) -> None:
-        async def sync(model, rows, fields):
+        async def sync(model, rows, fields, identity_fields=()):
             existing = {x.id: x for x in (await self.session.scalars(select(model).where(model.project_id == project_id))).all()}
+            existing_by_identity = {
+                tuple(getattr(x, field) for field in identity_fields): x
+                for x in existing.values()
+            } if identity_fields else {}
+            kept_existing_ids = set()
             for dto_row in rows:
                 row_id = getattr(dto_row, 'id', None)
                 obj = existing.get(row_id) if row_id else None
+                if obj is None and identity_fields:
+                    obj = existing_by_identity.get(tuple(getattr(dto_row, field) for field in identity_fields))
                 if obj is None:
                     obj = model(project_id=project_id)
                     self.session.add(obj)
+                elif obj.id is not None:
+                    kept_existing_ids.add(obj.id)
                 for field in fields:
                     setattr(obj, field, getattr(dto_row, field))
-            row_ids = {getattr(x, 'id', None) for x in rows if getattr(x, 'id', None)}
             for key, obj in existing.items():
-                if key not in row_ids:
+                if key not in kept_existing_ids:
                     await self.session.delete(obj)
 
         existing_ms = {x.id: x for x in (await self.session.scalars(select(ProjectMetricsSource).where(ProjectMetricsSource.project_id == project_id))).all()}
@@ -221,7 +237,7 @@ class ProjectService:
         keep={x.id for x in dto.database_profiles if x.id}
         for key,obj in existing_db.items():
             if key not in keep:await self.session.delete(obj)
-        await sync(MonitoringRule, dto.rules, ('metric_key', 'resource_key', 'operator', 'trigger_threshold', 'trigger_for', 'recovery_threshold', 'recovery_for', 'severity', 'enabled', 'conditions', 'detection_mode', 'baseline_window', 'baseline_min_samples', 'baseline_z_score', 'baseline_recovery_z_score'))
+        await sync(MonitoringRule, dto.rules, ('metric_key', 'resource_key', 'operator', 'trigger_threshold', 'trigger_for', 'recovery_threshold', 'recovery_for', 'severity', 'enabled', 'conditions', 'detection_mode', 'baseline_window', 'baseline_min_samples', 'baseline_z_score', 'baseline_recovery_z_score'), identity_fields=('metric_key', 'resource_key'))
 
     async def runtime_config(self, project_id: UUID, *, include_disabled: bool = False) -> ProjectRuntimeConfig:
         p = await self.session.get(Project, project_id)

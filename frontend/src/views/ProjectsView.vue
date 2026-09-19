@@ -25,6 +25,8 @@ const description = ref('')
 const healthUrl = ref('')
 const metricsUrl = ref('')
 const databaseUrl = ref('')
+const composeProject = ref('')
+const composeServices = ref('')
 const creating = ref(false)
 const testing = ref(false)
 const loading = ref(false)
@@ -35,6 +37,15 @@ let copyResetTimer: ReturnType<typeof setTimeout> | undefined
 const search = ref('')
 const testedSignature = ref('')
 const testResult = ref<ProjectDraftTestResult | null>(null)
+const testResultSummary = computed(() => {
+  if (!testResult.value) return ''
+  const passed = testResult.value.checks.filter(check => check.ok).length
+  const failed = testResult.value.checks.length - passed
+  return testResult.value.ok ? '全部连接通过' : `已通过 ${passed} 项，${failed} 项失败`
+})
+const testResultHint = computed(() => testResult.value?.ok
+  ? '所有监控数据入口均可用，可以创建项目。'
+  : '请优先处理红色项目，修复后重新测试全部连接。')
 
 const nodeCommand = nodeExporterInstallCommand()
 const nodeCheckCommand = nodeExporterVerifyCommand()
@@ -47,8 +58,8 @@ const collectorCheckCommand = computed(() => collectorVerifyCommand(serverForm.v
 const collectorRemoveCommandText = collectorRemoveCommand()
 const serverSignature = computed(() => `${serverForm.value.node_metrics_url.trim()}|${serverForm.value.gpu_metrics_url.trim()}|${serverForm.value.collector_url.trim()}|${serverForm.value.collector_token.trim()}`)
 const canSaveServer = computed(() => Boolean(serverForm.value.name.trim() && serverForm.value.node_metrics_url.trim() && serverForm.value.collector_url.trim() && serverForm.value.collector_token.trim() && serverTest.value?.ok && testedServerSignature.value === serverSignature.value))
-const signature = computed(() => [serverId.value, healthUrl.value.trim(), metricsUrl.value.trim(), databaseUrl.value.trim()].join('|'))
-const canTest = computed(() => Boolean(serverId.value && healthUrl.value.trim() && metricsUrl.value.trim() && databaseUrl.value.trim()))
+const signature = computed(() => [serverId.value, healthUrl.value.trim(), metricsUrl.value.trim(), databaseUrl.value.trim(), composeProject.value.trim(), composeServices.value.trim()].join('|'))
+const canTest = computed(() => Boolean(serverId.value && healthUrl.value.trim() && metricsUrl.value.trim() && databaseUrl.value.trim() && composeProject.value.trim()))
 const canCreate = computed(() => Boolean(name.value.trim() && testResult.value?.ok && testedSignature.value === signature.value))
 const filteredRows = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -92,6 +103,8 @@ function projectPayload() {
     description: description.value.trim(), environment: 'production',
     health_url: healthUrl.value.trim(), metrics_url: metricsUrl.value.trim(),
     database_url: databaseUrl.value.trim(),
+    compose_project: composeProject.value.trim() || null,
+    compose_services: composeServices.value.split(',').map(value => value.trim()).filter(Boolean),
     poll_interval: 30, enabled: false,
   }
 }
@@ -179,7 +192,7 @@ async function removeServer(row: MonitoredServer) {
 }
 
 async function testDraft() {
-  if (!canTest.value) { show('请先选择服务器，并填写健康检查、/metrics 和数据库连接串', true); return }
+  if (!canTest.value) { show('请先选择服务器，并填写健康检查、/metrics、数据库连接串和 Compose 项目名', true); return }
   testing.value = true
   testResult.value = null
   try {
@@ -234,7 +247,7 @@ onMounted(load)
           </div>
 
           <div v-else-if="serverMode === 'new'" class="new-server-box">
-            <div class="simple-note"><span>系统指标与 Collector 必填</span><p>Collector 自动发现 Docker 日志并执行只读数据库诊断。</p></div>
+            <div class="simple-note"><span>系统指标与 Collector 必填</span><p>默认服务器已经安装 Docker；Collector 通过 Docker Socket 读取日志和执行只读数据库诊断，项目使用 Compose 项目名手动匹配日志。</p></div>
             <el-collapse class="install-guide"><el-collapse-item title="服务器还没安装采集器？展开查看命令" name="install">
                <div class="command-row"><div><b>安装或更新系统指标采集器（必须）</b><code>{{ nodeCommand }}</code></div><el-button class="copy-command-button" size="small" :type="copiedCommand === 'node-install' ? 'success' : 'default'" @click="copy(nodeCommand, 'node-install')">{{ copiedCommand === 'node-install' ? '✓' : '复制' }}</el-button></div>
                <div class="command-row verify-command-row"><div><b>验证系统指标采集器</b><code>{{ nodeCheckCommand }}</code><small>成功时输出：系统指标采集器安装成功</small></div><el-button class="copy-command-button" size="small" plain :type="copiedCommand === 'node-check' ? 'success' : 'default'" @click="copy(nodeCheckCommand, 'node-check')">{{ copiedCommand === 'node-check' ? '✓' : '复制' }}</el-button></div>
@@ -268,7 +281,8 @@ onMounted(load)
               <div class="endpoint-row"><span class="endpoint-icon health">♥</span><div class="endpoint-label"><b>健康检查地址</b><small>判断服务是否可达</small></div><el-input v-model="healthUrl" size="large" placeholder="https://stock.example.com/health" /></div>
               <div class="endpoint-row"><span class="endpoint-icon metrics">⌁</span><div class="endpoint-label"><b>Prometheus 地址</b><small>获取请求、错误、延迟和进程指标</small></div><el-input v-model="metricsUrl" size="large" placeholder="https://stock.example.com/metrics" /></div>
               <div class="endpoint-row"><span class="endpoint-icon database">DB</span><div class="endpoint-label"><b>PostgreSQL 只读连接串</b><small>连接、慢 SQL、事务和锁</small></div><el-input v-model="databaseUrl" type="password" show-password size="large" placeholder="postgresql://oncall_monitor:密码@postgres:5432/app" /></div>
-              <div class="auto-log-note"><span>✓</span><div><b>Docker stdout 日志自动识别</b><small>系统根据 Health/Metrics 端口匹配 API 容器及同一 Compose 项目的业务容器。</small></div></div>
+              <div class="auto-log-note"><span>✓</span><div><b>Docker stdout 日志手动匹配</b><small>Collector 根据 Compose 项目和服务标签读取日志，不依赖 Nginx 或 HTTPS 端口自动推断。</small></div></div>
+              <div class="manual-log-config"><div class="manual-log-heading"><b>Docker Compose 项目名（必填）</b><small>填写项目名即可；服务名可选，多个服务用英文逗号分隔。</small></div><div class="manual-log-fields"><el-input v-model="composeProject" size="large" placeholder="例如：tradingagents" /><el-input v-model="composeServices" size="large" placeholder="服务名（可选），例如：tradingagents,news-worker" /></div><small class="manual-log-hint">可在目标服务器执行 <code>docker compose ls</code> 和 <code>docker compose ps --services</code> 查看。</small></div>
             </div>
           </template>
           <div v-else class="locked-note"><span>→</span>请先在上方选择已有服务器，或连接一台新服务器。</div>
@@ -277,7 +291,11 @@ onMounted(load)
         <div class="field-block final-block" :class="{ locked: !serverId }">
           <div class="field-title"><span class="field-number">3</span><div><b>一次验证，完成创建</b><small>同时检查服务器、应用、Docker 日志和 PostgreSQL</small></div></div>
           <div v-if="testResult && testedSignature === signature" class="test-result" :class="testResult.ok ? 'passed' : 'failed'">
-            <div v-for="check in testResult.checks" :key="check.key" class="check-item"><span>{{ check.ok ? '✓' : '!' }}</span><div><b>{{ checkLabels[check.key] }}</b><small>{{ check.ok ? '连接正常' : (check.error || '连接失败') }}</small></div></div>
+            <div class="test-result-summary" :class="testResult.ok ? 'passed' : 'failed'"><span>{{ testResult.ok ? '✓' : '!' }}</span><div><b>{{ testResultSummary }}</b><small>{{ testResultHint }}</small></div></div>
+            <div v-for="check in testResult.checks" :key="check.key" class="check-item" :class="check.ok ? 'passed' : 'failed'">
+              <span>{{ check.ok ? '✓' : '×' }}</span>
+              <div><b>{{ checkLabels[check.key] }}</b><small class="check-status">{{ check.ok ? '测试通过 · 连接正常' : '测试失败' }}</small><p v-if="!check.ok && check.error" class="check-error" :title="check.error">{{ check.error }}</p></div>
+            </div>
             <p v-for="warning in testResult.warnings" :key="warning" class="test-warning">提示：{{ warning }}</p>
           </div>
           <div class="wizard-actions"><span>创建后先保持停用，确认首个采集快照后再开启告警。</span><div><el-button size="large" :loading="testing" :disabled="!canTest" @click="testDraft">⚡ 测试全部连接</el-button><el-button type="primary" size="large" :loading="creating" :disabled="!canCreate" @click="add">创建监控项目</el-button></div></div>
@@ -293,7 +311,7 @@ onMounted(load)
 
     <section class="project-section">
       <div class="list-heading"><div><span class="eyebrow plain">MONITORED SERVICES</span><h2>已接入项目</h2><p>{{ rows.length }} 个项目，{{ enabledCount }} 个正在监控</p></div><el-input v-model="search" clearable placeholder="搜索项目或服务器" class="project-search" /></div>
-      <div class="project-grid"><article v-for="item in filteredRows" :key="item.id" class="project-tile" @click="router.push('/projects/' + item.id)"><div class="tile-top"><span class="project-glyph">Py</span><span class="status-dot" :class="item.enabled ? 'online' : ''"></span><small>{{ item.enabled ? '监控中' : '未启用' }}</small></div><h3>{{ item.name }}</h3><p>{{ item.description || '远程 Python 服务' }}</p><div class="tile-bottom"><span>▣ {{ item.server_name || '未绑定服务器' }}</span><span>{{ item.poll_interval }}s ↗</span></div></article><div v-if="loading" class="project-empty">正在加载项目…</div><div v-else-if="rows.length && !filteredRows.length" class="project-empty">没有匹配的项目</div><div v-else-if="!rows.length" class="project-empty"><span>＋</span><b>还没有项目</b><p>完成上面的三步即可创建第一个监控项目。</p></div></div>
+      <div class="project-grid"><article v-for="item in filteredRows" :key="item.id" class="project-tile" @click="router.push('/projects/' + item.id)"><div class="tile-top"><span class="project-glyph"><img src="/pulseops-icon.png" alt="巡脉图标" /></span><span class="status-dot" :class="item.enabled ? 'online' : ''"></span><small>{{ item.enabled ? '监控中' : '未启用' }}</small></div><h3>{{ item.name }}</h3><p>{{ item.description || '远程 Python 服务' }}</p><div class="tile-bottom"><span>▣ {{ item.server_name || '未绑定服务器' }}</span><span>{{ item.poll_interval }}s ↗</span></div></article><div v-if="loading" class="project-empty">正在加载项目…</div><div v-else-if="rows.length && !filteredRows.length" class="project-empty">没有匹配的项目</div><div v-else-if="!rows.length" class="project-empty"><span>＋</span><b>还没有项目</b><p>完成上面的三步即可创建第一个监控项目。</p></div></div>
     </section>
   </div>
 </template>
@@ -313,4 +331,33 @@ onMounted(load)
 .verify-command-row{margin:0 0 5px;padding:9px 10px;border:1px solid #e5e9e7;border-radius:10px;background:#f5f7f6;color:#74817d}.verify-command-row b{color:#65726e}.verify-command-row code{color:#697570;background:#ecefed}.verify-command-row small{display:block;margin-top:5px;color:#929c98;font-size:9px}
 .remove-command-row{margin:0 0 5px;padding:9px 10px;border:1px solid #f0dfe0;border-radius:10px;background:#fff8f8;color:#8b6f72}.remove-command-row b{color:#a05258}.remove-command-row code{color:#8b696d;background:#fff0f1}.remove-command-row small{display:block;margin-top:5px;color:#b18e91;font-size:9px}
 .copy-command-button{min-width:48px}
+.test-result{grid-template-columns:repeat(5,minmax(0,1fr));border:1px solid #dfeae6;background:#f8fbfa}
+.test-result.passed{border-color:#c5e9da;background:#f2fbf7}
+.test-result.failed{border-color:#f0d8da;background:#fffafa}
+.test-result-summary{grid-column:1/-1;display:flex;align-items:center;gap:9px;margin:-2px 0 2px;padding:3px 2px 8px;border-bottom:1px solid #e5efeb}
+.test-result-summary>span{width:25px;height:25px;display:grid;place-items:center;border-radius:50%;color:#fff;background:#31ae84;font-weight:800}
+.test-result-summary.failed>span{background:#df6570}
+.test-result-summary b,.test-result-summary small{display:block}
+.test-result-summary b{color:#2f5145;font-size:11px}
+.test-result-summary.failed b{color:#a33f48}
+.test-result-summary small{margin-top:2px;color:#789087;font-size:10px}
+.check-item{align-items:flex-start;min-width:0;padding:9px 8px;border:1px solid #dfeae6;border-radius:10px;background:#fff}
+.check-item.passed{border-color:#bfe7d6;background:#f2fbf6}
+.check-item.failed{border-color:#efc3c8;background:#fff1f2}
+.check-item>span{flex:0 0 auto}
+.test-result .check-item.passed>span{background:#31ae84}
+.test-result .check-item.failed>span{background:#df6570}
+.check-item>div{min-width:0}
+.check-item.failed b{color:#9d4149}
+.check-status{margin-top:3px;color:#208363!important;font-size:10px!important}
+.check-item.failed .check-status{color:#c44854!important}
+.check-error{margin:4px 0 0;overflow-wrap:anywhere;color:#a55a61;font-size:9px;line-height:1.35}
+@media(max-width:700px){.test-result{grid-template-columns:1fr}}
+.manual-log-config{margin-top:8px;padding:11px 12px;border:1px dashed #cfe0db;border-radius:12px;background:#fbfdfc}
+.manual-log-heading b,.manual-log-heading small{display:block}.manual-log-heading b{color:#49635b;font-size:11px}.manual-log-heading small{margin-top:3px;color:#899b95;font-size:10px}
+.manual-log-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:9px}.manual-log-hint{display:block;margin-top:7px;color:#98a6a1;font-size:9px}.manual-log-hint code{padding:2px 4px;border-radius:4px;color:#6d8078;background:#eef3f1}
+@media(max-width:700px){.manual-log-fields{grid-template-columns:1fr}}
+.project-glyph{position:relative;width:36px;height:36px;display:grid;place-items:center;margin-right:auto;overflow:hidden;border:1px solid #edf1f4;border-radius:12px;background:#fff;box-shadow:0 7px 15px -11px rgba(15,46,68,.45)}
+.project-glyph:before{content:none}
+.project-glyph img{display:block;width:30px;height:30px;object-fit:contain}
 </style>

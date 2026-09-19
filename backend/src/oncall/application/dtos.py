@@ -430,6 +430,8 @@ class PythonProjectOnboardDTO(BaseModel):
     health_url: str
     metrics_url: str
     database_url: str
+    compose_project: str | None = None
+    compose_services: list[str] = Field(default_factory=list, max_length=50)
     poll_interval: int = Field(default=30, ge=10, le=86400)
     enabled: bool = False
 

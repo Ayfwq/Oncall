@@ -221,6 +221,12 @@ async def test_projects_crud_dryrun_snapshot_password_redaction(admin_client):
     for key in ("project_id", "observed_at", "signals", "resources", "collector_status"):
         assert key in snap
 
+    # The detail page posts its editable (and credential-redacted) draft. The
+    # API must rehydrate the bound server and persisted secrets before testing.
+    r = await client.post(f"/api/projects/{pid}/test", json=updated)
+    assert r.status_code == 200
+    assert "collector_status" in r.json()
+
     # snapshot: seed a completed MonitoringRun and verify the endpoint surfaces it
     seeded_snapshot = {
         "signals": {"zz.test.synthetic": 42.0},
@@ -422,6 +428,13 @@ async def test_incidents_lifecycle_via_dev_trigger(admin_client):
     assert r.status_code == 200 and r.json()["status"] == "resolved"
     assert (await client.get(f"/api/incidents/{iid2}")).json()["status"] == "resolved"
 
+    # delete removes the incident and its generated investigation conversation
+    r = await client.delete(f"/api/incidents/{iid2}")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert (await client.get(f"/api/incidents/{iid2}")).status_code == 404
+    assert iid2 not in [x["id"] for x in (await client.get("/api/incidents")).json()]
+    assert (await client.get(f"/api/conversations/{icid2}/messages")).status_code == 404
+
     # edge cases: unknown project, unknown metric, malformed/missing project_id
     assert (await client.post("/api/dev/incidents/trigger", json={"project_id": str(uuid.uuid4())})).status_code == 404
     assert (await client.post("/api/dev/incidents/trigger", json={"project_id": pid, "metric_key": "no.such.metric"})).status_code == 400
@@ -429,6 +442,7 @@ async def test_incidents_lifecycle_via_dev_trigger(admin_client):
     assert (await client.post("/api/dev/incidents/trigger", json={})).status_code == 400
     assert (await client.post(f"/api/dev/incidents/{uuid.uuid4()}/recover")).status_code == 404
     assert (await client.get(f"/api/incidents/{uuid.uuid4()}")).status_code == 404
+    assert (await client.delete(f"/api/incidents/{uuid.uuid4()}")).status_code == 404
     assert (await client.get(f"/api/incidents/{uuid.uuid4()}/trace")).status_code == 404
     assert (await client.post(f"/api/incidents/{uuid.uuid4()}/resolve")).status_code == 404
     assert (await client.post(f"/api/incidents/{uuid.uuid4()}/conversation")).status_code == 404

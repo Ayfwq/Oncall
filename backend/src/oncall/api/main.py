@@ -303,7 +303,11 @@ async def test_python_project_draft(dto:PythonProjectOnboardDTO,user=Depends(cur
         enabled=False,poll_interval=dto.poll_interval,
         service_endpoints=[ServiceEndpointDTO(name=f'{dto.name} 健康检查',url=dto.health_url,enabled=True)],
         metrics_sources=[MetricsSourceDTO(name='app',url=dto.metrics_url,enabled=True)],
-        log_sources=[LogSourceDTO(path='docker://auto',parser_config={'target_urls':[dto.health_url,dto.metrics_url]},enabled=True)],
+        log_sources=[LogSourceDTO(path='docker://auto',parser_config={
+            'target_urls':[dto.health_url,dto.metrics_url],
+            'compose_project': dto.compose_project,
+            'services': dto.compose_services,
+        },enabled=True)],
         database_profiles=[database],
     )
     snap=await MonitoringEngine(db).collect(project_id,persist_state=False,config=config)
@@ -400,8 +404,25 @@ async def test_project(pid:str,payload:ProjectCreateDTO|None=None,user=Depends(c
     if not project:raise HTTPException(404,'not found')
     config = None
     if payload is not None:
-        config = ProjectRuntimeConfig(id=project.id,user_id=project.user_id,**payload.model_dump())
-    snap=await MonitoringEngine(db).collect(project.id,persist_state=False,config=config)
+        saved=await ProjectService(db).runtime_config(project.id,include_disabled=True)
+        if payload.server_id != saved.server_id:
+            raise HTTPException(400,'请先保存服务器绑定，再测试采集')
+        draft=payload.model_copy(deep=True)
+        saved_metrics_by_id={x.id:x for x in saved.metrics_sources if x.id is not None}
+        saved_metrics_by_name={x.name:x for x in saved.metrics_sources}
+        for source in draft.metrics_sources:
+            if source.token is None:
+                persisted=saved_metrics_by_id.get(source.id) or saved_metrics_by_name.get(source.name)
+                if persisted is not None:source.token=persisted.token
+        saved_databases_by_id={x.id:x for x in saved.database_profiles if x.id is not None}
+        saved_databases_by_key={(x.host,x.port,x.database,x.username):x for x in saved.database_profiles}
+        for profile in draft.database_profiles:
+            if profile.password is None:
+                persisted=saved_databases_by_id.get(profile.id) or saved_databases_by_key.get((profile.host,profile.port,profile.database,profile.username))
+                if persisted is not None:profile.password=persisted.password
+        config = ProjectRuntimeConfig(id=project.id,user_id=project.user_id,server=saved.server,**draft.model_dump())
+    try:snap=await MonitoringEngine(db).collect(project.id,persist_state=False,config=config)
+    except ValueError as exc:raise HTTPException(400,str(exc))
     return snap.model_dump(mode='json')
 
 @app.post('/api/projects/{pid}/metrics/discover')
@@ -455,6 +476,14 @@ async def incident_detail(iid:str,user=Depends(current_user),db:AsyncSession=Dep
     evidence=list((await db.scalars(select(IncidentEvidence).where(IncidentEvidence.incident_id==x.id).order_by(IncidentEvidence.observed_at.asc()).limit(200))).all())
     conv=await db.scalar(select(Conversation).where(Conversation.incident_id==x.id).order_by(Conversation.created_at.asc()).limit(1))
     return {'id':str(x.id),'project_id':str(x.project_id),'status':x.status,'severity':x.severity,'summary':x.summary,'anomaly_type':x.anomaly_type,'resource_key':x.resource_key,'first_seen':x.first_seen,'last_seen':x.last_seen,'resolved_at':x.resolved_at,'conversation_id':str(conv.id) if conv else None,'diagnosis':d.structured_json if d else None,'evidence':[{'id':str(e.id),'type':e.type,'source':e.source,'observed_at':e.observed_at,'summary':e.summary,'data':e.data,'raw_ref':e.raw_ref} for e in evidence]}
+
+@app.delete('/api/incidents/{iid}')
+async def delete_incident(iid:str,user=Depends(current_user),db:AsyncSession=Depends(get_session)):
+    from oncall.application.incident_service import IncidentService
+    inc=await db.scalar(select(Incident).join(Project,Project.id==Incident.project_id).where(Incident.id==_uuid(iid),Project.user_id==user.id))
+    if not inc:raise HTTPException(404,'not found')
+    await IncidentService(db).delete(inc.id)
+    return {'ok':True}
 
 
 

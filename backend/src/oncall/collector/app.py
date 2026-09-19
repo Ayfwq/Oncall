@@ -125,7 +125,10 @@ async def discover(req: DiscoverRequest):
 
 
 def _logs_sync(req: LogQuery) -> dict:
-    discovery = _discover_sync(req.target_urls)
+    # A manual Compose scope is authoritative. It avoids relying on the
+    # externally visible URL port, which is often Nginx rather than the
+    # container's published port.
+    discovery = None if req.compose_project else _discover_sync(req.target_urls)
     client = _docker_client()
     try:
         selected = []
@@ -136,7 +139,7 @@ def _logs_sync(req: LogQuery) -> dict:
             if req.services and row.get("compose_service") not in req.services:
                 continue
             if not req.compose_project:
-                ids = {x["id"] for x in discovery.get("containers", [])}
+                ids = {x["id"] for x in (discovery or {}).get("containers", [])}
                 if row["id"] not in ids:
                     continue
             selected.append(c)
@@ -156,14 +159,14 @@ def _logs_sync(req: LogQuery) -> dict:
         lines = lines[-req.limit:]
         errors = sum(1 for x in lines if re.search(r"\b(ERROR|FATAL|PANIC)\b", x["line"], re.I))
         exceptions = sum(1 for x in lines if "Traceback (most recent call last)" in x["line"] or re.search(r"\w+(Error|Exception):", x["line"]))
-        return {"ok": bool(selected), "containers": [c.name for c in selected], "lines": lines, "error_count": errors, "exception_count": exceptions, "error": None if selected else discovery.get("error")}
+        return {"ok": bool(selected), "containers": [c.name for c in selected], "lines": lines, "error_count": errors, "exception_count": exceptions, "error": None if selected else ((discovery or {}).get("error") or "没有匹配到手动指定的 Docker Compose 容器")}
     finally:
         client.close()
 
 
 def _runtime_sync(req: RuntimeQuery) -> dict:
-    discovery = _discover_sync(req.target_urls)
-    discovered_ids={x["id"] for x in discovery.get("containers",[])}
+    discovery = None if req.compose_project else _discover_sync(req.target_urls)
+    discovered_ids={x["id"] for x in (discovery or {}).get("containers",[])}
     checks=set(req.checks or ["status","cpu","memory","restarts","oom","processes","ports"])
     client=_docker_client()
     try:
@@ -208,7 +211,7 @@ def _runtime_sync(req: RuntimeQuery) -> dict:
                     row["processes_error"]=redact_text(str(exc))
             rows.append(row)
         rows.sort(key=lambda x:(float(x.get("cpu_percent",0)),float(x.get("memory_percent",0))),reverse=True)
-        return {"ok":bool(selected),"containers":rows,"checks":sorted(checks),"error":None if selected else discovery.get("error")}
+        return {"ok":bool(selected),"containers":rows,"checks":sorted(checks),"error":None if selected else ((discovery or {}).get("error") or "没有匹配到手动指定的 Docker Compose 容器")}
     finally:
         client.close()
 

@@ -4,10 +4,11 @@ import hashlib
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.infrastructure.db.models import (
+    BackgroundJob,
     Conversation,
     Incident,
     IncidentEvidence,
@@ -308,6 +309,32 @@ class IncidentService:
             dedupe_key=f'incident:{inc.id}:resolved'
         ))
         await self.session.commit();return inc
+
+    async def delete(self,incident_id:UUID)->bool:
+        """Permanently remove one incident and its private investigation trail.
+
+        Detector state is reset first so a genuinely persistent problem can
+        create a new incident after satisfying the full trigger window again.
+        Project rules and raw monitoring samples are intentionally preserved.
+        """
+        inc=await self.session.get(Incident,incident_id)
+        if not inc:return False
+        rule_ids=list((await self.session.scalars(
+            select(IncidentSignal.rule_id).where(IncidentSignal.incident_id==incident_id)
+        )).all())
+        for rule_id in set(rule_ids):
+            state=await self.session.get(MonitoringRuleState,rule_id)
+            if state:
+                state.state='normal';state.abnormal_hits=0;state.recovery_hits=0;state.last_value=None
+        await self.session.execute(delete(BackgroundJob).where(
+            BackgroundJob.payload['incident_id'].astext==str(incident_id)
+        ))
+        # Incident conversations are generated solely for this alert.  Removing
+        # them also cascades their messages and Agent/tool runs.
+        await self.session.execute(delete(Conversation).where(Conversation.incident_id==incident_id))
+        await self.session.delete(inc)
+        await self.session.commit()
+        return True
 
     async def add_evidence(self,incident_id:UUID,type_:str,source:str,summary:str,data:dict|None=None,raw_ref:str|None=None)->IncidentEvidence:
         e=IncidentEvidence(incident_id=incident_id,type=type_,source=source,summary=summary,data=data or {},raw_ref=raw_ref)

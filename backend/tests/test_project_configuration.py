@@ -41,9 +41,11 @@ def test_remote_only_fields_and_rule_direction_are_validated():
 
 
 def test_python_onboarding_requires_health_and_metrics_urls():
-    dto = PythonProjectOnboardDTO(name='stock-api', server_id=uuid4(), health_url='http://127.0.0.1:8000/health', metrics_url='http://127.0.0.1:8000/metrics', database_url='postgresql://monitor:secret@127.0.0.1:5432/app')
+    dto = PythonProjectOnboardDTO(name='stock-api', server_id=uuid4(), health_url='http://127.0.0.1:8000/health', metrics_url='http://127.0.0.1:8000/metrics', database_url='postgresql://monitor:secret@127.0.0.1:5432/app', compose_project='tradingagents', compose_services=['tradingagents', 'news-worker'])
     assert dto.poll_interval == 30
     assert dto.environment == 'production'
+    assert dto.compose_project == 'tradingagents'
+    assert dto.compose_services == ['tradingagents', 'news-worker']
     with pytest.raises(ValidationError, match='health_url'):
         PythonProjectOnboardDTO(name='empty', server_id=uuid4(), health_url='', metrics_url='', database_url='')
 
@@ -58,12 +60,25 @@ def test_backend_default_rules_follow_available_sources_and_reduce_log_noise():
     assert len(base) == 20
     assert len(gpu) == 23
     by_key = {rule.metric_key: rule for rule in base}
-    assert by_key['log.exception_count'].trigger_threshold == 5
+    assert by_key['log.exception_count'].trigger_threshold == 10
     assert by_key['log.exception_count'].trigger_for == 2
     assert by_key['db.up'].trigger_for == 2
-    assert by_key['host.exporter.up'].trigger_for == 2
-    assert by_key['service.consecutive_failures'].trigger_for == 2
-    assert by_key['app.up'].trigger_for == 2
+    assert by_key['db.long_transactions'].trigger_threshold == 3
+    assert by_key['db.long_transactions'].trigger_for == 3
+    assert by_key['db.long_transactions'].recovery_threshold == 1
+    assert by_key['host.exporter.up'].trigger_for == 3
+    assert by_key['host.disk.usage_percent'].trigger_for == 3
+    assert by_key['service.consecutive_failures'].trigger_threshold == 3
+    assert by_key['service.consecutive_failures'].trigger_for == 1
+    assert by_key['service.latency_ms'].trigger_threshold == 1500
+    assert by_key['service.latency_ms'].trigger_for == 4
+    assert by_key['app.up'].trigger_for == 3
+    assert by_key['app.http.error_rate'].trigger_for == 3
+    assert by_key['app.http.p99_ms'].severity == 'warning'
+    assert by_key['db.connections.utilization_percent'].trigger_threshold == 90
+    assert by_key['db.connections.utilization_percent'].trigger_for == 4
+    assert by_key['db.lock_waits'].trigger_for == 3
+    assert by_key['db.replication_lag_seconds'].trigger_threshold == 60
 
     without_observability = default_remote_python_rules(
         has_gpu=False, has_health=True, has_metrics=True, has_logs=False, has_database=False

@@ -163,9 +163,15 @@ class MonitoringEngine:
             prior_failures = float(previous_snapshot.get('signals', {}).get('service.consecutive_failures', 0) or 0)
             signals['service.consecutive_failures'] = 0.0 if healthy else prior_failures + 1.0
 
-        signals = {key: value for key, value in signals.items() if key in SUPPORTED_SIGNALS}
+        signals = {
+            key: value for key, value in signals.items()
+            if key in SUPPORTED_SIGNALS and not (isinstance(value, float) and not math.isfinite(value))
+        }
         resource_signals = {
-            resource: {key: value for key, value in values.items() if key in SUPPORTED_SIGNALS}
+            resource: {
+                key: value for key, value in values.items()
+                if key in SUPPORTED_SIGNALS and not (isinstance(value, float) and not math.isfinite(value))
+            }
             for resource, values in resource_signals.items()
         }
         return SnapshotDTO(
@@ -235,7 +241,17 @@ class MonitoringEngine:
         std = math.sqrt(variance)
         z_score = baseline_z_score(value, mean, std, rule.operator)
         limit = rule.baseline_recovery_z_score if currently_firing else rule.baseline_z_score
-        details.update({'mean': mean, 'stddev': std, 'z_score': z_score, 'active_z_score': limit, 'trigger_z_score': rule.baseline_z_score, 'recovery_z_score': rule.baseline_recovery_z_score})
+        # PostgreSQL JSONB rejects Infinity.  Keep the detector semantics while
+        # serializing an unbounded deviation as an explicit flag.
+        details.update({
+            'mean': mean,
+            'stddev': std,
+            'z_score': z_score if math.isfinite(z_score) else None,
+            'unbounded_deviation': not math.isfinite(z_score),
+            'active_z_score': limit,
+            'trigger_z_score': rule.baseline_z_score,
+            'recovery_z_score': rule.baseline_recovery_z_score,
+        })
         return z_score >= limit, details
 
     async def _record_baseline(self, project_id: UUID, rule: MonitoringRule, value: float) -> None:
@@ -330,7 +346,7 @@ class MonitoringEngine:
                     },
                 ))
             await self.session.commit()
-            actionable = should_open_incident(effective_metric)
+            actionable = should_open_incident(effective_metric, snapshot.signals)
             if transition.became_firing:
                 if actionable:
                     await incident_service.on_firing(project_id, rule.id, effective_resource, effective_metric, effective_severity, reported_value)

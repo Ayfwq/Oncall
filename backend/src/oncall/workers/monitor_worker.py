@@ -60,11 +60,16 @@ async def loop()->None:
             async with SessionFactory() as db:
                 projects=list((await db.scalars(select(Project).where(Project.enabled.is_(True)))).all())
                 for project in projects:
+                    project_id=project.id
                     try:
                         if await _project_is_due(db,project,now):
-                            await MonitoringEngine(db).run_project(project.id)
+                            await MonitoringEngine(db).run_project(project_id)
                     except Exception as exc:
-                        logger.exception('monitor error project=%s: %s',project.id,exc)
+                        # A failed flush leaves SQLAlchemy in rollback-only
+                        # state.  Recover here so one bad project/sample cannot
+                        # terminate monitoring for every project.
+                        await db.rollback()
+                        logger.exception('monitor error project=%s: %s',project_id,exc)
                 cleanup_counter+=1
                 if cleanup_counter>=720:
                     try:

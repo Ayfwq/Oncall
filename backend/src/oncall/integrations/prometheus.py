@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import math
 import time
 from datetime import datetime
 from typing import Any
@@ -84,12 +85,18 @@ def _hist_quantile(buckets: dict[float, float], q: float) -> float:
     for i, (le, count) in enumerate(items):
         if count >= rank:
             if i == 0:
-                return le
+                return 0.0 if math.isinf(le) else le
             prev_le, prev_count = items[i - 1]
+            # Prometheus histograms must end in +Inf.  A quantile landing in
+            # that bucket is approximated by the largest finite upper bound;
+            # returning Infinity would poison snapshots and JSON persistence.
+            if math.isinf(le):
+                return prev_le if math.isfinite(prev_le) else 0.0
             if count == prev_count:
                 return le
             return prev_le + (le - prev_le) * (rank - prev_count) / (count - prev_count)
-    return items[-1][0]
+    last = items[-1][0]
+    return last if math.isfinite(last) else 0.0
 
 
 def _new_route() -> dict[str, Any]:

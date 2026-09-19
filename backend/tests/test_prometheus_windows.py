@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from oncall.application.dtos import MetricsSourceDTO
-from oncall.integrations.prometheus import PrometheusIntegration
+from oncall.integrations.prometheus import PrometheusIntegration, _hist_quantile
 
 
 class WindowedPrometheus(PrometheusIntegration):
@@ -32,6 +32,11 @@ def observation(total, errors, buckets):
     }
 
 
+def test_histogram_quantile_never_returns_infinity():
+    assert _hist_quantile({0.1: 0, 1.0: 2, float('inf'): 10}, 0.95) == 1.0
+    assert _hist_quantile({float('inf'): 10}, 0.95) == 0.0
+
+
 @pytest.mark.asyncio
 async def test_api_availability_and_latency_use_current_scrape_window(monkeypatch):
     integration = WindowedPrometheus([
@@ -49,4 +54,3 @@ async def test_api_availability_and_latency_use_current_scrape_window(monkeypatc
     assert second.signals['app.http.error_rate'] == 0.0
     assert second.signals['app.http.availability'] == 100.0
     assert second.signals['app.http.p95_ms'] == pytest.approx(100.0)
-
