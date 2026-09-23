@@ -29,6 +29,7 @@ class EvidenceItem(BaseModel):
 
 
 class CitationRef(BaseModel):
+    citation_id: str | None = None
     document_id: str
     version_id: str | None = None
     chunk_id: str | None = None

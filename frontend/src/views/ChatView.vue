@@ -4,7 +4,7 @@ import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import { api, streamChat } from '../api'
 import { useRoute } from 'vue-router'
-import type { ChatMessage, Conversation, ProjectSummary } from '../types'
+import type { ChatMessage, Conversation, KnowledgeCitation, KnowledgeCitationDetail, ProjectSummary } from '../types'
 
 const route = useRoute()
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
@@ -12,10 +12,44 @@ const convs = ref<Conversation[]>([]), projects = ref<ProjectSummary[]>([]), act
 const busy = ref(false), newProject = ref(''), search = ref(''), showArchived = ref(false), statusLine = ref(''), error = ref('')
 const mobileListOpen = ref(false)
 const messagesEl = ref<HTMLElement | null>(null)
+const expandedCitation = ref<string | null>(null)
+const citationDetails = ref<Record<string, KnowledgeCitationDetail>>({})
+const citationLoading = ref<Record<string, boolean>>({})
+const citationErrors = ref<Record<string, string>>({})
 let scrollQueued = false
 
 const activeConversation = computed(() => convs.value.find(x => x.id === active.value))
 function render(text: string) { return DOMPurify.sanitize(md.render(text || '')) }
+function citationsOf(message: ChatMessage): KnowledgeCitation[] {
+  const value = message.metadata?.citations
+  return Array.isArray(value) ? value as KnowledgeCitation[] : []
+}
+function citationKey(citation: KnowledgeCitation) { return String(citation.chunk_id || citation.citation_id || citation.document_id) }
+function citationSummary(message: ChatMessage) {
+  const refs = citationsOf(message)
+  const used = refs.filter(x => x.used_in_answer).length
+  return used ? `已引用 ${used}/${refs.length}` : `已检索 ${refs.length} 条，回答未明确引用`
+}
+function citationTitle(citation: KnowledgeCitation) { return citation.title || citation.document_id || '知识库分块' }
+function citationDetail(citation: KnowledgeCitation) { return citationDetails.value[citationKey(citation)] }
+async function toggleCitation(citation: KnowledgeCitation) {
+  const key = citationKey(citation)
+  if (expandedCitation.value === key) { expandedCitation.value = null; return }
+  expandedCitation.value = key
+  if (!citation.chunk_id || citationDetails.value[key]) return
+  citationLoading.value = { ...citationLoading.value, [key]: true }
+  citationErrors.value = { ...citationErrors.value, [key]: '' }
+  try {
+    citationDetails.value = {
+      ...citationDetails.value,
+      [key]: await api<KnowledgeCitationDetail>(`/knowledge/citations/${encodeURIComponent(citation.chunk_id)}`),
+    }
+  } catch (e) {
+    citationErrors.value = { ...citationErrors.value, [key]: e instanceof Error ? e.message : '原文加载失败' }
+  } finally {
+    citationLoading.value = { ...citationLoading.value, [key]: false }
+  }
+}
 function timeAgo(iso?: string) { if (!iso) return ''; const d = new Date(iso).getTime(); const s = Math.floor((Date.now() - d) / 1000); if (s < 60) return '刚刚'; if (s < 3600) return Math.floor(s / 60) + ' 分钟前'; if (s < 86400) return Math.floor(s / 3600) + ' 小时前'; return Math.floor(s / 86400) + ' 天前' }
 function scrollToBottom() { if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight }
 function queueScroll() {
@@ -48,7 +82,7 @@ async function create() {
   }
 }
 async function open(id: string) {
-  active.value = id; messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
+  active.value = id; expandedCitation.value = null; messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
   await nextTick(); scrollToBottom()
 }
 async function rename() {
@@ -113,6 +147,10 @@ async function send() {
       queueScroll()
     })
     await load()
+    // The streaming placeholder is local-only and does not contain the
+    // persisted citation metadata. Reload the active conversation so the
+    // knowledge-base source panel appears immediately after completion.
+    if (active.value) await open(active.value)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     if (!streamingMsg.content) streamingMsg.content = '错误：' + msg
@@ -202,6 +240,57 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
             <div class="msg-bubble">
               <div v-if="m.role === 'assistant'" class="markdown" v-html="render(m.content)"></div>
               <div v-else>{{ m.content }}</div>
+              <div v-if="m.role === 'assistant' && citationsOf(m).length" class="citation-panel">
+                <div class="citation-panel-head">
+                  <span>知识库依据</span>
+                  <span class="citation-panel-status">{{ citationSummary(m) }}</span>
+                </div>
+                <div class="citation-list">
+                  <template v-for="citation in citationsOf(m)" :key="citationKey(citation)">
+                    <button
+                      type="button"
+                      class="citation-chip"
+                      :class="{ used: citation.used_in_answer, unavailable: !citation.chunk_id }"
+                      :disabled="!citation.chunk_id"
+                      :aria-expanded="expandedCitation === citationKey(citation)"
+                      :title="citation.chunk_id ? '展开知识库原文' : '该历史引用没有关联知识库分块'"
+                      @click="toggleCitation(citation)"
+                    >
+                      <span class="citation-id">{{ citation.citation_id || 'KB' }}</span>
+                      <span class="citation-name">{{ citationTitle(citation) }}</span>
+                      <span v-if="citation.page_range" class="citation-page">第 {{ citation.page_range }} 页</span>
+                      <span class="citation-used">{{ citation.used_in_answer ? '已引用' : '检索命中' }}</span>
+                      <span class="citation-chevron">{{ expandedCitation === citationKey(citation) ? '⌃' : '⌄' }}</span>
+                    </button>
+                    <div v-if="expandedCitation === citationKey(citation)" class="citation-detail">
+                      <div v-if="citationLoading[citationKey(citation)]" class="citation-loading">正在读取知识库原文…</div>
+                      <div v-else-if="citationErrors[citationKey(citation)]" class="citation-error">{{ citationErrors[citationKey(citation)] }}</div>
+                      <div v-else-if="!citation.chunk_id" class="citation-error">该历史引用没有关联可展开的知识库分块。</div>
+                      <template v-else-if="citationDetail(citation)">
+                        <div class="citation-detail-head">
+                          <b>{{ citationDetail(citation)?.title }}</b>
+                          <span>{{ citationDetail(citation)?.original_filename }}</span>
+                        </div>
+                        <div class="citation-detail-meta">
+                          <span v-if="citationDetail(citation)?.page_range">页码：{{ citationDetail(citation)?.page_range }}</span>
+                          <span v-if="citationDetail(citation)?.heading_path.length">章节：{{ citationDetail(citation)?.heading_path.join(' / ') }}</span>
+                          <span>分块：{{ (citationDetail(citation)?.chunk_index || 0) + 1 }}</span>
+                        </div>
+                        <div class="citation-source-label">命中的原文</div>
+                        <div class="citation-source-text">{{ citationDetail(citation)?.content }}</div>
+                        <div v-if="citationDetail(citation)?.truncated" class="citation-loading">原文较长，当前仅展示前 24000 个字符。</div>
+                        <details v-if="citationDetail(citation)?.neighbors.length" class="citation-neighbors">
+                          <summary>查看相邻知识分块</summary>
+                          <div v-for="neighbor in citationDetail(citation)?.neighbors || []" :key="neighbor.chunk_id" class="citation-neighbor">
+                            <div><b>{{ neighbor.heading_path.join(' / ') || `分块 ${neighbor.chunk_index + 1}` }}</b><span v-if="neighbor.page_range"> · 第 {{ neighbor.page_range }} 页</span></div>
+                            <p>{{ neighbor.content }}</p>
+                          </div>
+                        </details>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </div>
             </div>
             <div v-if="m.role === 'user'" class="msg-avatar me">A</div>
           </div>

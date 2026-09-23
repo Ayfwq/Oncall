@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -233,10 +234,26 @@ class Incident(Base):
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # One Incident owns one conversation across a firing/recovery cycle. A
+    # later firing within the reopen window increments the occurrence count
+    # and starts a new reminder generation without creating another Incident.
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    escalation_generation: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     last_investigated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    __table_args__ = (Index("ix_incident_open_fingerprint", "project_id", "fingerprint", "status"),)
+    __table_args__ = (
+        Index("ix_incident_open_fingerprint", "project_id", "fingerprint", "status"),
+        Index(
+            "uq_incident_active_fingerprint",
+            "project_id",
+            "fingerprint",
+            unique=True,
+            postgresql_where=text(
+                "resolved_at IS NULL AND status IN ('open', 'investigating', 'diagnosed')"
+            ),
+        ),
+    )
 
 
 class IncidentEvidence(Base):

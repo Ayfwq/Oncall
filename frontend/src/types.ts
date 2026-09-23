@@ -19,6 +19,41 @@ export interface ChatMessage {
   metadata?: Record<string, unknown> | null
 }
 
+export interface KnowledgeCitation {
+  citation_id?: string
+  document_id: string
+  version_id?: string | null
+  chunk_id?: string | null
+  title?: string | null
+  page_range?: string | null
+  score?: number | null
+  excerpt?: string | null
+  used_in_answer?: boolean
+}
+
+export interface KnowledgeCitationDetail {
+  chunk_id: string
+  chunk_index: number
+  document_id: string
+  version_id: string
+  title: string
+  original_filename: string
+  parser_version: string
+  page_range: string | null
+  heading_path: string[]
+  content: string
+  truncated: boolean
+  metadata: Record<string, unknown>
+  neighbors: Array<{
+    chunk_id: string
+    chunk_index: number
+    heading_path: string[]
+    page_range: string | null
+    content: string
+    truncated: boolean
+  }>
+}
+
 export interface ProjectSummary {
   id: string
   server_id: string | null
@@ -122,6 +157,7 @@ export interface IncidentSummary {
   first_seen: string
   last_seen: string
   resolved_at: string | null
+  occurrence_count: number
 }
 
 export interface IncidentDiagnosis {

@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.bootstrap.config import get_settings
 from oncall.channels.notification_policy import is_cooldown_kind, retry_delay_seconds
-from oncall.infrastructure.db.models import Conversation, FeishuMessageLink, Notification
+from oncall.infrastructure.db.models import (
+    Conversation,
+    FeishuMessageLink,
+    Incident,
+    Message,
+    Notification,
+)
 
 
 class FeishuClient:
@@ -211,7 +217,7 @@ class FeishuOutboxSender:
             ).all()
         )
         for row in rows:
-            if row.payload.get("kind") in {"triggered", "escalated"} and row.payload.get(
+            if row.payload.get("kind") in {"triggered", "escalated", "reopened"} and row.payload.get(
                 "message_id"
             ):
                 return str(row.payload["message_id"])
@@ -285,6 +291,14 @@ class FeishuOutboxSender:
                 # notification stuck in ``sending`` until the stale-claim timeout.
                 await self.session.commit()
                 continue
+            kind = n.payload.get("kind")
+            if kind in {"escalated", "reopened"} and n.incident_id:
+                incident = await self.session.get(Incident, n.incident_id)
+                if not incident or incident.status == "resolved" or incident.resolved_at is not None:
+                    n.status = "suppressed"
+                    n.last_error = "incident resolved before notification"
+                    await self.session.commit()
+                    continue
             if await self._in_cooldown(n, now):
                 n.status = "suppressed"
                 n.last_error = "notification cooldown"
@@ -292,14 +306,14 @@ class FeishuOutboxSender:
                 continue
             try:
                 text = n.payload.get("text") or f"PulseOps Incident: {n.payload.get('summary', '')}"
-                kind = n.payload.get("kind")
                 severity = n.payload.get("severity", "warning")
-                if kind in ("diagnosis", "escalated", "resolved"):
+                if kind in ("diagnosis", "escalated", "reopened", "resolved"):
                     thread_message_id = await self._incident_thread_message_id(n)
                     if thread_message_id:
                         title = {
                             "diagnosis": "诊断报告",
                             "escalated": "告警升级",
+                            "reopened": "告警再次触发",
                             "resolved": "恢复通知",
                         }.get(kind, "进展更新")
                         message_id = await self.client.reply_incident_card(
@@ -346,6 +360,30 @@ class FeishuOutboxSender:
                                 incident_id=conv.incident_id,
                             )
                         )
+                    if conv and kind in {"escalated", "reopened"}:
+                        existing_message = await self.session.scalar(
+                            select(Message)
+                            .where(
+                                Message.conversation_id == conv.id,
+                                Message.metadata_json["notification_id"].astext == str(n.id),
+                            )
+                            .limit(1)
+                        )
+                        if existing_message is None:
+                            self.session.add(
+                                Message(
+                                    conversation_id=conv.id,
+                                    role="assistant",
+                                    content=text,
+                                    channel="monitor",
+                                    metadata_json={
+                                        "notification_id": str(n.id),
+                                        "kind": kind,
+                                        "stage": n.payload.get("stage"),
+                                    },
+                                )
+                            )
+                            conv.updated_at = datetime.now().astimezone()
             except Exception as exc:
                 n.last_error = str(exc)[:4000]
                 if n.attempts >= n.max_attempts:

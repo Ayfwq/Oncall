@@ -40,7 +40,12 @@ NEED_FRONTEND_BUILD=0
 NEED_BACKEND_RESTART=0
 NEED_MIGRATE=0
 
-if files_changed deps.backend Dockerfile.backend pyproject.toml uv.lock .dockerignore; then
+# The runtime mounts ./backend into the containers, so ordinary Python source
+# and project metadata changes do not require rebuilding the large dependency
+# image. Dependency changes are captured by uv.lock; keep pyproject.toml out of
+# this checksum so description/entry-point metadata changes do not trigger a
+# multi-minute Torch/Docling rebuild.
+if files_changed deps.backend Dockerfile.backend uv.lock .dockerignore; then
   echo "==> backend 依赖/镜像定义变化：重建后端镜像（国内镜像加速）"
   NEED_BACKEND_BUILD=1
   NEED_MIGRATE=1

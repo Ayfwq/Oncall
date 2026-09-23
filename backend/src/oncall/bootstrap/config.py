@@ -47,7 +47,16 @@ class Settings(BaseSettings):
     feishu_outbox_claim_seconds: int = Field(default=300, ge=10, le=86400)
     web_origin: str = "http://127.0.0.1:5173"
     knowledge_max_upload_mb: int = Field(default=50, ge=1, le=500)
+    # Expand a retrieved hit with adjacent chunks before sending context to the model.
+    knowledge_context_radius: int = Field(default=1, ge=0, le=3)
+    knowledge_context_max_chars: int = Field(default=2400, ge=800, le=12000)
     notification_cooldown_seconds: int = Field(default=1800, ge=0)
+    # Escalations are relative to the first firing: T+2h and T+5h by default.
+    incident_reminder_first_seconds: int = Field(default=7200, ge=60)
+    incident_reminder_final_seconds: int = Field(default=18000, ge=120)
+    # A recovered alert that fires again in this window reopens the same
+    # Incident/Conversation instead of creating a second conversation.
+    incident_reopen_cooldown_seconds: int = Field(default=7200, ge=0)
     job_lease_seconds: int = 120
     job_poll_seconds: float = 1.0
     # Alert delivery runs in its own worker. Keep this short so a fresh alert lands
@@ -63,6 +72,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_safety(self):
+        if self.incident_reminder_final_seconds <= self.incident_reminder_first_seconds:
+            raise ValueError("incident final reminder must be later than first reminder")
         if self.env.lower() == "production":
             if not self.secret_master_key:
                 raise ValueError("ONCALL_SECRET_MASTER_KEY is required in production")

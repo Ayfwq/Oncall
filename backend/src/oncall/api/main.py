@@ -29,6 +29,7 @@ from oncall.application.dtos import (
     ConversationCreateDTO,
     ConversationPatchDTO,
     FeishuSettingsDTO,
+    IncidentBatchDeleteDTO,
     LogSourceDTO,
     MetricsApplyDTO,
     MetricsDiscoverDTO,
@@ -55,6 +56,7 @@ from oncall.infrastructure.db.models import (
     IncidentEvidence,
     KnowledgeDocument,
     KnowledgeDocumentVersion,
+    KnowledgeChunk,
     MonitoredServer,
     Notification,
     Project,
@@ -1022,9 +1024,34 @@ async def list_incidents(user=Depends(current_user), db: AsyncSession = Depends(
             "first_seen": x.first_seen,
             "last_seen": x.last_seen,
             "resolved_at": x.resolved_at,
+            "occurrence_count": x.occurrence_count,
         }
         for x in rows
     ]
+
+
+@app.delete("/api/incidents")
+async def delete_incidents(
+    dto: IncidentBatchDeleteDTO,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    ids = list(dict.fromkeys(dto.ids))
+    owned_ids = set(
+        (
+            await db.scalars(
+                select(Incident.id)
+                .join(Project, Project.id == Incident.project_id)
+                .where(Incident.id.in_(ids), Project.user_id == user.id)
+            )
+        ).all()
+    )
+    if len(owned_ids) != len(ids):
+        raise HTTPException(404, "one or more incidents not found")
+    from oncall.application.incident_service import IncidentService
+
+    deleted = await IncidentService(db).delete_many(ids)
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/incidents/{iid}")
@@ -1071,6 +1098,7 @@ async def incident_detail(
         "first_seen": x.first_seen,
         "last_seen": x.last_seen,
         "resolved_at": x.resolved_at,
+        "occurrence_count": x.occurrence_count,
         "conversation_id": str(conv.id) if conv else None,
         "diagnosis": d.structured_json if d else None,
         "evidence": [
@@ -1224,6 +1252,62 @@ async def documents(user=Depends(current_user), db: AsyncSession = Depends(get_s
         }
         for x in rows
     ]
+
+
+@app.get("/api/knowledge/citations/{chunk_id}")
+async def knowledge_citation(
+    chunk_id: str, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    """Return the authoritative source chunk behind a chat citation.
+
+    The response deliberately exposes the normalized chunk and nearby context,
+    never local filesystem paths. Knowledge is workspace-shared in scope, while
+    the current data model still uses the owning user as the access boundary.
+    """
+    row = await db.execute(
+        select(KnowledgeChunk, KnowledgeDocumentVersion, KnowledgeDocument)
+        .join(KnowledgeDocumentVersion, KnowledgeDocumentVersion.id == KnowledgeChunk.version_id)
+        .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeDocumentVersion.document_id)
+        .where(KnowledgeChunk.id == _uuid(chunk_id, "citation"), KnowledgeDocument.user_id == user.id)
+    )
+    result = row.first()
+    if not result:
+        raise HTTPException(404, "knowledge citation not found")
+    chunk, version, document = result
+    neighbors = list(
+        (
+            await db.scalars(
+                select(KnowledgeChunk)
+                .where(
+                    KnowledgeChunk.version_id == chunk.version_id,
+                    KnowledgeChunk.chunk_index.in_([chunk.chunk_index - 1, chunk.chunk_index + 1]),
+                )
+                .order_by(KnowledgeChunk.chunk_index.asc())
+            )
+        ).all()
+    )
+
+    def chunk_view(item: KnowledgeChunk, limit: int = 24000) -> dict:
+        content = item.content or ""
+        return {
+            "chunk_id": str(item.id),
+            "chunk_index": item.chunk_index,
+            "heading_path": item.heading_path or [],
+            "page_range": item.page_range,
+            "content": content[:limit],
+            "truncated": len(content) > limit,
+        }
+
+    return {
+        **chunk_view(chunk),
+        "title": document.title,
+        "document_id": str(document.id),
+        "version_id": str(version.id),
+        "original_filename": version.original_filename,
+        "parser_version": version.parser_version,
+        "metadata": chunk.metadata_json or {},
+        "neighbors": [chunk_view(item, 2400) for item in neighbors],
+    }
 
 
 @app.post("/api/knowledge/documents")

@@ -33,6 +33,13 @@ class ModelProvider:
 class MockProvider(ModelProvider):
     """Deterministic development provider. It proves graph/tool/persistence wiring without external API keys."""
 
+    @staticmethod
+    def _citation_suffix(context: dict[str, Any]) -> str:
+        refs = [x for x in context.get("knowledge_refs", []) if x.get("citation_id")]
+        if not refs:
+            return ""
+        return "\n\n知识库依据：" + " ".join(f"[{x['citation_id']}]" for x in refs[:5])
+
     async def decide(self, context: dict[str, Any]) -> AgentDecision:
         mode = context.get("mode", "chat")
         called_keys = set(context.get("called_tools", []))
@@ -96,11 +103,14 @@ class MockProvider(ModelProvider):
                     tool_args={"query": context.get("user_message", "")},
                 )
             ev = context.get("evidence", [])
-            summary = "；".join(x.get("summary", "") for x in ev[-3:]) or "知识库暂未提供可用内容"
+            summary = "；".join(x.get("summary", "") for x in ev[-3:])
+            if not summary and context.get("knowledge_refs"):
+                summary = "已检索到相关运维知识库内容"
+            summary = summary or "知识库暂未提供可用内容"
             if context.get("project_id"):
-                answer = f"基于当前可用信息：{summary}\n\n如果你希望我继续检查该项目的实时状态，我可以调用监控工具复查。"
+                answer = f"基于当前可用信息：{summary}\n\n如果你希望我继续检查该项目的实时状态，我可以调用监控工具复查。{self._citation_suffix(context)}"
             else:
-                answer = f"基于当前可用信息：{summary}\n\n当前为通用运维问答模式。"
+                answer = f"基于当前可用信息：{summary}\n\n当前为通用运维问答模式。{self._citation_suffix(context)}"
             return AgentDecision(action="final", answer=answer)
         if mode == "follow_up":
             realtime = any(
@@ -274,17 +284,30 @@ class OpenAICompatibleProvider(ModelProvider):
             for item in context.get("knowledge_refs", [])
             if isinstance(item, dict) and item.get("document_id")
         ]
+        by_citation_id = {
+            str(item.get("citation_id")): item
+            for item in available
+            if item.get("citation_id")
+        }
+        by_chunk_id = {
+            str(item.get("chunk_id")): item
+            for item in available
+            if item.get("chunk_id")
+        }
         by_title = {str(item.get("title")): item for item in available if item.get("title")}
         normalized = []
         for item in diagnosis["knowledge_refs"]:
             if not isinstance(item, dict):
                 continue
-            if item.get("document_id"):
-                normalized.append(item)
-                continue
-            match = by_title.get(str(item.get("title")))
+            match = None
+            if item.get("citation_id"):
+                match = by_citation_id.get(str(item["citation_id"]))
+            if match is None and item.get("chunk_id"):
+                match = by_chunk_id.get(str(item["chunk_id"]))
+            if match is None and item.get("title"):
+                match = by_title.get(str(item.get("title")))
             if match:
-                normalized.append(match)
+                normalized.append(dict(match))
         diagnosis["knowledge_refs"] = normalized
         return json.dumps(payload, ensure_ascii=False)
 

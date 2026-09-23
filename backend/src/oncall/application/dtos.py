@@ -269,6 +269,10 @@ class ChatMessageDTO(BaseModel):
     channel: str = "web"
 
 
+class IncidentBatchDeleteDTO(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
 class FeishuSettingsDTO(BaseModel):
     enabled: bool = False
     app_id: str = Field(default="", max_length=200)

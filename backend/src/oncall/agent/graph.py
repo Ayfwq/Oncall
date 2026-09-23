@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from uuid import UUID
 
@@ -86,6 +87,91 @@ def build_knowledge_query(state: OncallState) -> str:
     return " ".join(dict.fromkeys(x for x in parts if x))[:1000]
 
 
+def _citation_key(item: dict) -> str:
+    return str(
+        item.get("chunk_id")
+        or item.get("id")
+        or "|".join(
+            str(item.get(key) or "") for key in ("document_id", "version_id", "title", "page_range")
+        )
+    )
+
+
+def _citation_from_hit(item: dict, citation_id: str) -> dict:
+    ref = {
+        "citation_id": citation_id,
+        "document_id": item.get("document_id", ""),
+        "version_id": item.get("version_id"),
+        "chunk_id": item.get("chunk_id") or item.get("id"),
+        "title": item.get("title"),
+        "page_range": item.get("page_range"),
+        "score": item.get("rerank_score", item.get("rrf_score")),
+    }
+    content = str(item.get("content") or "").strip()
+    if content:
+        ref["excerpt"] = content[:800]
+    return ref
+
+
+def _merge_citations(existing: list[dict], hits: list[dict]) -> list[dict]:
+    """Deduplicate retrieval hits while assigning stable, auditable KB ids."""
+    refs: list[dict] = []
+    seen: set[str] = set()
+    for item in existing:
+        if not isinstance(item, dict):
+            continue
+        key = _citation_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        ref = dict(item)
+        ref.setdefault("citation_id", f"KB-{len(refs) + 1}")
+        refs.append(ref)
+    for item in hits:
+        if not isinstance(item, dict):
+            continue
+        key = _citation_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(_citation_from_hit(item, f"KB-{len(refs) + 1}"))
+    return refs[:10]
+
+
+def _citation_metadata(state: OncallState) -> dict:
+    refs = [x for x in state.get("knowledge_refs", []) if isinstance(x, dict)]
+    diagnosis = state.get("diagnosis") or {}
+    used_items = diagnosis.get("knowledge_refs") if isinstance(diagnosis, dict) else None
+    used_items = used_items if isinstance(used_items, list) else []
+    used_ids = {
+        str(x.get("citation_id"))
+        for x in used_items
+        if isinstance(x, dict) and x.get("citation_id")
+    }
+    used_chunks = {
+        str(x.get("chunk_id"))
+        for x in used_items
+        if isinstance(x, dict) and x.get("chunk_id")
+    }
+    if not used_items:
+        used_ids.update(re.findall(r"\bKB-\d+\b", str(state.get("final_response") or "")))
+    citations = []
+    for ref in refs:
+        item = dict(ref)
+        item["used_in_answer"] = bool(
+            item.get("citation_id") in used_ids or item.get("chunk_id") in used_chunks
+        )
+        citations.append(item)
+    used = [x for x in citations if x.get("used_in_answer")]
+    status = "cited" if used else "retrieved_not_cited" if citations else "none"
+    return {
+        "citations": citations,
+        "retrieved_citations": citations,
+        "used_citations": used,
+        "citation_status": status,
+    }
+
+
 class OncallGraphRuntime:
     def __init__(self, session: AsyncSession, model: ModelProvider | None = None, emit=None):
         self.session = session
@@ -104,8 +190,14 @@ class OncallGraphRuntime:
                 )
 
     @staticmethod
-    def _trim_for_context(items: list | None, max_items: int = 8, max_chars: int = 400) -> list:
+    def _trim_for_context(
+        items: list | None,
+        max_items: int = 8,
+        max_chars: int = 400,
+        field_limits: dict[str, int] | None = None,
+    ) -> list:
         out = []
+        field_limits = field_limits or {}
         for x in (items or [])[:max_items]:
             if not isinstance(x, dict):
                 out.append(x)
@@ -113,7 +205,8 @@ class OncallGraphRuntime:
             d = dict(x)
             for k, v in d.items():
                 if isinstance(v, str) and len(v) > max_chars:
-                    d[k] = v[:max_chars] + "…"
+                    limit = field_limits.get(k, max_chars)
+                    d[k] = v[:limit] + "…"
             out.append(d)
         return out
 
@@ -145,7 +238,10 @@ class OncallGraphRuntime:
         allowed = set(state.get("allowed_tools") or [])
         context["available_tools"] = [x for x in public_tool_specs() if x["name"] in allowed]
         context["knowledge_hits"] = self._trim_for_context(
-            state.get("knowledge_hits"), max_items=8, max_chars=400
+            state.get("knowledge_hits"),
+            max_items=8,
+            max_chars=1200,
+            field_limits={"content": 1200, "context_text": 2400, "excerpt": 800},
         )
         context["evidence"] = self._trim_for_context(
             state.get("evidence"), max_items=10, max_chars=500
@@ -201,6 +297,9 @@ class OncallGraphRuntime:
             "called_tools": [],
             "knowledge_refs": [],
             "knowledge_hits": [],
+            "retrieved_citations": [],
+            "used_citations": [],
+            "citation_status": "none",
             "knowledge_status": "skipped",
             "allowed_tools": [],
             "tool_plan": [],
@@ -270,17 +369,7 @@ class OncallGraphRuntime:
             result = await self.tools.execute("search_knowledge", {"query": query, "top_k": 5}, ctx)
             dumped = result.model_dump(mode="json")
             hits = dumped.get("data") if isinstance(dumped.get("data"), list) else []
-            refs = [
-                {
-                    "document_id": x.get("document_id", ""),
-                    "version_id": x.get("version_id"),
-                    "chunk_id": x.get("id"),
-                    "title": x.get("title"),
-                    "page_range": x.get("page_range"),
-                    "score": x.get("rerank_score", x.get("rrf_score")),
-                }
-                for x in hits[:5]
-            ]
+            refs = _merge_citations([], hits[:5])
             self._emit(
                 "knowledge_finished",
                 {
@@ -299,6 +388,7 @@ class OncallGraphRuntime:
                 else ("unavailable" if not dumped.get("ok") else "empty"),
                 "knowledge_hits": hits,
                 "knowledge_refs": refs,
+                "retrieved_citations": refs,
                 "called_tools": [key],
                 "answer_sources": [{"type": "knowledge", "count": len(hits)}],
             }
@@ -421,19 +511,7 @@ class OncallGraphRuntime:
         sources = list(state.get("answer_sources", []))
         if p.get("name") == "search_knowledge":
             if r.get("ok") and isinstance(r.get("data"), list):
-                refs.extend(
-                    [
-                        {
-                            "document_id": x.get("document_id", ""),
-                            "version_id": x.get("version_id"),
-                            "chunk_id": x.get("id"),
-                            "title": x.get("title"),
-                            "page_range": x.get("page_range"),
-                            "score": x.get("rerank_score", x.get("rrf_score")),
-                        }
-                        for x in r["data"][:5]
-                    ]
-                )
+                refs = _merge_citations(refs, r["data"][:5])
                 if r["data"]:
                     self._emit(
                         "rag_retrieved",
@@ -488,6 +566,7 @@ class OncallGraphRuntime:
         return {
             "evidence": evidence,
             "knowledge_refs": refs,
+            "retrieved_citations": refs,
             "answer_sources": sources,
             "pending_tool": None,
             "current_tool_result": None,
@@ -542,14 +621,21 @@ class OncallGraphRuntime:
                     "root_cause": report.root_cause,
                 },
             )
-            return {"diagnosis": report.model_dump(mode="json"), "final_response": text}
+            return {
+                "diagnosis": report.model_dump(mode="json"),
+                "final_response": text,
+                **_citation_metadata({**state, "diagnosis": report.model_dump(mode="json"), "final_response": text}),
+            }
         answer = d.get("answer")
         if not answer:
             answer = await self.model.stream_answer(
                 self._context(state), on_token=lambda t: self._emit("token", {"content": t})
             )
         answer = answer or self.fallback_chat(state)
-        return {"final_response": answer}
+        return {
+            "final_response": answer,
+            **_citation_metadata({**state, "final_response": answer}),
+        }
 
     @staticmethod
     def fallback_chat(state: OncallState) -> str:
@@ -562,9 +648,9 @@ class OncallGraphRuntime:
             return "\n".join(f"- {x}" for x in xs) if xs else "- 无"
 
         refs = [
-            f"{x.title or x.document_id} (score={x.score:.3f})"
+            f"[{x.citation_id or 'KB'}] {x.title or x.document_id} (score={x.score:.3f})"
             if x.score is not None
-            else (x.title or x.document_id)
+            else f"[{x.citation_id or 'KB'}] {x.title or x.document_id}"
             for x in r.knowledge_refs
         ]
         service = r.affected_service or "未绑定服务名"
@@ -576,6 +662,7 @@ class OncallGraphRuntime:
             return {}
         cs = ConversationService(self.session)
         try:
+            citation_data = _citation_metadata(state)
             await cs.add_message(
                 UUID(state["conversation_id"]),
                 "assistant",
@@ -587,6 +674,8 @@ class OncallGraphRuntime:
                     "intent": state.get("intent"),
                     "knowledge_status": state.get("knowledge_status"),
                     "answer_sources": state.get("answer_sources", []),
+                    "knowledge_query": state.get("knowledge_query"),
+                    **citation_data,
                 },
             )
         except Exception:
@@ -623,7 +712,7 @@ class OncallGraphRuntime:
                     )
                 )
                 inc = await self.session.get(Incident, UUID(state["incident_id"]))
-                if inc:
+                if inc and inc.resolved_at is None:
                     inc.status = "diagnosed"
                     inc.last_investigated_at = datetime.now().astimezone()
                 await self.session.commit()

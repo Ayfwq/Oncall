@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from oncall.bootstrap.config import get_settings
 from oncall.infrastructure.db.models import (
     AlertmanagerAlert,
     BackgroundJob,
@@ -77,6 +78,26 @@ def _notification_text(project_name: str, alert: dict, incident_id: UUID) -> str
     )
 
 
+def _escalation_text(project_name: str, incident: Incident, stage: str) -> str:
+    final = stage == "final_5h"
+    title = "最后升级提醒" if final else "告警仍未恢复"
+    action = "这是本轮告警的最后一次自动推送，请立即处理。" if final else "系统将在后续升级时间点再次提醒。"
+    return "\n".join(
+        [
+            f"🚨 **{title}**",
+            "",
+            f"**级别**：{SEVERITY_LABEL.get(incident.severity, incident.severity)}",
+            f"**项目**：{project_name}",
+            f"**问题**：{incident.summary or incident.anomaly_type}",
+            f"**事件 ID**：`{incident.id}`",
+            f"**本轮发生次数**：{incident.occurrence_count}",
+            "",
+            "告警仍处于未恢复状态。",
+            action,
+        ]
+    )
+
+
 class IncidentService:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -85,6 +106,7 @@ class IncidentService:
         """Consume Alertmanager events. No local metric/rule evaluation happens here."""
         grouped: dict[UUID, list[dict]] = {}
         now = datetime.now().astimezone()
+        settings = get_settings()
         fallback_status = str(payload.get("status") or "firing").lower()
         for alert in payload.get("alerts") or []:
             labels = dict(alert.get("labels") or {})
@@ -155,6 +177,7 @@ class IncidentService:
                     Incident.project_id == project_id,
                     Incident.fingerprint == incident_fp,
                     Incident.status.in_(["open", "investigating", "diagnosed"]),
+                    Incident.resolved_at.is_(None),
                 )
                 .order_by(Incident.last_seen.desc())
                 .limit(1)
@@ -167,6 +190,23 @@ class IncidentService:
             severity = max(
                 (item["severity"] for item in active), key=lambda value: SEVERITY_RANK[value]
             )
+            is_reopened = False
+            if incident is None and settings.incident_reopen_cooldown_seconds > 0:
+                reopen_cutoff = now - timedelta(
+                    seconds=settings.incident_reopen_cooldown_seconds
+                )
+                incident = await self.session.scalar(
+                    select(Incident)
+                    .where(
+                        Incident.project_id == project_id,
+                        Incident.fingerprint == incident_fp,
+                        Incident.resolved_at.is_not(None),
+                        Incident.resolved_at >= reopen_cutoff,
+                    )
+                    .order_by(Incident.resolved_at.desc())
+                    .limit(1)
+                )
+                is_reopened = incident is not None
             is_new = incident is None
             if incident is None:
                 summary = str(
@@ -191,18 +231,26 @@ class IncidentService:
                     summary=summary,
                     first_seen=now,
                     last_seen=now,
+                    occurrence_count=1,
+                    escalation_generation=1,
                 )
                 self.session.add(incident)
                 await self.session.flush()
+            elif is_reopened:
+                incident.status = "open"
+                incident.resolved_at = None
+                incident.last_seen = now
+                incident.occurrence_count += 1
+                incident.escalation_generation += 1
             else:
                 incident.last_seen = now
                 if SEVERITY_RANK[severity] > SEVERITY_RANK.get(incident.severity, 0):
                     incident.severity = severity
-            if is_new:
+            if is_new or is_reopened:
                 self.session.add(
                     IncidentEvidence(
                         incident_id=incident.id,
-                        type="alertmanager",
+                        type="alertmanager_reopened" if is_reopened else "alertmanager",
                         source=f"alertmanager:{_group_key(payload, labels)}",
                         summary=str(
                             annotations.get("summary")
@@ -211,6 +259,8 @@ class IncidentService:
                         ),
                         data={
                             "status": "firing",
+                            "occurrence_count": incident.occurrence_count,
+                            "escalation_generation": incident.escalation_generation,
                             "group_key": _group_key(payload, labels),
                             "alerts": [
                                 {
@@ -237,27 +287,53 @@ class IncidentService:
                     )
                     self.session.add(conversation)
                     await self.session.flush()
-                self.session.add(
-                    Notification(
-                        incident_id=incident.id,
-                        channel="feishu",
-                        target="default",
-                        payload={
-                            "kind": "triggered",
-                            "incident_id": str(incident.id),
-                            "severity": severity,
-                            "text": _notification_text(
-                                project.name, representative["raw"], incident.id
-                            )
-                            + (f"\n**合并实例数**：{len(active)}" if len(active) > 1 else ""),
-                        },
-                        dedupe_key=f"incident:{incident.id}:triggered",
+                generation = incident.escalation_generation
+                if is_reopened:
+                    self.session.add(
+                        Notification(
+                            incident_id=incident.id,
+                            channel="feishu",
+                            target="default",
+                            payload={
+                                "kind": "reopened",
+                                "incident_id": str(incident.id),
+                                "conversation_id": str(conversation.id),
+                                "severity": severity,
+                                "text": (
+                                    f"🔁 **告警再次触发**\n\n{incident.summary}\n"
+                                    f"这是同一事件第 {incident.occurrence_count} 次发生，"
+                                    "继续沿用原告警和对话。"
+                                ),
+                            },
+                            dedupe_key=f"incident:{incident.id}:reopened:{generation}",
+                        )
                     )
+                else:
+                    self.session.add(
+                        Notification(
+                            incident_id=incident.id,
+                            channel="feishu",
+                            target="default",
+                            payload={
+                                "kind": "triggered",
+                                "incident_id": str(incident.id),
+                                "conversation_id": str(conversation.id),
+                                "severity": severity,
+                                "text": _notification_text(
+                                    project.name, representative["raw"], incident.id
+                                )
+                                + (f"\n**合并实例数**：{len(active)}" if len(active) > 1 else ""),
+                            },
+                            dedupe_key=f"incident:{incident.id}:triggered:{generation}",
+                        )
+                    )
+                await self._schedule_escalations(
+                    incident, conversation, project.name, generation
                 )
                 await JobQueue(self.session).enqueue(
                     "incident_investigate",
                     {"incident_id": str(incident.id), "conversation_id": str(conversation.id)},
-                    idempotency_key=f"incident_investigate:{incident.id}:initial",
+                    idempotency_key=f"incident_investigate:{incident.id}:cycle:{generation}",
                     priority=20,
                     commit=False,
                 )
@@ -265,12 +341,57 @@ class IncidentService:
         await self.session.commit()
         return incidents
 
+    async def _schedule_escalations(
+        self, incident: Incident, conversation: Conversation, project_name: str, generation: int
+    ) -> None:
+        settings = get_settings()
+        plan = (
+            (settings.incident_reminder_first_seconds, "reminder_2h"),
+            (settings.incident_reminder_final_seconds, "final_5h"),
+        )
+        for delay_seconds, stage in plan:
+            self.session.add(
+                Notification(
+                    incident_id=incident.id,
+                    channel="feishu",
+                    target="default",
+                    available_at=datetime.now().astimezone()
+                    + timedelta(seconds=delay_seconds),
+                    payload={
+                        "kind": "escalated",
+                        "stage": stage,
+                        "incident_id": str(incident.id),
+                        "conversation_id": str(conversation.id),
+                        "severity": incident.severity,
+                        "text": _escalation_text(project_name, incident, stage),
+                    },
+                    dedupe_key=f"incident:{incident.id}:escalated:{generation}:{stage}",
+                )
+            )
+
+    async def _cancel_pending_escalations(self, incident_id: UUID) -> None:
+        await self.session.execute(
+            update(Notification)
+            .where(
+                Notification.incident_id == incident_id,
+                Notification.channel == "feishu",
+                Notification.status.in_(["pending", "sending"]),
+                Notification.payload["kind"].astext == "escalated",
+            )
+            .values(status="suppressed", last_error="incident resolved before escalation")
+        )
+
     async def _resolve_without_commit(self, incident: Incident, reason: str) -> None:
-        if incident.status == "resolved":
+        if incident.status == "resolved" and incident.resolved_at is not None:
+            return
+        if incident.resolved_at is not None:
+            incident.status = "resolved"
+            await self._cancel_pending_escalations(incident.id)
             return
         incident.status = "resolved"
         incident.resolved_at = datetime.now().astimezone()
         incident.last_seen = incident.resolved_at
+        await self._cancel_pending_escalations(incident.id)
         self.session.add(
             IncidentEvidence(
                 incident_id=incident.id,
@@ -319,6 +440,22 @@ class IncidentService:
         await self.session.delete(incident)
         await self.session.commit()
         return True
+
+    async def delete_many(self, incident_ids: list[UUID]) -> int:
+        """Delete a validated batch of incidents in one transaction."""
+        ids = list(dict.fromkeys(incident_ids))
+        if not ids:
+            return 0
+        id_strings = [str(x) for x in ids]
+        await self.session.execute(
+            delete(BackgroundJob).where(
+                BackgroundJob.payload["incident_id"].astext.in_(id_strings)
+            )
+        )
+        await self.session.execute(delete(Conversation).where(Conversation.incident_id.in_(ids)))
+        result = await self.session.execute(delete(Incident).where(Incident.id.in_(ids)))
+        await self.session.commit()
+        return int(result.rowcount or 0)
 
     async def add_evidence(
         self,

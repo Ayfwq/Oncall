@@ -37,6 +37,8 @@ FILES = [
     ".env.server.example",
     "deploy/update.sh",
     "deploy/nginx.conf",
+    "deploy/prometheus/prometheus.yml",
+    "deploy/alertmanager/alertmanager.yml",
 ]
 
 DIRS = ["backend", "frontend"]

@@ -286,7 +286,9 @@ class ToolRegistry:
     async def _dispatch(self, name: str, args: dict, ctx: ToolExecutionContext) -> ToolResult:
         if name == "search_knowledge":
             if self._retriever is None:
-                self._retriever = KnowledgeRetriever()
+                # Reuse the DB session to load adjacent chunks for complete
+                # command/procedure context windows.
+                self._retriever = KnowledgeRetriever(self.session)
             return await self._retriever.search(
                 str(args.get("query", "")), top_k=int(args.get("top_k", 5))
             )

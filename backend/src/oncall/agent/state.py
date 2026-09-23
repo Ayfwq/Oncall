@@ -39,6 +39,9 @@ class OncallState(TypedDict, total=False):
     knowledge_query: str | None
     knowledge_status: str
     knowledge_hits: list[dict[str, Any]]
+    retrieved_citations: list[dict[str, Any]]
+    used_citations: list[dict[str, Any]]
+    citation_status: str
     allowed_tools: list[str]
     tool_plan: list[dict[str, Any]]
     answer_sources: list[dict[str, Any]]
