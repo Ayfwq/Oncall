@@ -4,6 +4,7 @@ The default mode is diagnostic: disabled or unconfigured optional services are
 reported as SKIP.  ``--required`` turns the same checks into a release gate and
 fails when any selected check is skipped or fails.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -66,12 +67,12 @@ async def check_llm(s, timeout: float = DEFAULT_TIMEOUT):
         )
         r.raise_for_status()
         text = str(r.json()["choices"][0]["message"]["content"])
-    return 'PASS' if 'ONCALL_OK' in text else 'PASS (unexpected content but API responded)'
+    return "PASS" if "ONCALL_OK" in text else "PASS (unexpected content but API responded)"
 
 
 async def check_embedding(s, timeout: float = DEFAULT_TIMEOUT):
     key = s.embedding_api_key
-    base = s.embedding_base_url.rstrip('/')
+    base = s.embedding_base_url.rstrip("/")
     if not key or not base or not s.embedding_model:
         return "SKIP (missing remote embedding endpoint/key/model)"
     async with _client(timeout) as c:
@@ -105,7 +106,7 @@ async def check_rerank(s, timeout: float = DEFAULT_TIMEOUT):
         )
         r.raise_for_status()
         r.json()
-    return 'PASS'
+    return "PASS"
 
 
 async def check_feishu(s, timeout: float = DEFAULT_TIMEOUT):
@@ -120,7 +121,7 @@ async def check_feishu(s, timeout: float = DEFAULT_TIMEOUT):
         )
         r.raise_for_status()
         body = r.json()
-    return 'PASS' if body.get('tenant_access_token') else f"FAIL {body.get('msg','no token')}"
+    return "PASS" if body.get("tenant_access_token") else f"FAIL {body.get('msg', 'no token')}"
 
 
 async def main(argv: list[str] | None = None):
@@ -142,7 +143,9 @@ async def main(argv: list[str] | None = None):
         except Exception as error:
             result = format_failure(error)
         print(f"[{label}] {result}")
-        failed = failed or result.startswith("FAIL") or (args.required and result.startswith("SKIP"))
+        failed = (
+            failed or result.startswith("FAIL") or (args.required and result.startswith("SKIP"))
+        )
     raise SystemExit(1 if failed else 0)
 
 

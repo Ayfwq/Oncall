@@ -1,23 +1,31 @@
-# Architecture Baseline
+# 系统架构
 
-当前代码对应的可视化总图见 [pulseops-architecture-v2.svg](pulseops-architecture-v2.svg)；Agent、记忆、工具和异步编排的逐节点说明见 [PULSEOPS_AGENT_GUIDE.md](PULSEOPS_AGENT_GUIDE.md)。
+```text
+Server A
+  ├─ Node Exporter ───────────────┐
+  ├─ cAdvisor ────────────────────┤
+  ├─ Python /metrics ─────────────┤
+  └─ Collector ─ DB numbers/logs ─┤
+                                   ▼
+Server B                       Prometheus
+                                   │ rules + for
+                                   ▼
+                              Alertmanager
+                                   │ grouped webhook
+                                   ▼
+Web / Feishu ───────────────► Oncall API ─► PostgreSQL
+                                   │
+                                   ├─ Agent Worker ─► Prometheus / Collector / RAG
+                                   ├─ Notification Worker ─► Feishu
+                                   └─ RAG Worker ─► Milvus
+```
 
-## 不可违反的边界
+## 设计约束
 
-1. Detector 是确定性代码；LLM 只负责问答、调查、解释与诊断。
-2. PostgreSQL 是 Conversation/Message/Incident/Evidence/Diagnosis 的唯一业务事实源。
-3. LangGraph Checkpoint 仅用于 Agent Runtime 恢复。
-4. Milvus 是可重建索引；raw + canonical document + PostgreSQL metadata 才是知识事实源。
-5. Model 不得提供/切换 `project_id`；ToolExecutor 从 runtime context 注入 scope。
-6. 当前实现只注册 READ tools。
-7. 同一 Incident 持续 FIRING 不应每轮重新调用 Agent；首次、升级、新证据、人工 DEEP、stale recheck 才重新调查。
-8. 所有外部凭证通过 SecretBox/环境配置管理，不写入代码和日志。
-
-## Runtime
-
-- `oncall-api`: REST/SSE/Web Gateway；PulseOps 交互 Agent（单工作区免登录）。
-- `oncall-monitor-worker`: 项目巡检、Detector、Incident。
-- `oncall-agent-worker`: `incident_investigate` durable jobs。
-- `oncall-rag-worker`: Docling ingestion / indexing。
-
-跨进程通过 PostgreSQL `background_jobs` / `notifications` 协调，当前实现不引入 Redis/Celery/Kafka。
+1. 数字告警只由 Prometheus 判断。
+2. Oncall 不保存本地规则状态或指标样本，历史指标读取 Prometheus。
+3. Alertmanager fingerprint 保存单条告警身份，`groupKey` 保存用户可见事件身份。
+4. 日志、SQL 明细和容器进程只在诊断阶段读取。
+5. 所有 Agent Tool 只读，生产凭证由环境变量或加密字段管理。
+6. PostgreSQL 保存业务事实、会话、事件、证据、诊断、任务和通知；Milvus 仅保存可重建索引。
+7. 知识库是当前工作区共享资源，所有项目共用；项目范围只约束监控数据工具，不约束知识库检索。

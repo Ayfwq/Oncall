@@ -1,14 +1,16 @@
-.PHONY: infra-up infra-down migrate api monitor agent notification rag test lint frontend
+.PHONY: infra-up infra-down monitoring-up monitoring-down migrate api agent notification rag test lint frontend
 infra-up:
 	docker compose up -d
 infra-down:
 	docker compose down
+monitoring-up:
+	docker compose -f compose.local.monitoring.yaml up -d
+monitoring-down:
+	docker compose -f compose.local.monitoring.yaml down
 migrate:
 	uv run alembic -c backend/alembic.ini upgrade head
 api:
 	uv run oncall-api
-monitor:
-	uv run oncall-monitor-worker
 agent:
 	uv run oncall-agent-worker
 rag:

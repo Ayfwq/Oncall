@@ -10,7 +10,12 @@ if (!(Test-Path (Join-Path $venv 'oncall-api.exe'))) {
 }
 
 Write-Host "Starting PulseOps processes in separate PowerShell windows..."
-foreach ($svc in @('oncall-api','oncall-monitor-worker','oncall-agent-worker','oncall-notification-worker','oncall-rag-worker')) {
+docker compose -f compose.local.monitoring.yaml up -d
+foreach ($svc in @('oncall-api','oncall-agent-worker','oncall-notification-worker','oncall-rag-worker')) {
+  if (Get-Process -Name $svc -ErrorAction SilentlyContinue) {
+    Write-Host "$svc is already running; skip duplicate process."
+    continue
+  }
   $exe = Join-Path $venv "$svc.exe"
   Start-Process powershell -ArgumentList '-NoExit','-Command',"Set-Location '$root'; & '$exe'"
 }

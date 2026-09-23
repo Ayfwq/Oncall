@@ -7,6 +7,7 @@ fixed queries below are deterministic regression fixtures.
 
 Run with:  uv run --no-sync pytest backend/tests/rag -q
 """
+
 from __future__ import annotations
 
 import uuid
@@ -22,10 +23,22 @@ from sqlalchemy import delete, select
 REGRESSION_QUERIES = [
     ("CPU 负载很高怎么排查", "cpu-high-load-sop.md", "CPU 高负载"),
     ("load average 超过核数 4 倍 怎么办", "cpu-high-load-sop.md", "告警触发条件"),
-    ("PostgreSQL 连接被拒绝 connection refused 怎么处理", "postgresql-connection-refused-sop.md", "connection refused"),
+    (
+        "PostgreSQL 连接被拒绝 connection refused 怎么处理",
+        "postgresql-connection-refused-sop.md",
+        "connection refused",
+    ),
     ("SQLSTATE 28000 认证失败 密码错误", "postgresql-connection-refused-sop.md", "pg_hba"),
-    ("pg_isready 端口 5432 没监听 listen_addresses", "postgresql-connection-refused-sop.md", "listen_addresses"),
-    ("playwright 报 Executable doesn't exist 浏览器缺失", "playwright-chromium-sop.md", "Executable"),
+    (
+        "pg_isready 端口 5432 没监听 listen_addresses",
+        "postgresql-connection-refused-sop.md",
+        "listen_addresses",
+    ),
+    (
+        "playwright 报 Executable doesn't exist 浏览器缺失",
+        "playwright-chromium-sop.md",
+        "Executable",
+    ),
     ("libnss3 缺失 无法启动 chromium 沙箱", "playwright-chromium-sop.md", "libnss3"),
 ]
 
@@ -43,10 +56,12 @@ def _hit_contents(res) -> list[str]:
 @pytest.mark.parametrize("query,expected_title,marker", REGRESSION_QUERIES)
 @pytest.mark.rag
 async def test_retrieval_hits_expected_document(rag_kb, query, expected_title, marker):
-    res = await KnowledgeRetriever().search(query, project_id=None, top_k=5)
+    res = await KnowledgeRetriever().search(query, top_k=5)
     assert res.ok, (res.error_code, res.data)
     assert res.data and len(res.data) > 0, "expected at least one hit"
-    assert expected_title in _hit_titles(res), f"expected {expected_title!r} in top hits: {_hit_titles(res)}"
+    assert expected_title in _hit_titles(res), (
+        f"expected {expected_title!r} in top hits: {_hit_titles(res)}"
+    )
     assert any(marker in content for content in _hit_contents(res)[:3]), (
         f"expected section marker {marker!r} in top-3 contents"
     )
@@ -56,7 +71,7 @@ async def test_retrieval_hits_expected_document(rag_kb, query, expected_title, m
 async def test_citation_structure_complete(rag_kb):
     retriever = KnowledgeRetriever()
     for query, *_ in REGRESSION_QUERIES:
-        res = await retriever.search(query, project_id=None, top_k=5)
+        res = await retriever.search(query, top_k=5)
         assert res.ok
         assert res.data, query
         hit = res.data[0]
@@ -90,7 +105,9 @@ async def test_search_knowledge_tool_writes_retrieval_trace(rag_kb, db):
     from oncall.agent.tool_registry import ToolExecutionContext, ToolRegistry
 
     ctx = ToolExecutionContext(project_id=None, incident_id=None, agent_run_id=run_id)
-    result = await ToolRegistry(db).execute("search_knowledge", {"query": "PostgreSQL connection refused 怎么处理"}, ctx)
+    result = await ToolRegistry(db).execute(
+        "search_knowledge", {"query": "PostgreSQL connection refused 怎么处理"}, ctx
+    )
     assert result.ok, (result.error_code, result.data)
     assert isinstance(result.data, list) and result.data
 
@@ -118,8 +135,12 @@ async def test_collection_exists_with_entities(rag_kb):
     assert idx.collection == "oncall_knowledge"
     client = idx._client()
     assert client.has_collection(idx.collection)
-    rows = client.query(collection_name=idx.collection, filter="", output_fields=["title"], limit=1000)
-    assert len(rows) >= len(rag_kb["titles"]) * 5, f"expected >= {len(rag_kb['titles']) * 5} chunks, got {len(rows)}"
+    rows = client.query(
+        collection_name=idx.collection, filter="", output_fields=["title"], limit=1000
+    )
+    assert len(rows) >= len(rag_kb["titles"]) * 5, (
+        f"expected >= {len(rag_kb['titles']) * 5} chunks, got {len(rows)}"
+    )
     titles = {r["title"] for r in rows}
     for t in rag_kb["titles"]:
         assert t in titles, f"fixture doc {t!r} not in Milvus collection"

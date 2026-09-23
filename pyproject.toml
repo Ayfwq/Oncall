@@ -1,7 +1,7 @@
 [project]
 name = "pulseops"
 version = "1.0.0"
-description = "Local-first intelligent operations platform with deterministic monitoring, incident investigation, RAG and Feishu/Web chat."
+description = "Local-first intelligent operations platform with Prometheus alerts, LLM incident investigation, RAG and Feishu/Web chat."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -46,7 +46,6 @@ dev = [
 
 [project.scripts]
 oncall-api = "oncall.api.main:run"
-oncall-monitor-worker = "oncall.workers.monitor_worker:run"
 oncall-agent-worker = "oncall.workers.agent_worker:run"
 oncall-notification-worker = "oncall.workers.notification_worker:run"
 oncall-rag-worker = "oncall.workers.rag_worker:run"
@@ -92,6 +91,11 @@ exclude = ["backend/alembic/versions"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+
+# FastAPI dependency providers are intentionally declared in route signatures;
+# HTTP handlers also translate caught exceptions into stable API responses.
+[tool.ruff.lint.per-file-ignores]
+"backend/src/oncall/api/*.py" = ["B008", "B904"]
 
 [tool.mypy]
 python_version = "3.13"

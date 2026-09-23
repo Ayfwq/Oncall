@@ -1,126 +1,64 @@
-# 服务器与 Python 项目监控设计
+# Prometheus 告警设计
 
-## 1. 推荐的边界
+## 职责边界
 
-Oncall 可以部署在服务器 A，被监控的 Python 项目可以部署在服务器 B、C。目标服务器不需要运行完整 Oncall，也不需要给每个 Python 项目重写 Agent，只需要按服务器安装一次通用采集器：
-
-- 必装 Node Exporter：提供整机 CPU、内存、磁盘、网络和负载。
-- 有 NVIDIA GPU 时选装 DCGM Exporter：提供 GPU 利用率、显存、温度和功耗；无 GPU 时留空，不生成 GPU 规则。
-- 每个 Python 项目仍提供自己的 `/health` 和 Prometheus `/metrics`。
-
-因此网页只保留一个项目接入入口，顺序固定为：**选择已有服务器或连接新服务器 → 填写项目 → 一次验证全部连接 → 创建并启用监控**。服务器仍是后端可复用的数据实体，但不再占用独立导航模块。
-
-当前远程 Python 项目的固定采集契约为 **41 个基础指标**：服务器 11 个、健康检查 4 个、应用 HTTP 6 个、Python process 7 个、Docker 日志 3 个、PostgreSQL 10 个；配置 DCGM 后再增加 6 个 GPU 指标，共 47 个。不是所有指标都适合直接报警：容量/速率类指标用于上下文和基线，硬故障和用户体验指标用于触发告警。
-
-指标分成两层，避免重复告警：
-
-| 层级 | 负责回答的问题 | 推荐指标 |
-| --- | --- | --- |
-| 主机层 | 机器是否快耗尽资源 | `host.cpu.percent`、`host.memory.percent`、磁盘使用率、磁盘/网络速率、可选 `host.gpu.*` |
-| 项目/进程层 | 这个 Python 项目是否还在工作 | 健康检查；Python Prometheus client 默认提供的进程 CPU、RSS、虚拟内存、文件描述符、启动时间 |
-| 应用白盒层 | API 用户体验是否变差 | `app.up`、RPS、错误率、P95/P99、可用性；来自项目自己的 `/metrics` |
-
-因此，不需要同时用 Prometheus 和 psutil 采集同一个概念。当前约定是：
-
-- `host.*` 只表示整台机器；它不等于某个 Python 进程的 CPU。
-- `process.*` 来源于项目自己的 `/metrics`，表示 Python 服务进程；它不等于整机 CPU。
-- GPU 当前表示整机 NVIDIA GPU，不宣称能自动归因到某个 Python 进程。需要进程级 GPU 时，应由应用暴露自定义、带进程或服务标签的指标。
-
-## 2. 在项目向导中连接服务器
-
-在网页「项目」的第一步选择“连接新服务器”。真正必填的只有系统指标地址：
-
-1. 系统指标地址（必填），例如 `http://10.0.0.22:9100/metrics`。
-2. GPU 指标地址（可选），例如 `http://10.0.0.22:9400/metrics`。
-3. 服务器名称（可选）；留空时根据 URL 主机名自动生成。
-
-向导内提供采集器安装命令和“⚡ 测试服务器”。只有地址返回正确类型的采集器指标后，才能“保存并继续”，避免把普通网页误当成 exporter。Oncall A 必须能够访问 B 的对应端口；生产环境建议只通过内网、VPN 或防火墙白名单开放。服务器只安装一次采集器，同一台机器上的后续项目选择“已有服务器”即可。
-
-## 3. 添加 Python 项目
-
-完成第一步后填写项目名称、健康检查地址、Prometheus `/metrics` 地址。系统从网络访问目标项目，不要求 Oncall 与项目共享目录。
-
-- 健康地址负责判断 HTTP 服务是否可达、返回状态码是否符合预期以及响应延迟。
-- 项目 `/metrics` 负责 API 请求率、错误率、P95/P99、可用性，以及 Python client 默认的进程 CPU、RSS、虚拟内存、文件描述符和运行时长。
-- 所属服务器负责整机资源与可选 GPU 指标。
-
-创建前页面调用 `POST /api/projects/onboard/python/test`，一次检测服务器采集器、健康地址和项目 `/metrics`；三项都成功后才允许创建。创建时系统调用 `POST /api/projects/onboard/python` 自动生成规则。项目默认停用，应在详情页确认首个采集快照后再启用。
-
-后端接口的最小请求示例：
-
-```json
-{
-  "name": "股票 API",
-  "server_id": "已保存的服务器 UUID",
-  "environment": "production",
-  "health_url": "https://stock.example.com/health",
-  "metrics_url": "https://stock.example.com/metrics",
-  "poll_interval": 30,
-  "enabled": false
-}
-```
-
-Python 服务的推荐白盒指标是标准 HTTP golden signals：请求率、错误率、延迟分位数和可用性。应用只需安装 Prometheus Python client 或框架适配器，暴露 `/metrics`；Oncall 负责抓取和派生 `app.*` 指标，不要求用户手写告警计算代码。当前快速接入把健康地址和 `/metrics` 设为必填，是为了保证“服务可达”和“应用性能”两条证据同时存在，而不是只采集一个无上下文的指标。
-
-## 4. 自动生成的规则
-
-规则有三种模式：
-
-- `threshold`：固定阈值，适合进程存活、健康检查失败、GPU 温度上限、磁盘使用率等硬故障。
-- `baseline`：使用最近一段“正常样本”计算均值和标准差。前 `baseline_min_samples` 次只学习不告警；偏离达到 `baseline_z_score` 才进入检测器。
-- `hybrid`：固定阈值或基线任意一个异常即告警。适合 API P95、错误率这类既有绝对底线又有明显业务波动的指标。
-
-所有模式都经过现有的连续触发/连续恢复状态机。建议初始参数：
-
-| 场景 | 模式 | 触发建议 |
-| --- | --- | --- |
-| 进程/健康检查/app.up | threshold | 失败连续 2 次触发，恢复连续 2 次 |
-| Node Exporter 不可达 | threshold | 连续 2 次失败触发严重告警，连续 2 次成功恢复 |
-| 主机 CPU | threshold | >90% 连续 3 次，<80% 连续 3 次恢复 |
-| 主机内存 | threshold | >90% 连续 3 次，<80% 连续 3 次恢复 |
-| 根磁盘 | threshold | >90% 触发，<85% 连续 2 次恢复 |
-| API 错误率 | 复合 threshold | 请求率 > 1 RPS 且错误率 > 10% 才告警，避免低流量误报 |
-| API P95/P99 | hybrid | P95 800ms、P99 2s，同时用 60 个样本、至少 12 个样本、3σ 作为相对异常 |
-| Python 进程 CPU/RSS | baseline | 高于自身正常区间 3σ 且连续 3 次才触发 |
-| DCGM Exporter 不可达 | threshold | 配置了 GPU 地址后才生成；连续 2 次失败触发 |
-| GPU 显存 | threshold | >90% 连续 3 次，<80% 连续 3 次恢复 |
-| GPU 温度 | threshold | >85°C 连续 3 次严重告警，<75°C 恢复 |
-
-基线不是“平均值一变就立刻报警”：它有最小样本数、z-score、触发/恢复持续次数，并且当前异常值不会写回正常窗口。高水位规则只判断向上偏离，低水位规则只判断向下偏离，性能变好不会误报。这样既能适应股票服务白天/夜间的差异，又不会把一次故障永久学习成正常。
-
-Prometheus 的请求数、错误数和直方图桶都是累积计数器。PulseOps 会保存上次抓取游标并计算当前抓取窗口的增量，因此错误率、可用性和 P95/P99 表示最近一个采集周期，而不是服务自启动以来的累计平均。
-
-GPU 利用率会采集和展示，但单独“利用率高”不一定是故障，因此默认不告警。服务器 CPU、内存和 Python 进程资源规则仍会记录状态变化，但不会单独创建用户可见 Incident；当应用或数据库异常创建 Incident 后，这些指标作为诊断证据交给 Agent。GPU 显存和温度采用持续次数抑制瞬时尖峰；API 延迟额外使用历史基线。当前基线窗口为最近 60 个正常样本，至少积累 12 个样本，偏离 3 个标准差才判断为异常，恢复阈值为 2 个标准差。
-
-同一项目在 120 秒内由不同规则确认的可操作异常会合并进一个 Incident。首个信号立即产生简短告警；后续信号写入 Incident 证据并触发重新调查，不再创建新的告警线程。只有该 Incident 下的所有信号都恢复后，系统才发送恢复通知。日志异常默认要求窗口内至少 5 个异常且连续命中两次，以避免单条异常日志造成噪声。
-
-## 5. 完整运行链路
+告警主链只有一条：
 
 ```text
-Node Exporter + 可选 DCGM + Python /health + /metrics
-             │
-             ▼
-      monitor-worker 定时远程抓取
-             │
-     host / gpu / service / app / process
-             │
-             ▼
-    固定阈值 + 历史基线 + 连续状态机
-             │
-      firing → Incident + outbox + investigation job (one transaction)
-             → 飞书首条告警
-             │
-      Agent 读取快照、指标和知识库
-             │
-      Diagnosis → 回复首条飞书告警，形成同一消息线程
-             │
-      用户在该线程继续追问 → 命中同一 incident conversation
+数字指标 → Prometheus 规则与持续时间 → Alertmanager 合并/去重
+         → Oncall Webhook → Incident → LLM 诊断 → 飞书
 ```
 
-## 6. 当前边界
+- Prometheus 是唯一的数字指标异常判断入口。
+- Alertmanager 按 `project_id + alertname + category` 聚合，控制首次等待、重复间隔和恢复通知。
+- Oncall 不重复计算阈值；只保存 Alertmanager 事件、创建事件并启动诊断。
+- LLM 不决定是否告警。它读取告警与 Prometheus 指标，再按需查询日志、数据库明细、容器状态和知识库。
 
-当前服务器指标随其关联项目一起采集；同一服务器挂多个项目时，主机异常会出现在每个项目的上下文中。下一阶段如果要避免重复主机告警，应把服务器提升为独立告警对象，而不是在本期偷偷合并不同项目的事故。生产环境还应逐步增加 exporter 鉴权代理、服务发现、告警静默/维护窗口和原始日志脱敏。
+旧的 `monitor-worker`、本地 Detector、基线状态机、规则表、样本表和游标表已经删除。
 
-代码链路已实现飞书首告、AI 调查任务、诊断回复以及基于 `root_id` / `parent_id` 的上下文续聊。实际发送仍依赖部署环境提供飞书 App ID、App Secret、目标群/用户，并启用飞书后重启 API 与通知 worker；没有这些外部配置时只能验证本地消息出箱状态，不能宣称真实群聊已经送达。
+知识库只在诊断阶段使用。Agent 根据具体告警名、异常类型、摘要和用户补充内容动态生成检索词，并按需搜索当前工作区共享的 SOP；它不是项目专属知识库，也不是实时指标来源。没有知识库文档或没有检索命中时，报告应明确说明，不生成虚假的引用。
 
-首次触发的 Incident、事件证据、事故会话、Feishu outbox 通知和 `incident_investigate` 任务在同一个数据库事务中提交；因此不会出现“事故已落库但没有首条通知或诊断任务”的中间状态。通知发送与 Agent 调查仍是异步的，飞书短消息可以先到，诊断报告随后在同一事件线程补充。
+## 数据来源
+
+| 数据域 | 目标服务器组件 | Prometheus 用途 | LLM 用途 |
+| --- | --- | --- | --- |
+| 整机 | Node Exporter，每台服务器一次 | CPU、内存、磁盘、网络、采集器存活 | 查看故障上下文 |
+| 容器 | cAdvisor，每台服务器一次 | 按 Compose 项目标签过滤容器 CPU/内存 | Collector 查询重启、OOM、进程和端口 |
+| 应用 | Python 项目自己的 `/metrics` | 可达性、请求量、5xx、P95、进程指标 | 查询当前值与历史趋势 |
+| PostgreSQL | Oncall API 将 Collector 的只读数字结果转换为 `/metrics` | 可用性、连接率、锁等待、长事务、复制延迟 | Collector 进一步查询锁链、慢 SQL 和活动会话 |
+| Docker stdout | Collector，每台服务器一次 | 不直接进入 Prometheus | 搜索错误文本、异常堆栈和错误特征 |
+
+同一台服务器的 Node Exporter、cAdvisor 和 Collector 只需安装一次，可以被多个项目复用。项目通过 Compose 项目名限定自己的容器和日志范围。
+
+## 第一版统一规则
+
+规则由 Oncall 根据项目配置生成到 `data/prometheus/rules/oncall.yml`，用户不在页面手工编辑。
+
+| 类别 | 条件 | 持续时间 |
+| --- | --- | --- |
+| 可用性 | 应用 `/metrics` 或 Node Exporter 抓取失败 | 2 分钟 |
+| 应用 | 5xx 错误率超过 10% | 5 分钟 |
+| 应用 | P95 超过 1.5 秒 | 5 分钟 |
+| 主机 | 内存或磁盘超过 90% | 10 分钟 |
+| 容器 | 项目容器 CPU 或内存持续过高 | 10 分钟 |
+| PostgreSQL | 数据库数字采集失败 | 2 分钟 |
+| PostgreSQL | 连接率超过 85% | 10 分钟 |
+| PostgreSQL | 锁等待、长事务或复制延迟 | 5 分钟 |
+
+瞬时波动不会立即告警。Alertmanager 默认等待 30 秒聚合，同类告警 10 分钟内合并，普通告警 4 小时才重复，严重告警 2 小时才重复。Oncall 还会按 Alertmanager `groupKey` 将同一组多个实例保存为一个 Incident 和一条首告。
+
+## 配置生成
+
+项目或服务器创建、修改、删除后，Oncall 自动重写：
+
+- `data/prometheus/targets/oncall.json`：Prometheus file-SD 抓取目标。
+- `data/prometheus/rules/oncall.yml`：项目级告警规则。
+
+随后调用 Prometheus `/-/reload`。应用 `/metrics` 和 PostgreSQL 数字指标通过 Oncall 内部只读转发入口暴露给 Prometheus；这样凭证不会写入 Prometheus 配置，且 Server B 只需能访问 Oncall API。
+
+## 安全边界
+
+- Collector 只有只读 Docker Socket 和只读数据库账号。
+- Prometheus 转发入口只返回数字，不返回连接串、SQL 文本或数据库结构。
+- 日志和数据库明细仅由受限 Agent Tool 在事件诊断中查询。
+- 生产环境使用 `PROMETHEUS_SCRAPE_TOKEN` 和 `ALERTMANAGER_WEBHOOK_TOKEN`，并限制 exporter/Collector 端口只对 Server B 开放。

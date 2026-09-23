@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from uuid import UUID
-
 from oncall.domain.schemas import ToolResult
 from oncall.rag.embedding import get_embedding_provider
 from oncall.rag.milvus_store import MilvusKnowledgeIndex
@@ -9,34 +7,67 @@ from oncall.rag.rerank import Reranker
 from oncall.security.redact import redact_text
 
 
-def rrf(lists:list[list[dict]],k:int=60)->list[dict]:
-    merged={}
+def rrf(lists: list[list[dict]], k: int = 60) -> list[dict]:
+    merged = {}
     for hits in lists:
-        for rank,item in enumerate(hits,1):
-            key=item['id'];m=merged.setdefault(key,dict(item,rrf_score=0.0));m['rrf_score']+=1.0/(k+rank)
-    return sorted(merged.values(),key=lambda x:x['rrf_score'],reverse=True)
+        for rank, item in enumerate(hits, 1):
+            key = item["id"]
+            m = merged.setdefault(key, dict(item, rrf_score=0.0))
+            m["rrf_score"] += 1.0 / (k + rank)
+    return sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)
 
 
 class KnowledgeRetriever:
-    def __init__(self):self.embedder=get_embedding_provider();self.index=MilvusKnowledgeIndex();self.reranker=Reranker()
+    def __init__(self):
+        self.embedder = get_embedding_provider()
+        self.index = MilvusKnowledgeIndex()
+        self.reranker = Reranker()
 
-    async def search(self,query:str,project_id:UUID|None=None,top_k:int=5)->ToolResult:
+    async def search(self, query: str, top_k: int = 5) -> ToolResult:
         try:
-            query=' '.join(str(query).strip().split())[:1000]
+            query = " ".join(str(query).strip().split())[:1000]
             if not query:
-                return ToolResult(ok=False,summary='知识库检索参数为空',error_code='INVALID_QUERY')
-            top_k=max(1,min(int(top_k),10))
-            vector=(await self.embedder.embed([query]))[0]
-            scope=str(project_id) if project_id else None
-            dense,bm25=await __import__('asyncio').gather(self.index.dense_search(vector,scope,20),self.index.bm25_search(query,scope,20))
-            candidates=rrf([dense,bm25])[:30]
+                return ToolResult(
+                    ok=False, summary="知识库检索参数为空", error_code="INVALID_QUERY"
+                )
+            top_k = max(1, min(int(top_k), 10))
+            vector = (await self.embedder.embed([query]))[0]
+            dense, bm25 = await __import__("asyncio").gather(
+                self.index.dense_search(vector, 20), self.index.bm25_search(query, 20)
+            )
+            candidates = rrf([dense, bm25])[:30]
             # An empty knowledge base is a valid state during onboarding.  Do
             # not send an empty documents array to the remote reranker (some
             # providers reject it with HTTP 400); return an auditable empty hit
             # set and let the Agent continue with monitoring evidence.
             if not candidates:
-                return ToolResult(ok=True,summary='知识库暂无相关内容',data=[])
-            items=await self.reranker.rerank(query,candidates,top_k=top_k)
-            return ToolResult(ok=True,summary=f'知识库命中 {len(items)} 条',data=items)
+                return ToolResult(ok=True, summary="知识库暂无相关内容", data=[])
+            try:
+                items = await self.reranker.rerank(query, candidates, top_k=top_k)
+            except Exception:
+                # Dense + BM25 is still useful when the optional remote reranker
+                # is temporarily unavailable.  Preserve a stable response shape
+                # so the Agent can cite the retrieved chunks and the trace can
+                # show that this was a fallback result.
+                items = [
+                    dict(item, rerank_score=None, rerank_fallback=True)
+                    for item in candidates[:top_k]
+                ]
+                return ToolResult(
+                    ok=True,
+                    summary=f"知识库命中 {len(items)} 条（未完成重排，已使用混合检索结果）",
+                    data=items,
+                )
+            if not items:
+                items = [
+                    dict(item, rerank_score=None, rerank_fallback=True)
+                    for item in candidates[:top_k]
+                ]
+            return ToolResult(ok=True, summary=f"知识库命中 {len(items)} 条", data=items)
         except Exception as e:
-            return ToolResult(ok=False,summary='知识库检索不可用',error_code='RAG_UNAVAILABLE',data={'error':redact_text(str(e))})
+            return ToolResult(
+                ok=False,
+                summary="知识库检索不可用",
+                error_code="RAG_UNAVAILABLE",
+                data={"error": redact_text(str(e))},
+            )

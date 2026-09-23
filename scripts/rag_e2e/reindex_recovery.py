@@ -7,6 +7,7 @@
 
 Run with:  uv run --no-sync python scripts/rag_e2e/reindex_recovery.py
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,9 +43,8 @@ async def wait_job(client: httpx.AsyncClient, job_id: str, timeout: float = 180)
 
 
 async def main() -> None:
-    from pymilvus import MilvusClient
-
     from oncall.rag.milvus_store import MilvusKnowledgeIndex
+    from pymilvus import MilvusClient
 
     idx = MilvusKnowledgeIndex()
     client = MilvusClient(uri=idx.settings.milvus_uri, token=idx.settings.milvus_token)
@@ -53,7 +53,9 @@ async def main() -> None:
     if not client.has_collection(collection):
         log("collection", collection, "missing before test; aborting")
         sys.exit(1)
-    before = len(client.query(collection_name=collection, filter="", output_fields=["id"], limit=1000))
+    before = len(
+        client.query(collection_name=collection, filter="", output_fields=["id"], limit=1000)
+    )
     log("before drop: entities =", before)
 
     # ---- 1. simulate index loss ----
@@ -90,7 +92,9 @@ async def main() -> None:
 
     from oncall.rag.retrieval import KnowledgeRetriever
 
-    res = await KnowledgeRetriever().search("SQLSTATE 28000 认证失败 密码错误", project_id=None, top_k=5)
+    res = await KnowledgeRetriever().search(
+        "SQLSTATE 28000 认证失败 密码错误", project_id=None, top_k=5
+    )
     assert res.ok and res.data, res
     top = res.data[0]
     log("recovery search ok: top_title =", top.get("title"), "| rerank =", top.get("rerank_score"))

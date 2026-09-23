@@ -25,4 +25,5 @@ class CollectResult:
 
 class MonitoringIntegration(Protocol):
     name: str
+
     async def collect(self) -> CollectResult: ...

@@ -17,7 +17,7 @@ async def ensure_local_user(session: AsyncSession) -> User:
     user = await session.scalar(select(User).order_by(User.created_at.asc()).limit(1))
     if user:
         return user
-    user = User(username='local-workspace', password_hash='auth-disabled')
+    user = User(username="local-workspace", password_hash="auth-disabled")
     session.add(user)
     try:
         await session.commit()

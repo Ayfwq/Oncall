@@ -10,76 +10,75 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_prefix='ONCALL_', extra='ignore')
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="ONCALL_", extra="ignore")
 
-    env: str = 'development'
-    host: str = '127.0.0.1'
+    env: str = "development"
+    host: str = "127.0.0.1"
     port: int = 9900
-    log_level: str = 'INFO'
-    log_dir: Path = Path('./logs')
+    log_level: str = "INFO"
+    log_dir: Path = Path("./logs")
     log_retention_days: int = Field(default=2, ge=1, le=30)
-    database_url: str = 'postgresql+asyncpg://oncall:oncall@127.0.0.1:5432/oncall'
-    langgraph_database_url: str = 'postgresql://oncall:oncall@127.0.0.1:5432/oncall'
-    milvus_uri: str = 'http://127.0.0.1:19530'
-    milvus_token: str = 'root:Milvus'
-    data_dir: Path = Path('./data')
-    secret_master_key: str = ''
-    model_provider: str = 'openai-compatible'
-    model_base_url: str = 'https://api.siliconflow.cn/v1'
-    model_api_key: str = ''
-    model_name: str = 'deepseek-ai/DeepSeek-V4-Flash'
-    embedding_base_url: str = 'https://api.siliconflow.cn/v1'
-    embedding_api_key: str = ''
-    embedding_model: str = 'BAAI/bge-m3'
+    database_url: str = "postgresql+asyncpg://oncall:oncall@127.0.0.1:5432/oncall"
+    langgraph_database_url: str = "postgresql://oncall:oncall@127.0.0.1:5432/oncall"
+    milvus_uri: str = "http://127.0.0.1:19530"
+    milvus_token: str = "root:Milvus"
+    data_dir: Path = Path("./data")
+    secret_master_key: str = ""
+    model_provider: str = "openai-compatible"
+    model_base_url: str = "https://api.siliconflow.cn/v1"
+    model_api_key: str = ""
+    model_name: str = "deepseek-ai/DeepSeek-V4-Flash"
+    embedding_base_url: str = "https://api.siliconflow.cn/v1"
+    embedding_api_key: str = ""
+    embedding_model: str = "BAAI/bge-m3"
     embedding_dimension: int = 1024
-    rerank_base_url: str = 'https://api.siliconflow.cn/v1/rerank'
-    rerank_api_key: str = ''
-    rerank_model: str = 'BAAI/bge-reranker-v2-m3'
+    rerank_base_url: str = "https://api.siliconflow.cn/v1/rerank"
+    rerank_api_key: str = ""
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
     feishu_enabled: bool = False
-    feishu_app_id: str = ''
-    feishu_app_secret: str = ''
-    feishu_default_receive_id: str = ''
-    feishu_default_receive_id_type: Literal['chat_id', 'open_id', 'user_id', 'union_id'] = 'chat_id'
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_default_receive_id: str = ""
+    feishu_default_receive_id_type: Literal["chat_id", "open_id", "user_id", "union_id"] = "chat_id"
     feishu_ws_initial_retry_seconds: float = Field(default=2.0, ge=0.1, le=60)
     feishu_ws_max_retry_seconds: float = Field(default=120.0, ge=1, le=900)
     feishu_event_claim_seconds: int = Field(default=300, ge=10, le=86400)
     feishu_event_max_attempts: int = Field(default=5, ge=1, le=100)
     feishu_outbox_claim_seconds: int = Field(default=300, ge=10, le=86400)
-    web_origin: str = 'http://127.0.0.1:5173'
-    monitor_default_interval_seconds: int = Field(default=30, ge=10)
-    metric_retention_days: int = Field(default=30, ge=1)
+    web_origin: str = "http://127.0.0.1:5173"
     knowledge_max_upload_mb: int = Field(default=50, ge=1, le=500)
-    incident_stale_reinvestigate_seconds: int = Field(default=3600, ge=300)
-    # Newly firing rules for the same project are folded into the active
-    # incident during this window.  Rules remain independent detector inputs;
-    # this setting only controls the user-facing incident/notification fanout.
-    incident_correlation_window_seconds: int = Field(default=120, ge=0, le=3600)
     notification_cooldown_seconds: int = Field(default=1800, ge=0)
     job_lease_seconds: int = 120
     job_poll_seconds: float = 1.0
     # Alert delivery runs in its own worker. Keep this short so a fresh alert lands
     # within a second or two of being queued, independent of Agent activity.
     notification_poll_seconds: float = 1.0
+    prometheus_url: str = "http://127.0.0.1:9090"
+    prometheus_reload_url: str = ""
+    prometheus_scrape_base_url: str = "http://127.0.0.1:9900"
+    prometheus_scrape_token: str = ""
+    prometheus_proxy_application_scrapes: bool = True
+    alertmanager_webhook_token: str = ""
     langgraph_strict_msgpack: bool = True
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def validate_production_safety(self):
-        if self.env.lower()=='production':
+        if self.env.lower() == "production":
             if not self.secret_master_key:
-                raise ValueError('ONCALL_SECRET_MASTER_KEY is required in production')
-            if self.model_provider!='mock' and not self.model_api_key:
-                raise ValueError('real model provider requires ONCALL_MODEL_API_KEY')
+                raise ValueError("ONCALL_SECRET_MASTER_KEY is required in production")
+            if self.model_provider != "mock" and not self.model_api_key:
+                raise ValueError("real model provider requires ONCALL_MODEL_API_KEY")
             if self.feishu_enabled and not (self.feishu_app_id and self.feishu_app_secret):
-                raise ValueError('Feishu is enabled but app credentials are incomplete')
+                raise ValueError("Feishu is enabled but app credentials are incomplete")
         return self
 
     @property
     def knowledge_dir(self) -> Path:
-        return self.data_dir / 'knowledge'
+        return self.data_dir / "knowledge"
 
     @property
     def upload_dir(self) -> Path:
-        return self.data_dir / 'uploads'
+        return self.data_dir / "uploads"
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -90,18 +89,18 @@ class Settings(BaseSettings):
 
 def update_env_values(values: dict[str, str]) -> None:
     """Update selected ONCALL_* values without exposing secrets to the API response."""
-    env_path = Path('.env')
-    content = env_path.read_text(encoding='utf-8') if env_path.exists() else ''
+    env_path = Path(".env")
+    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     for key, value in values.items():
-        pattern = rf'(?m)^\s*#?\s*{re.escape(key)}\s*=.*$'
-        replacement = f'{key}={value}'
+        pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
+        replacement = f"{key}={value}"
         if re.search(pattern, content):
             content = re.sub(pattern, replacement, content)
         else:
-            if content and not content.endswith('\n'):
-                content += '\n'
-            content += replacement + '\n'
-    env_path.write_text(content, encoding='utf-8', newline='\n')
+            if content and not content.endswith("\n"):
+                content += "\n"
+            content += replacement + "\n"
+    env_path.write_text(content, encoding="utf-8", newline="\n")
 
 
 @lru_cache(maxsize=1)

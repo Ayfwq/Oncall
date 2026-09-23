@@ -77,7 +77,7 @@ RECREATE=()
 if [ "$NEED_BACKEND_BUILD" = 1 ] || [ "$NEED_BACKEND_RESTART" = 1 ]; then
   # Recreate every backend process, including notifications. Recreate the
   # frontend proxy too so nginx resolves the API container's new address.
-  RECREATE+=(api monitor-worker notification-worker agent-worker rag-worker frontend)
+  RECREATE+=(api notification-worker agent-worker rag-worker frontend prometheus alertmanager)
 elif [ "$NEED_FRONTEND_BUILD" = 1 ]; then
   RECREATE+=(frontend)
 fi

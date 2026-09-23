@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -18,17 +17,14 @@ from oncall.application.project_service import ProjectService
 from oncall.domain.schemas import ToolResult
 from oncall.infrastructure.db.models import (
     AgentRun,
+    AlertmanagerAlert,
     Incident,
     IncidentEvidence,
-    IncidentSignal,
-    MetricSample,
-    MonitoringRule,
-    MonitoringRun,
     RetrievalTrace,
     ToolRun,
 )
 from oncall.integrations.observability import RemoteObservabilityIntegration
-from oncall.integrations.service import ServiceIntegration
+from oncall.integrations.prometheus_api import PrometheusClient, project_metric_promql
 from oncall.monitoring.signals import SUPPORTED_SIGNALS
 from oncall.rag.retrieval import KnowledgeRetriever
 from oncall.security.redact import redact_text
@@ -154,34 +150,22 @@ class ToolRegistry:
             return ToolResult(
                 ok=False, summary="告警事件不存在或不属于当前项目", error_code="INCIDENT_NOT_FOUND"
             )
-        signals = list(
-            (
-                await self.session.scalars(
-                    select(IncidentSignal)
-                    .where(IncidentSignal.incident_id == incident.id)
-                    .order_by(IncidentSignal.first_seen.asc())
-                )
-            ).all()
-        )
-        rule_ids = {x.rule_id for x in signals}
-        rules = (
-            {
-                x.id: x
-                for x in (
-                    await self.session.scalars(
-                        select(MonitoringRule).where(MonitoringRule.id.in_(rule_ids))
-                    )
-                ).all()
-            }
-            if rule_ids
-            else {}
-        )
         evidence = list(
             (
                 await self.session.scalars(
                     select(IncidentEvidence)
                     .where(IncidentEvidence.incident_id == incident.id)
                     .order_by(IncidentEvidence.observed_at.desc())
+                    .limit(20)
+                )
+            ).all()
+        )
+        alerts = list(
+            (
+                await self.session.scalars(
+                    select(AlertmanagerAlert)
+                    .where(AlertmanagerAlert.project_id == incident.project_id)
+                    .order_by(AlertmanagerAlert.received_at.desc())
                     .limit(20)
                 )
             ).all()
@@ -197,30 +181,17 @@ class ToolRegistry:
                 "first_seen": incident.first_seen.isoformat(),
                 "last_seen": incident.last_seen.isoformat(),
             },
-            "signals": [
+            "alerts": [
                 {
-                    "metric": item.anomaly_type,
-                    "resource_key": item.resource_key,
-                    "state": item.state,
-                    "severity": item.severity,
-                    "last_value": item.last_value,
-                    "first_seen": item.first_seen.isoformat(),
-                    "last_seen": item.last_seen.isoformat(),
-                    "rule": (
-                        {
-                            "operator": rules[item.rule_id].operator,
-                            "trigger_threshold": rules[item.rule_id].trigger_threshold,
-                            "trigger_for": rules[item.rule_id].trigger_for,
-                            "recovery_threshold": rules[item.rule_id].recovery_threshold,
-                            "recovery_for": rules[item.rule_id].recovery_for,
-                            "detection_mode": rules[item.rule_id].detection_mode,
-                            "conditions": rules[item.rule_id].conditions,
-                        }
-                        if item.rule_id in rules
-                        else None
-                    ),
+                    "fingerprint": x.fingerprint,
+                    "status": x.status,
+                    "alertname": x.alertname,
+                    "severity": x.severity,
+                    "labels": x.labels,
+                    "annotations": x.annotations,
+                    "value": x.value,
                 }
-                for item in signals
+                for x in alerts
             ],
             "evidence": [
                 {
@@ -234,7 +205,7 @@ class ToolRegistry:
         }
         return ToolResult(
             ok=True,
-            summary=f"事件包含 {len(signals)} 个触发信号和 {len(evidence)} 条已有证据",
+            summary=f"事件包含 Prometheus 告警和 {len(evidence)} 条已有证据",
             data=data,
         )
 
@@ -245,7 +216,6 @@ class ToolRegistry:
         if "gpu" in groups and metric.startswith("host.gpu."):
             return True
         prefixes = {
-            "service": "service.",
             "application": "app.",
             "process": "process.",
             "logs": "log.",
@@ -258,61 +228,30 @@ class ToolRegistry:
         )
 
     async def _current_metrics(self, args: dict, ctx: ToolExecutionContext) -> ToolResult:
-        requested = set(args.get("metrics") or [])
-        invalid = sorted(requested - SUPPORTED_SIGNALS)
+        requested = list(args.get("metrics") or sorted(SUPPORTED_SIGNALS))
+        invalid = sorted(set(requested) - SUPPORTED_SIGNALS)
         if invalid:
             return ToolResult(
                 ok=False, summary=f"未知指标: {', '.join(invalid)}", error_code="INVALID_METRIC"
             )
-        snapshot = None
-        snapshot_source = "fresh_collection"
-        snapshot_age_seconds = 0.0
-        if not args.get("fresh", False):
-            run = await self.session.scalar(
-                select(MonitoringRun)
-                .where(
-                    MonitoringRun.project_id == ctx.project_id, MonitoringRun.status == "completed"
-                )
-                .order_by(MonitoringRun.finished_at.desc())
-                .limit(1)
-            )
-            snapshot = dict(run.snapshot or {}) if run else None
-            if snapshot is not None:
-                snapshot_source = "latest_completed_run"
-                if run.finished_at:
-                    snapshot_age_seconds = max(
-                        0.0, (datetime.now().astimezone() - run.finished_at).total_seconds()
-                    )
-        if snapshot is None:
-            from oncall.monitoring.engine import MonitoringEngine
-
-            snapshot = (
-                await MonitoringEngine(self.session).collect(ctx.project_id, persist_state=False)
-            ).model_dump(mode="json")
         groups = set(args.get("groups") or [])
-
-        def wanted(key: str) -> bool:
-            return (not requested or key in requested) and self._metric_matches_groups(key, groups)
-
-        snapshot["signals"] = {
-            key: value for key, value in (snapshot.get("signals") or {}).items() if wanted(key)
-        }
-        snapshot["resource_signals"] = {
-            resource: {key: value for key, value in values.items() if wanted(key)}
-            for resource, values in (snapshot.get("resource_signals") or {}).items()
-        }
-        snapshot["resource_signals"] = {
-            key: value for key, value in snapshot["resource_signals"].items() if value
-        }
-        snapshot.pop(
-            "resources", None
-        )  # detailed logs/runtime/database data belongs to specialized tools
-        snapshot["snapshot_source"] = snapshot_source
-        snapshot["snapshot_age_seconds"] = round(snapshot_age_seconds, 3)
+        client = PrometheusClient()
+        values: dict[str, list[dict]] = {}
+        unsupported: list[str] = []
+        for metric in requested:
+            if self._metric_matches_groups(metric, groups):
+                expression = project_metric_promql(metric, ctx.project_id)
+                if expression is None:
+                    unsupported.append(metric)
+                    continue
+                try:
+                    values[metric] = await client.query(expression)
+                except Exception as exc:
+                    values[metric] = [{"error": str(exc)}]
         return ToolResult(
             ok=True,
-            summary=f"返回 {len(snapshot['signals'])} 个项目指标和 {sum(len(x) for x in snapshot['resource_signals'].values())} 个资源指标",
-            data=snapshot,
+            summary=f"Prometheus 返回 {len(values)} 个指标查询结果",
+            data={"source": "prometheus", "metrics": values, "diagnostic_only": unsupported},
         )
 
     async def _metric_history(self, args: dict, ctx: ToolExecutionContext) -> ToolResult:
@@ -323,55 +262,25 @@ class ToolRegistry:
                 ok=False, summary=f"未知指标: {', '.join(invalid)}", error_code="INVALID_METRIC"
             )
         minutes = int(args.get("minutes", 30))
-        since = datetime.now().astimezone() - timedelta(minutes=minutes)
-        stmt = select(MetricSample).where(
-            MetricSample.project_id == ctx.project_id,
-            MetricSample.metric_key.in_(metrics),
-            MetricSample.ts >= since,
-        )
-        if args.get("resource_key"):
-            stmt = stmt.where(MetricSample.resource_key == str(args["resource_key"]))
-        rows = list(
-            (await self.session.scalars(stmt.order_by(MetricSample.ts.asc()).limit(5001))).all()
-        )
-        truncated = len(rows) > 5000
-        rows = rows[:5000]
-        grouped: dict[tuple[str, str], list[MetricSample]] = defaultdict(list)
-        for row in rows:
-            grouped[(row.metric_key, row.resource_key)].append(row)
+        end = datetime.now().astimezone()
+        start = end - timedelta(minutes=minutes)
+        client = PrometheusClient()
         series = []
-        include_samples = bool(args.get("include_samples", False))
-        for (metric, resource), items in grouped.items():
-            values = [float(x.value) for x in items]
-            delta = values[-1] - values[0]
-            tolerance = max(abs(values[0]) * 0.02, 1e-9)
-            entry = {
-                "metric": metric,
-                "resource_key": resource,
-                "count": len(values),
-                "current": values[-1],
-                "min": min(values),
-                "max": max(values),
-                "avg": sum(values) / len(values),
-                "delta": delta,
-                "trend": "up"
-                if delta > tolerance
-                else ("down" if delta < -tolerance else "stable"),
-                "first_ts": items[0].ts.isoformat(),
-                "last_ts": items[-1].ts.isoformat(),
-            }
-            if include_samples:
-                entry["samples"] = [
-                    {"ts": x.ts.isoformat(), "value": x.value} for x in items[-500:]
-                ]
-                if len(items) > 500:
-                    truncated = True
-            series.append(entry)
+        unsupported: list[str] = []
+        for metric in metrics:
+            expression = project_metric_promql(metric, ctx.project_id)
+            if expression is None:
+                unsupported.append(metric)
+                continue
+            try:
+                result = await client.query_range(expression, start.isoformat(), end.isoformat())
+                series.append({"metric": metric, "result": result})
+            except Exception as exc:
+                series.append({"metric": metric, "error": str(exc)})
         return ToolResult(
             ok=True,
-            summary=f"过去 {minutes} 分钟返回 {len(series)} 条指标序列、{len(rows)} 个采样",
-            data=series,
-            truncated=truncated,
+            summary=f"Prometheus 返回过去 {minutes} 分钟的 {len(series)} 条序列",
+            data={"series": series, "diagnostic_only": unsupported},
         )
 
     async def _dispatch(self, name: str, args: dict, ctx: ToolExecutionContext) -> ToolResult:
@@ -379,7 +288,7 @@ class ToolRegistry:
             if self._retriever is None:
                 self._retriever = KnowledgeRetriever()
             return await self._retriever.search(
-                str(args.get("query", "")), ctx.project_id, top_k=int(args.get("top_k", 5))
+                str(args.get("query", "")), top_k=int(args.get("top_k", 5))
             )
         if name == "query_incident_context":
             return await self._incident_context(ctx)
@@ -388,10 +297,6 @@ class ToolRegistry:
         if name == "query_metric_history":
             return await self._metric_history(args, ctx)
         cfg = await ProjectService(self.session).runtime_config(ctx.project_id)
-        if name == "query_service_health":
-            return await ServiceIntegration(cfg.service_endpoints).query(
-                args.get("endpoint"), bool(args.get("include_body", False))
-            )
         observability = RemoteObservabilityIntegration(
             cfg.server, cfg.log_sources, cfg.database_profiles
         )

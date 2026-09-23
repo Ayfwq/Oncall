@@ -1,0 +1,34 @@
+name: oncall-local-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "19090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./data/prometheus:/prometheus-data
+      - oncall_local_prometheus_data:/prometheus
+    depends_on:
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "19093:9093"
+    volumes:
+      - ./deploy/alertmanager/alertmanager.local.yml:/etc/alertmanager/alertmanager.yml:ro
+      - oncall_local_alertmanager_data:/alertmanager
+
+volumes:
+  oncall_local_prometheus_data:
+  oncall_local_alertmanager_data:

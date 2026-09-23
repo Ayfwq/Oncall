@@ -6,14 +6,15 @@ PulseOps（巡脉）是一个本地优先的智能运维平台。当前实现包
 
 ## 架构基线
 
-详细文档入口：[`docs/README.md`](docs/README.md)；按当前代码重绘的架构图：[`docs/pulseops-architecture-v2.svg`](docs/pulseops-architecture-v2.svg)；Agent 详解：[`docs/PULSEOPS_AGENT_GUIDE.md`](docs/PULSEOPS_AGENT_GUIDE.md)。
+详细文档入口：[`docs/README.md`](docs/README.md)；系统架构：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)；Agent 详解：[`docs/PULSEOPS_AGENT_GUIDE.md`](docs/PULSEOPS_AGENT_GUIDE.md)。
 
 监控指标分层、Python 快速接入和告警规则设计见 [`docs/MONITORING_DESIGN.md`](docs/MONITORING_DESIGN.md)；Agent 工具和诊断编排见 [`docs/AGENT_TOOL_FLOW.md`](docs/AGENT_TOOL_FLOW.md)。
 
-- **模块化单体 + 多运行进程**：`api` / `monitor-worker` / `agent-worker` / `rag-worker`。
-- **统一 OncallAgent**：LangGraph StateGraph；`CHAT / INVESTIGATE / FOLLOW_UP / DEEP` 共用同一套 RAG、Tools、Memory 和模型网关。
-- **远程 Python Monitoring Engine**：41 个基础 signal + 可选 6 个 NVIDIA GPU signal；覆盖服务器、健康检查、应用、Python 进程、Docker 日志和 PostgreSQL。规则命中先作为 Detector 信号，同项目 120 秒内的可操作信号合并为一个 Incident；CPU、内存等共享资源压力仅作为诊断证据。
-- **8 个只读 Agent Tool**：事故上下文 / 当前指标 / 指标历史 / 服务健康 / 日志搜索 / 数据库诊断 / 容器运行资源 / 知识库。Agent 按异常类型选择必要工具，不会把 47 个指标拆成 47 个工具，也不会每次机械调用全部工具。
+- **Prometheus 告警主链**：Prometheus 采集并判断数字指标，Alertmanager 聚合、去重和控制重复通知；应用内不再运行本地规则 worker。
+- **统一 OncallAgent**：LangGraph StateGraph；`CHAT / INVESTIGATE / FOLLOW_UP` 共用同一套 RAG、Tools、Memory 和模型网关。
+- **采集分层**：Node Exporter、cAdvisor、应用 `/metrics` 和 Collector 转换出的 PostgreSQL 数字指标进入 Prometheus；Docker 文本日志和数据库明细只在诊断阶段读取。
+- **7 个只读 Agent Tool**：事故上下文 / 当前指标 / 指标历史 / 日志搜索 / 数据库诊断 / 容器运行资源 / 知识库。Agent 读取 Prometheus 告警后按需调用，不参与首条告警判断。
+- **知识库范围**：知识库属于当前工作区，所有项目共享；它只提供 SOP 和处置依据，不参与 Prometheus 的首条告警判断。
 - **完整 RAG 主链**：Docling → Canonical JSON/Markdown → HybridChunker → Dense + Milvus BM25 → RRF → Rerank → Citation；Milvus 只是可重建索引。
 - **持久化**：PostgreSQL 保存业务事实、会话、消息、Incident、Evidence、Diagnosis、Tool/RAG Trace、durable jobs/outbox；LangGraph 使用 PostgreSQL checkpointer。
 - **飞书**：自建应用机器人 + WebSocket 入站 + PostgreSQL Outbox 出站；主动 Incident 报告可绑定 Incident Conversation，用户回复后进入 `FOLLOW_UP`。
@@ -31,13 +32,16 @@ FastAPI Gateway ───── Conversation / Incident / Knowledge API
       │
       ├──────────────► OncallAgent (LangGraph)
       │                    │
-      │                    ├── 4 Read-only Tools
+      │                    ├── 7 Read-only Tools
       │                    ├── RAG
       │                    └── PostgreSQL Checkpoint
       │
-Monitoring Worker ─► Snapshot ─► Detector ─► Incident ─► Durable Job
-                                                   │
-Agent Worker ◄─────────────────────────────────────┘
+Exporters / App / DB metrics ─► Prometheus ─► Alertmanager
+                                                    │ Webhook
+                                                    ▼
+                                      Incident ─► Durable Job
+                                                    │
+Agent Worker ◄──────────────────────────────────────┘
       │
       └── Evidence / Diagnosis ─► PostgreSQL Outbox ─► Feishu
 
@@ -64,9 +68,10 @@ ONCALL_SECRET_MASTER_KEY=<随机长密钥>
 
 ```powershell
 docker compose up -d
+docker compose -f compose.local.monitoring.yaml up -d
 ```
 
-Compose 只运行 PostgreSQL/Milvus/etcd/MinIO；远程 Python 项目由目标服务器的 Node Exporter、可选 DCGM Exporter 和项目自身的 `/health`、`/metrics` 提供观测数据。
+基础 Compose 运行 PostgreSQL/Milvus/etcd/MinIO；本地监控 Compose 运行 Prometheus 与 Alertmanager。生产部署使用 `compose.server.yaml` 一次性包含全部依赖。
 
 目标服务器还需运行轻量 Collector，以只读方式发现 Docker stdout 日志并执行预定义 PostgreSQL 诊断。正式接入时，从“添加服务器”页面复制安装命令；目标服务器只需安装 Docker，不需要本仓库源码或 Compose。页面同时提供携带相同 Token 的验证命令。
 
@@ -109,7 +114,7 @@ Collector http://127.0.0.1:9910
 
 ### 6. Mock E2E
 
-服务和 3 个 worker 启动后：
+服务和 worker 启动后：
 
 ```powershell
 .\scripts\e2e-local.ps1
@@ -163,13 +168,13 @@ ONCALL_FEISHU_DEFAULT_RECEIVE_ID=<chat-or-open-id>
 
 ## 不可违反的运行规则
 
-1. Monitoring 基础检测必须确定性执行，不能让 LLM 每 5 分钟判断是否异常。
+1. Prometheus 必须确定性地完成指标异常判断；LLM 只在收到告警后诊断，不能承担周期性判警。
 2. PostgreSQL 是业务事实源；Milvus 是可重建 RAG 索引。
 3. Conversation 与 Incident Memory 必须独立持久化；LangGraph checkpoint 不是业务事实库。
 4. Agent 结论必须基于 Evidence；RAG 文档不是实时系统事实。
 5. 当前实现不允许 destructive tool；未来 Action Tool 必须分级并人工确认。
 6. Project scope 由 runtime 注入 Tool，不能让模型任意指定目标 Project。
-7. 真实 Release 必须通过 `docs/LOCAL_HANDOFF.md` 的目标机器验收门禁。
+7. 真实 Release 必须通过 `docs/RELEASE_VALIDATION.md` 记录的验收门禁。
 
 ## 分层验证
 

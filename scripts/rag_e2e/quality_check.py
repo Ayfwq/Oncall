@@ -1,4 +1,5 @@
 import asyncio
+
 from oncall.rag.retrieval import KnowledgeRetriever
 
 QUERIES = [
@@ -16,15 +17,17 @@ async def main():
     r = KnowledgeRetriever()
     for q in QUERIES:
         res = await r.search(q, project_id=None, top_k=5)
-        print('=' * 90)
-        print('Q:', q, '| ok:', res.ok, '| hits:', len(res.data) if res.data else 0)
+        print("=" * 90)
+        print("Q:", q, "| ok:", res.ok, "| hits:", len(res.data) if res.data else 0)
         if not res.ok:
-            print('  error:', res.error_code, res.data)
+            print("  error:", res.error_code, res.data)
             continue
         for i, item in enumerate(res.data[:3]):
-            snippet = item.get('content', '').replace('\n', ' ')[:120]
-            print(f'  #{i + 1} [{item.get("title")}] rrf={item.get("rrf_score"):.4f} rerank={item.get("rerank_score"):.3f}')
-            print(f'      {snippet}')
+            snippet = item.get("content", "").replace("\n", " ")[:120]
+            print(
+                f"  #{i + 1} [{item.get('title')}] rrf={item.get('rrf_score'):.4f} rerank={item.get('rerank_score'):.3f}"
+            )
+            print(f"      {snippet}")
 
 
 asyncio.run(main())

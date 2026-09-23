@@ -16,10 +16,6 @@ export const metricLabels: Record<string, string> = {
   'host.gpu.memory_percent': 'GPU 显存使用率',
   'host.gpu.temperature_celsius': 'GPU 温度',
   'host.gpu.power_watts': 'GPU 功耗',
-  'service.reachable': '服务健康检查',
-  'service.status_code': '服务状态码',
-  'service.latency_ms': '服务响应延迟',
-  'service.consecutive_failures': '服务连续失败次数',
   'app.up': '应用指标接口',
   'app.http.rps': '接口请求速率',
   'app.http.error_rate': '接口错误率',
@@ -54,7 +50,6 @@ export function metricLabel(key: string) {
 
 const collectorLabels: Record<string, string> = {
   server: '服务器采集器',
-  service: '健康检查',
   prometheus: '应用指标',
   observability: '日志与数据库',
 }

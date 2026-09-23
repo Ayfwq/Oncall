@@ -1,7 +1,8 @@
 """RAG end-to-end validation: upload SOP docs via API -> poll jobs -> search -> citation check.
 
-Run with:  uv run python scripts/rag_e2e/run_e2e.py
+Run with:  uv run --no-sync python scripts/rag_e2e/run_e2e.py
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,13 +23,43 @@ DOCS = [
 ]
 
 SEARCH_QUERIES = [
-    ("CPU 负载很高怎么排查", "cpu-high-load"),
-    ("load average 超过核数 4 倍 怎么办", "cpu-high-load"),
-    ("PostgreSQL 连接被拒绝 connection refused 怎么处理", "postgresql"),
-    ("SQLSTATE 28000 认证失败 密码错误", "postgresql"),
-    ("playwright 报 Executable doesn't exist 浏览器缺失", "playwright"),
-    ("libnss3 缺失 无法启动 chromium 沙箱", "playwright"),
-    ("pg_isready 端口 5432 没监听 listen_addresses", "postgresql"),
+    ("CPU 负载很高怎么排查", "cpu-high-load-steps", "cpu-high-load-sop.md", "CPU 高负载"),
+    (
+        "load average 超过核数 4 倍 怎么办",
+        "cpu-high-load-alert",
+        "cpu-high-load-sop.md",
+        "告警触发条件",
+    ),
+    (
+        "PostgreSQL 连接被拒绝 connection refused 怎么处理",
+        "postgresql-connection",
+        "postgresql-connection-refused-sop.md",
+        "connection refused",
+    ),
+    (
+        "SQLSTATE 28000 认证失败 密码错误",
+        "postgresql-auth",
+        "postgresql-connection-refused-sop.md",
+        "pg_hba",
+    ),
+    (
+        "playwright 报 Executable doesn't exist 浏览器缺失",
+        "playwright-executable",
+        "playwright-chromium-sop.md",
+        "Executable",
+    ),
+    (
+        "libnss3 缺失 无法启动 chromium 沙箱",
+        "playwright-dependency",
+        "playwright-chromium-sop.md",
+        "libnss3",
+    ),
+    (
+        "pg_isready 端口 5432 没监听 listen_addresses",
+        "postgresql-listen",
+        "postgresql-connection-refused-sop.md",
+        "listen_addresses",
+    ),
 ]
 
 
@@ -87,24 +118,32 @@ async def main() -> None:
 
     log("running KnowledgeRetriever.search ...")
     retriever = KnowledgeRetriever()
-    results = {}
-    for query, tag in SEARCH_QUERIES:
-        res = await retriever.search(query, project_id=None, top_k=5)
-        results[tag] = res
+    results = []
+    retrieval_ok = True
+    for query, tag, expected_title, marker in SEARCH_QUERIES:
+        res = await retriever.search(query, top_k=5)
+        results.append((query, tag, res))
         if not res.ok:
             log("  SEARCH FAILED:", query, "->", res.error_code, res.data)
+            retrieval_ok = False
             continue
         top = res.data[0] if res.data else None
         log(
             f"  [{tag}] hits={len(res.data)} top_title={top.get('title') if top else None} "
             f"rrf={top.get('rrf_score') if top else None} rerank={top.get('rerank_score') if top else None}"
         )
+        if not res.data or expected_title not in [x.get("title") for x in res.data]:
+            retrieval_ok = False
+            log(f"  [{tag}] WRONG DOCUMENT: expected {expected_title!r}")
+        if not any(marker in x.get("content", "") for x in res.data[:3]):
+            retrieval_ok = False
+            log(f"  [{tag}] MISSING MARKER IN TOP-3: {marker!r}")
 
     # citation structure validation
     log("validating citation structure ...")
     required = {"document_id", "version_id", "id", "title", "page_range", "content"}
     ok_all = True
-    for tag, res in results.items():
+    for _query, tag, res in results:
         if not res.ok or not res.data:
             ok_all = False
             log(f"  [{tag}] NO DATA")
@@ -120,12 +159,12 @@ async def main() -> None:
                 f"ver={item['version_id'][:8]} chunk={item['id'][:8]} "
                 f"title={item['title']!r} page_range={item['page_range']!r} content_len={len(item['content'])}"
             )
-    if not ok_all:
+    if not retrieval_ok or not ok_all:
         sys.exit(3)
 
     # ---- Milvus collection state ----
-    from pymilvus import MilvusClient
     from oncall.rag.milvus_store import MilvusKnowledgeIndex
+    from pymilvus import MilvusClient
 
     idx = MilvusKnowledgeIndex()
     c = MilvusClient(uri=idx.settings.milvus_uri, token=idx.settings.milvus_token)
@@ -134,10 +173,23 @@ async def main() -> None:
     log(f"collection {idx.collection}: {stats}")
 
     out = {
-        "queries": [{"query": q, "tag": t, "hit_count": len(r.data) if r.ok and r.data else 0} for (q, t), r in zip(SEARCH_QUERIES, results.values())],
+        "queries": [
+            {
+                "query": query,
+                "tag": tag,
+                "expected_title": expected_title,
+                "expected_marker": marker,
+                "hit_count": len(res.data) if res.ok and res.data else 0,
+            }
+            for (query, tag, expected_title, marker), (_, _, res) in zip(
+                SEARCH_QUERIES, results, strict=True
+            )
+        ],
         "collection": {"name": idx.collection, "stats": stats},
     }
-    Path("scripts/rag_e2e/results.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    Path("scripts/rag_e2e/results.json").write_text(
+        json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     log("results written to scripts/rag_e2e/results.json")
     log("E2E PASS")
 

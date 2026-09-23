@@ -23,8 +23,8 @@ if ($Layer -in @("integration", "rag", "all")) {
 
 if ($marker) {
   Write-Host "== pytest layer: $Layer =="
-  uv run pytest -m $marker -q --durations=10 @requireServices
+  uv run --no-sync pytest -m $marker -q --durations=10 @requireServices
 } else {
   Write-Host "== pytest layer: all =="
-  uv run pytest -q --durations=10 @requireServices
+  uv run --no-sync pytest -q --durations=10 @requireServices
 }

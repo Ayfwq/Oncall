@@ -10,6 +10,7 @@ machine.  Pass ``--require-services`` (scripts/test.ps1 does automatically for
 the integration/rag/all layers) to turn those skips into hard failures — a
 green gate must never be produced by tests that silently did nothing.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -41,10 +42,12 @@ def require_services(pytestconfig: pytest.Config) -> bool:
 @pytest.fixture(scope="session")
 def service_gate(require_services: bool):
     """Skip when a required service is unavailable; fail under --require-services."""
+
     def gate(available: bool, reason: str) -> None:
         if available:
             return
         if require_services:
             pytest.fail(f"required service unavailable: {reason}")
         pytest.skip(reason)
+
     return gate

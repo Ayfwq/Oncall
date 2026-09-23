@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  CADVISOR_IMAGE,
   COLLECTOR_IMAGE,
   DCGM_EXPORTER_IMAGE,
+  cadvisorInstallCommand,
+  cadvisorVerifyCommand,
   NODE_EXPORTER_IMAGE,
   collectorInstallCommand,
   collectorRemoveCommand,
@@ -60,6 +63,16 @@ describe('collector commands', () => {
     const removeCommand = nodeExporterRemoveCommand()
     expect(removeCommand).toContain('docker rm -f oncall-node-exporter')
     expect(removeCommand).toContain("echo '系统指标采集器删除成功'")
+  })
+
+  it('installs cAdvisor from the official GHCR image and waits for metrics', () => {
+    const installCommand = cadvisorInstallCommand()
+    const verifyCommand = cadvisorVerifyCommand()
+
+    expect(installCommand).toContain(`docker pull ${CADVISOR_IMAGE}`)
+    expect(installCommand).toContain("curl --fail --silent --show-error --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/metrics")
+    expect(installCommand).toContain('docker logs --tail=80 oncall-cadvisor')
+    expect(verifyCommand).toContain("grep -q '^container_'")
   })
 
   it('installs and verifies DCGM Exporter with real GPU metrics', () => {

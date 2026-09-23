@@ -9,10 +9,10 @@ from pathlib import Path
 
 import structlog
 
-_FORMAT = '%(asctime)s | %(levelname)-8s | %(name)s | request=%(request_id)s | %(message)s'
-_LOGFILE_NAME = 'oncall.log'
+_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | request=%(request_id)s | %(message)s"
+_LOGFILE_NAME = "oncall.log"
 
-_request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='-')
+_request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 
 def set_request_id(request_id: str) -> None:
@@ -31,7 +31,7 @@ class _RequestIdFilter(logging.Filter):
 
 def cleanup_old_logs(log_dir: Path, keep_days: int, logfile_name: str = _LOGFILE_NAME) -> None:
     cutoff = (datetime.now() - timedelta(days=keep_days)).date()
-    rotated_re = re.compile(rf'^{re.escape(logfile_name)}\.(\d{{4}}-\d{{2}}-\d{{2}})$')
+    rotated_re = re.compile(rf"^{re.escape(logfile_name)}\.(\d{{4}}-\d{{2}}-\d{{2}})$")
     if not log_dir.is_dir():
         return
     for path in log_dir.iterdir():
@@ -39,14 +39,19 @@ def cleanup_old_logs(log_dir: Path, keep_days: int, logfile_name: str = _LOGFILE
         if not match:
             continue
         try:
-            file_date = datetime.strptime(match.group(1), '%Y-%m-%d').date()
+            file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
         except ValueError:
             continue
         if file_date < cutoff:
             path.unlink(missing_ok=True)
 
 
-def configure_logging(level: str = 'INFO', log_dir: Path | None = None, retention_days: int = 2, component: str = 'oncall') -> None:
+def configure_logging(
+    level: str = "INFO",
+    log_dir: Path | None = None,
+    retention_days: int = 2,
+    component: str = "oncall",
+) -> None:
     level_num = getattr(logging, level.upper(), logging.INFO)
     formatter = logging.Formatter(_FORMAT)
     root = logging.getLogger()
@@ -63,13 +68,13 @@ def configure_logging(level: str = 'INFO', log_dir: Path | None = None, retentio
 
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        safe_component = re.sub(r'[^a-zA-Z0-9_-]+', '-', component).strip('-') or 'oncall'
-        logfile_name = f'{safe_component}.log'
+        safe_component = re.sub(r"[^a-zA-Z0-9_-]+", "-", component).strip("-") or "oncall"
+        logfile_name = f"{safe_component}.log"
         file_handler = TimedRotatingFileHandler(
             log_dir / logfile_name,
-            when='midnight',
+            when="midnight",
             backupCount=max(1, retention_days - 1),
-            encoding='utf-8',
+            encoding="utf-8",
         )
         file_handler.setLevel(level_num)
         file_handler.setFormatter(formatter)
@@ -81,7 +86,7 @@ def configure_logging(level: str = 'INFO', log_dir: Path | None = None, retentio
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt='iso'),
+            structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.JSONRenderer(),
         ]
     )

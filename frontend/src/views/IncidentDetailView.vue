@@ -14,7 +14,7 @@ onMounted(load)
 const sev = (s: string) => s === 'critical' ? 'err' : 'warn'
 const toolLabels: Record<string, string> = {
   query_incident_context: '确认告警背景', query_database_health: '检查数据库', query_metric_history: '查看指标趋势',
-  search_logs: '检查容器日志', query_service_health: '检查服务健康', query_current_metrics: '查看当前指标',
+  search_logs: '检查容器日志', query_current_metrics: '查看当前指标',
   query_runtime_resources: '检查容器和进程', search_knowledge: '查找处理建议',
 }
 function severityLabel(value: string) { return ({ critical: '严重', warning: '警告', info: '提示' } as Record<string, string>)[value] || value }
@@ -40,13 +40,17 @@ function metricValueText(key: string, value: unknown) {
   if (key === 'db.replication_lag_seconds') return `${numberText(n)} 秒`
   return numberText(n)
 }
-function evidenceTitle(e: IncidentDetail['evidence'][number]) { return e.type === 'monitoring_signal' ? '触发原因' : toolLabel(e.source) }
+function evidenceTitle(e: IncidentDetail['evidence'][number]) { return e.type === 'alertmanager' ? 'Prometheus 触发告警' : toolLabel(e.source) }
 function evidenceText(e: IncidentDetail['evidence'][number]) {
   const data = recordData(e)
   const result = resultData(e)
-  if (e.type === 'monitoring_signal') {
-    const key = String(data.metric_key || item.value?.anomaly_type || '')
-    return `${metricLabel(key)}为 ${metricValueText(key, data.value)}，达到当前告警条件。`
+  if (e.type === 'alertmanager') {
+    const alerts = Array.isArray(data.alerts) ? data.alerts as Record<string, any>[] : []
+    const first = alerts[0] || {}
+    const labels = first.labels && typeof first.labels === 'object' ? first.labels as Record<string, any> : {}
+    const annotations = first.annotations && typeof first.annotations === 'object' ? first.annotations as Record<string, any> : {}
+    const description = String(annotations.description || annotations.summary || e.summary)
+    return `${description}${alerts.length > 1 ? ` Alertmanager 已合并 ${alerts.length} 个异常实例。` : ''}`
   }
   if (e.source === 'query_incident_context') return '已确认本次告警的触发指标和当前处理状态。'
   if (e.source === 'query_database_health') {
@@ -71,31 +75,23 @@ function evidenceText(e: IncidentDetail['evidence'][number]) {
     const containers = Array.isArray(result.containers) ? result.containers.length : 0
     return `已检查 ${containers} 个容器日志，${lines ? `发现 ${lines} 条相关日志` : '没有发现相关错误日志'}。`
   }
-  if (e.source === 'query_service_health') {
-    const endpoint = Array.isArray(data.result) ? data.result[0] as Record<string, any> : null
-    if (endpoint) return `健康检查${endpoint.ok ? '正常' : '失败'}，返回 ${endpoint.status_code || '未知'}，响应约 ${Math.round(Number(endpoint.latency_ms) || 0)} ms。`
-  }
   return e.summary
 }
-const triggerEvidence = computed(() => item.value?.evidence.find(e => e.type === 'monitoring_signal'))
-const triggerValue = computed(() => recordData(triggerEvidence.value).value)
+const triggerEvidence = computed(() => item.value?.evidence.find(e => e.type === 'alertmanager'))
+const triggerAlerts = computed(() => {
+  const alerts = recordData(triggerEvidence.value).alerts
+  return Array.isArray(alerts) ? alerts as Record<string, any>[] : []
+})
+const triggerValue = computed(() => triggerAlerts.value[0]?.value)
 const readableSummary = computed(() => {
   if (!item.value) return ''
-  const key = item.value.anomaly_type
-  if (key === 'db.long_transactions') return `数据库发现 ${metricValueText(key, triggerValue.value)}持续超过 5 分钟的事务。`
-  return `${metricLabel(key)}出现异常，当前检测值为 ${metricValueText(key, triggerValue.value)}。`
+  return item.value.summary || `${item.value.anomaly_type} 出现异常。`
 })
 const alertExplanation = computed(() => {
-  if (!item.value || item.value.anomaly_type !== 'db.long_transactions') return ''
-  const context = item.value.evidence.find(e => e.source === 'query_incident_context')
-  const signals = context ? resultData(context).signals as Record<string, any>[] | undefined : undefined
-  const rule = signals?.[0]?.rule
-  const threshold = rule?.trigger_threshold ?? 3
-  const triggerFor = rule?.trigger_for ?? 3
-  const oldRule = Number(threshold) <= 1
-  return oldRule
-    ? `本次告警使用的是旧规则：连续 ${triggerFor} 次发现至少 ${threshold} 个超过 5 分钟的事务就告警。当前确实检测到 ${metricValueText(item.value.anomaly_type, triggerValue.value)}，所以被触发；但单个长事务也可能是正常后台任务，这个规则偏敏感。新的默认规则已调整为至少 3 个，并连续 3 次出现才告警。`
-    : `系统连续 ${triggerFor} 次发现至少 ${threshold} 个超过 5 分钟的事务，因此触发告警。单个后台任务不会触发这条默认规则。`
+  if (!item.value || !triggerEvidence.value) return ''
+  const count = triggerAlerts.value.length
+  const value = triggerValue.value
+  return `Prometheus 按预设阈值和持续时间确认异常后发送告警，Alertmanager 完成分组与去重${count > 1 ? `，本事件合并了 ${count} 个实例` : ''}${value !== undefined && value !== null ? `；首个实例值为 ${numberText(value)}` : ''}。LLM 不参与触发判断，只负责后续诊断。`
 })
 </script>
 

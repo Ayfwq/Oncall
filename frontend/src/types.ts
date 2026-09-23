@@ -36,6 +36,7 @@ export interface MonitoredServer {
   name: string
   node_metrics_url: string
   gpu_metrics_url: string | null
+  container_metrics_url: string
   collector_url: string | null
   collector_token?: string | null
   enabled: boolean
@@ -54,11 +55,10 @@ export interface ServerTestResult {
 
 export interface ProjectDraftTestResult {
   ok: boolean
-  checks: Array<{ key: 'server' | 'service' | 'prometheus' | 'logs' | 'database'; ok: boolean; error: string | null }>
+  checks: Array<{ key: 'server' | 'prometheus' | 'logs' | 'database'; ok: boolean; error: string | null }>
   capabilities: {
     host_metrics: boolean
     gpu_metrics: boolean
-    health_check: boolean
     http_metrics: boolean
     process_metrics: boolean
     docker_logs: boolean
@@ -68,17 +68,6 @@ export interface ProjectDraftTestResult {
   warnings: string[]
   signals: Record<string, number>
   collector_status: Record<string, { ok: boolean; error: string | null }>
-}
-
-export interface ServiceEndpoint {
-  id: string | null
-  name: string
-  url: string
-  method: string
-  expected_status: number
-  timeout_ms: number
-  service_id: string | null
-  enabled: boolean
 }
 
 export interface MetricsSource {
@@ -93,25 +82,6 @@ export interface MetricsSource {
   enabled: boolean
 }
 
-export interface MonitoringRule {
-  id: string | null
-  metric_key: string
-  resource_key: string
-  operator: string
-  trigger_threshold: number | null
-  trigger_for: number
-  recovery_threshold: number | null
-  recovery_for: number
-  severity: string
-  enabled: boolean
-  detection_mode: 'threshold' | 'baseline' | 'hybrid'
-  baseline_window: number
-  baseline_min_samples: number
-  baseline_z_score: number
-  baseline_recovery_z_score: number
-  conditions?: Record<string, unknown> | null
-}
-
 export interface ProjectConfig {
   id: string
   server_id: string | null
@@ -122,11 +92,9 @@ export interface ProjectConfig {
   enabled: boolean
   timezone: string
   poll_interval: number
-  service_endpoints: ServiceEndpoint[]
   metrics_sources: MetricsSource[]
   log_sources?: Array<{ id: string | null; path: string; encoding: string; parser_config: Record<string, unknown>; enabled: boolean }>
   database_profiles?: Array<{ id: string | null; type: 'postgresql'; host: string; port: number; database: string; username: string; password: string | null; sslmode: string; enabled: boolean }>
-  rules: MonitoringRule[]
 }
 
 export interface CollectorStatusEntry {
@@ -230,7 +198,6 @@ export interface KnowledgeDocument {
   id: string
   title: string
   status: string
-  project_scope: string | null
   updated_at: string
 }
 

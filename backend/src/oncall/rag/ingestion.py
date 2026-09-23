@@ -8,8 +8,8 @@ from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import delete, select, text, update
-from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from oncall.bootstrap.config import get_settings
 from oncall.infrastructure.db.models import (
@@ -20,80 +20,178 @@ from oncall.infrastructure.db.models import (
 from oncall.rag.embedding import get_embedding_provider
 from oncall.rag.milvus_store import MilvusKnowledgeIndex
 
-ALLOWED_SUFFIXES={'.pdf','.docx','.pptx','.html','.htm','.md','.txt','.xlsx'}
+ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".html", ".htm", ".md", ".txt", ".xlsx"}
 
 
-def checksum(path:Path)->str:
-    h=hashlib.sha256()
-    with path.open('rb') as f:
-        for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
+def checksum(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
     return h.hexdigest()
 
 
 class KnowledgeIngestor:
-    def __init__(self,session:AsyncSession):self.session=session;self.settings=get_settings();self.embedder=get_embedding_provider();self.index=MilvusKnowledgeIndex()
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.settings = get_settings()
+        self.embedder = get_embedding_provider()
+        self.index = MilvusKnowledgeIndex()
 
-    async def register_upload(self,user_id:UUID,source:Path,title:str|None=None,project_scope:UUID|None=None)->KnowledgeDocumentVersion:
-        if source.suffix.lower() not in ALLOWED_SUFFIXES:raise ValueError(f'unsupported file type: {source.suffix}')
-        cs=await asyncio.to_thread(checksum,source);resolved_title=title or source.stem
-        # Same title + scope is treated as a new version of the same logical document.
+    async def register_upload(
+        self,
+        user_id: UUID,
+        source: Path,
+        title: str | None = None,
+    ) -> KnowledgeDocumentVersion:
+        if source.suffix.lower() not in ALLOWED_SUFFIXES:
+            raise ValueError(f"unsupported file type: {source.suffix}")
+        cs = await asyncio.to_thread(checksum, source)
+        resolved_title = title or source.stem
+        # Same title is treated as a new version of the same logical document.
         # Uploading identical bytes is idempotent and returns the existing version.
         # Serialize concurrent uploads of the same logical document so the checksum
         # dedup check below is race-free (advisory lock released at commit/rollback).
-        lock_key=hash((str(user_id),str(project_scope),resolved_title))%(2**31)
-        await self.session.execute(text('SELECT pg_advisory_xact_lock(:k)'),{'k':lock_key})
-        doc=await self.session.scalar(select(KnowledgeDocument).where(KnowledgeDocument.user_id==user_id,KnowledgeDocument.project_scope==project_scope,KnowledgeDocument.title==resolved_title).order_by(KnowledgeDocument.created_at.asc()).limit(1))
+        lock_key = hash((str(user_id), resolved_title)) % (2**31)
+        await self.session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
+        doc = await self.session.scalar(
+            select(KnowledgeDocument)
+            .where(
+                KnowledgeDocument.user_id == user_id,
+                KnowledgeDocument.title == resolved_title,
+            )
+            .order_by(KnowledgeDocument.created_at.asc())
+            .limit(1)
+        )
         if not doc:
-            doc=KnowledgeDocument(user_id=user_id,project_scope=project_scope,title=resolved_title,status='uploaded');self.session.add(doc);await self.session.flush()
-        existing=await self.session.scalar(select(KnowledgeDocumentVersion).where(KnowledgeDocumentVersion.document_id==doc.id,KnowledgeDocumentVersion.checksum==cs).limit(1))
-        if existing:return existing
-        target_dir=self.settings.knowledge_dir/str(doc.id)/cs;target_dir.mkdir(parents=True,exist_ok=True);raw=target_dir/source.name
-        await asyncio.to_thread(shutil.copy2,source,raw)
-        ver=KnowledgeDocumentVersion(document_id=doc.id,checksum=cs,original_filename=source.name,raw_path=str(raw),status='uploaded');self.session.add(ver);doc.status='uploaded';await self.session.commit();await self.session.refresh(ver);return ver
+            doc = KnowledgeDocument(
+                user_id=user_id,
+                title=resolved_title,
+                status="uploaded",
+            )
+            self.session.add(doc)
+            await self.session.flush()
+        existing = await self.session.scalar(
+            select(KnowledgeDocumentVersion)
+            .where(
+                KnowledgeDocumentVersion.document_id == doc.id,
+                KnowledgeDocumentVersion.checksum == cs,
+            )
+            .limit(1)
+        )
+        if existing:
+            return existing
+        target_dir = self.settings.knowledge_dir / str(doc.id) / cs
+        target_dir.mkdir(parents=True, exist_ok=True)
+        raw = target_dir / source.name
+        await asyncio.to_thread(shutil.copy2, source, raw)
+        ver = KnowledgeDocumentVersion(
+            document_id=doc.id,
+            checksum=cs,
+            original_filename=source.name,
+            raw_path=str(raw),
+            status="uploaded",
+        )
+        self.session.add(ver)
+        doc.status = "uploaded"
+        await self.session.commit()
+        await self.session.refresh(ver)
+        return ver
 
-    async def ingest_version(self,version_id:UUID)->None:
+    async def ingest_version(self, version_id: UUID) -> None:
         # Atomically claim the version: uploaded, failed, or ready versions may
         # transition to processing. A concurrent worker that
         # already claimed it (status already 'processing'/'ready') makes the UPDATE
         # match zero rows and we no-op instead of double-processing.
-        claimed=await self.session.execute(
+        claimed = await self.session.execute(
             update(KnowledgeDocumentVersion)
-            .where(KnowledgeDocumentVersion.id==version_id,KnowledgeDocumentVersion.status.in_(['uploaded','failed','ready']))
-            .values(status='processing')
+            .where(
+                KnowledgeDocumentVersion.id == version_id,
+                KnowledgeDocumentVersion.status.in_(["uploaded", "failed", "ready"]),
+            )
+            .values(status="processing")
             .returning(KnowledgeDocumentVersion.id)
         )
         if claimed.scalar_one_or_none() is None:
             return  # already claimed or in terminal state
-        ver=await self.session.get(KnowledgeDocumentVersion,version_id)
-        doc=await self.session.get(KnowledgeDocument,ver.document_id) if ver else None
+        ver = await self.session.get(KnowledgeDocumentVersion, version_id)
+        doc = await self.session.get(KnowledgeDocument, ver.document_id) if ver else None
         if ver is None or doc is None:
             # Document was deleted before this durable job was claimed; nothing to do.
             await self.session.rollback()
             return
-        doc.status='processing';await self.session.commit()
+        previous_active_version_id = doc.active_version_id
+        doc.status = "processing"
+        await self.session.commit()
         try:
-            converted=await asyncio.to_thread(self._convert,Path(ver.raw_path))
-            outdir=Path(ver.raw_path).parent;json_path=outdir/'document.json';md_path=outdir/'document.md'
-            await asyncio.to_thread(json_path.write_text,json.dumps(converted['json'],ensure_ascii=False,indent=2),encoding='utf-8')
-            await asyncio.to_thread(md_path.write_text,converted['markdown'],encoding='utf-8')
-            ver.canonical_json_path=str(json_path);ver.canonical_md_path=str(md_path)
-            await self.session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.version_id==ver.id))
-            chunks=[]
-            for i,ch in enumerate(converted['chunks']):
-                row=KnowledgeChunk(version_id=ver.id,chunk_index=i,heading_path=ch['headings'],page_range=ch['page_range'],content=ch['content'],metadata_json=ch['metadata']);self.session.add(row);chunks.append(row)
+            converted = await asyncio.to_thread(self._convert, Path(ver.raw_path))
+            outdir = Path(ver.raw_path).parent
+            json_path = outdir / "document.json"
+            md_path = outdir / "document.md"
+            await asyncio.to_thread(
+                json_path.write_text,
+                json.dumps(converted["json"], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            await asyncio.to_thread(md_path.write_text, converted["markdown"], encoding="utf-8")
+            ver.canonical_json_path = str(json_path)
+            ver.canonical_md_path = str(md_path)
+            await self.session.execute(
+                delete(KnowledgeChunk).where(KnowledgeChunk.version_id == ver.id)
+            )
+            chunks = []
+            for i, ch in enumerate(converted["chunks"]):
+                row = KnowledgeChunk(
+                    version_id=ver.id,
+                    chunk_index=i,
+                    heading_path=ch["headings"],
+                    page_range=ch["page_range"],
+                    content=ch["content"],
+                    metadata_json=ch["metadata"],
+                )
+                self.session.add(row)
+                chunks.append(row)
+            if not chunks:
+                raise ValueError("document contains no extractable text")
             await self.session.flush()
-            embeddings=await self.embedder.embed([x.content for x in chunks]) if chunks else []
+            embeddings = await self.embedder.embed([x.content for x in chunks])
             if len(embeddings) != len(chunks):
-                raise ValueError(f'embedding count mismatch: expected {len(chunks)}, got {len(embeddings)}')
-            expected_dim=self.settings.embedding_dimension
+                raise ValueError(
+                    f"embedding count mismatch: expected {len(chunks)}, got {len(embeddings)}"
+                )
+            expected_dim = self.settings.embedding_dimension
             if any(len(vec) != expected_dim for vec in embeddings):
-                actual=next((len(vec) for vec in embeddings if len(vec) != expected_dim), 0)
-                raise ValueError(f'embedding dimension mismatch: expected {expected_dim}, got {actual}')
-            rows=[]
-            for c,vec in zip(chunks,embeddings,strict=True):
-                rows.append({'id':str(c.id),'document_id':str(doc.id),'version_id':str(ver.id),'project_scope':str(doc.project_scope or ''),'title':doc.title[:1000],'page_range':(c.page_range or '')[:80],'content':c.content[:65535],'dense':vec})
-            await self.index.delete_version(str(ver.id));await self.index.upsert(rows)
-            ver.status='ready';doc.status='ready';doc.active_version_id=ver.id;await self.session.commit()
+                actual = next((len(vec) for vec in embeddings if len(vec) != expected_dim), 0)
+                raise ValueError(
+                    f"embedding dimension mismatch: expected {expected_dim}, got {actual}"
+                )
+            rows = []
+            for c, vec in zip(chunks, embeddings, strict=True):
+                rows.append(
+                    {
+                        "id": str(c.id),
+                        "document_id": str(doc.id),
+                        "version_id": str(ver.id),
+                        # Kept empty for compatibility with existing Milvus
+                        # collections created before knowledge became global.
+                        "project_scope": "",
+                        "title": doc.title[:1000],
+                        "page_range": (c.page_range or "")[:80],
+                        "content": c.content[:65535],
+                        "dense": vec,
+                    }
+                )
+            await self.index.delete_version(str(ver.id))
+            await self.index.upsert(rows)
+            # Only the active version should be searchable.  Keeping the old
+            # version in Milvus makes a new upload look like duplicate content
+            # and can push the actually relevant chunk out of top-k.
+            if previous_active_version_id and previous_active_version_id != ver.id:
+                await self.index.delete_version(str(previous_active_version_id))
+            ver.status = "ready"
+            doc.status = "ready"
+            doc.active_version_id = ver.id
+            await self.session.commit()
         except Exception as e:
             # A document may be deleted while a durable RAG job is still running. Never
             # let that race crash the worker or wedge the session in a broken transaction.
@@ -101,25 +199,25 @@ class KnowledgeIngestor:
             # A queued ingest can outlive a document deletion. Use bulk
             # updates so a concurrent delete produces rowcount=0 instead of
             # SQLAlchemy's StaleDataError, and treat that race as a no-op.
-            doc_id=await self.session.scalar(
+            doc_id = await self.session.scalar(
                 select(KnowledgeDocumentVersion.document_id).where(
-                    KnowledgeDocumentVersion.id==version_id
+                    KnowledgeDocumentVersion.id == version_id
                 )
             )
             if doc_id is None:
                 return  # document/version removed concurrently; nothing left to persist
-            version_update=await self.session.execute(
+            version_update = await self.session.execute(
                 update(KnowledgeDocumentVersion)
-                .where(KnowledgeDocumentVersion.id==version_id)
-                .values(status='failed',error=str(e)[:8000])
+                .where(KnowledgeDocumentVersion.id == version_id)
+                .values(status="failed", error=str(e)[:8000])
             )
             if version_update.rowcount == 0:
                 await self.session.rollback()
                 return
             await self.session.execute(
                 update(KnowledgeDocument)
-                .where(KnowledgeDocument.id==doc_id)
-                .values(status='failed')
+                .where(KnowledgeDocument.id == doc_id)
+                .values(status="failed")
             )
             try:
                 await self.session.commit()
@@ -128,30 +226,76 @@ class KnowledgeIngestor:
                 return
             raise
 
-    def _convert(self,path:Path)->dict:
+    async def reconcile_index(self) -> dict[str, int]:
+        """Make Milvus match the active ready versions stored in PostgreSQL.
+
+        PostgreSQL remains the source of truth.  This is intentionally safe to
+        run at every worker start: stale vectors are removed, while a ready
+        version missing from Milvus is re-ingested through the normal path.
+        """
+        active_versions = {
+            str(version_id)
+            for version_id in (
+                await self.session.scalars(
+                    select(KnowledgeDocument.active_version_id).where(
+                        KnowledgeDocument.active_version_id.is_not(None)
+                    )
+                )
+            ).all()
+            if version_id
+        }
+        indexed_versions = await self.index.list_version_ids()
+        stale_versions = indexed_versions - active_versions
+        for version_id in stale_versions:
+            await self.index.delete_version(version_id)
+
+        missing_versions = active_versions - indexed_versions
+        for version_id in sorted(missing_versions):
+            await self.ingest_version(UUID(version_id))
+        return {
+            "active_versions": len(active_versions),
+            "removed_versions": len(stale_versions),
+            "reindexed_versions": len(missing_versions),
+        }
+
+    def _convert(self, path: Path) -> dict:
         from docling.chunking import HybridChunker
         from docling.document_converter import DocumentConverter
-        result=DocumentConverter().convert(path);dl=result.document
-        chunker=HybridChunker(merge_peers=True)
-        chunks=[]
+
+        result = DocumentConverter().convert(path)
+        dl = result.document
+        chunker = HybridChunker(merge_peers=True)
+        chunks = []
+
         def page_info(meta):
-            pages=set()
+            pages = set()
             if not meta:
                 return None, []
-            for raw in list(getattr(meta,'doc_items',[]) or []):
-                item=raw[0] if isinstance(raw,(tuple,list)) and raw else raw
-                for prov in list(getattr(item,'prov',[]) or []):
-                    page=getattr(prov,'page_no',None)
-                    if isinstance(page,int):pages.add(page)
-            ordered=sorted(pages)
-            if not ordered:return None, []
-            text=str(ordered[0]) if len(ordered)==1 else f'{ordered[0]}-{ordered[-1]}'
-            return text,ordered
+            for raw in list(getattr(meta, "doc_items", []) or []):
+                item = raw[0] if isinstance(raw, (tuple, list)) and raw else raw
+                for prov in list(getattr(item, "prov", []) or []):
+                    page = getattr(prov, "page_no", None)
+                    if isinstance(page, int):
+                        pages.add(page)
+            ordered = sorted(pages)
+            if not ordered:
+                return None, []
+            text = str(ordered[0]) if len(ordered) == 1 else f"{ordered[0]}-{ordered[-1]}"
+            return text, ordered
 
         for ch in chunker.chunk(dl_doc=dl):
-            text=chunker.contextualize(ch).strip()
-            if not text:continue
-            meta=getattr(ch,'meta',None);headings=list(getattr(meta,'headings',[]) or []) if meta else []
-            page_range,pages=page_info(meta)
-            chunks.append({'content':text,'headings':headings,'page_range':page_range,'metadata':{'headings':headings,'pages':pages}})
-        return {'json':dl.export_to_dict(),'markdown':dl.export_to_markdown(),'chunks':chunks}
+            text = chunker.contextualize(ch).strip()
+            if not text:
+                continue
+            meta = getattr(ch, "meta", None)
+            headings = list(getattr(meta, "headings", []) or []) if meta else []
+            page_range, pages = page_info(meta)
+            chunks.append(
+                {
+                    "content": text,
+                    "headings": headings,
+                    "page_range": page_range,
+                    "metadata": {"headings": headings, "pages": pages},
+                }
+            )
+        return {"json": dl.export_to_dict(), "markdown": dl.export_to_markdown(), "chunks": chunks}

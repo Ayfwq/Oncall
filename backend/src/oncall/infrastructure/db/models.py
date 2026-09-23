@@ -12,7 +12,6 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
-    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -33,44 +32,51 @@ def now() -> datetime:
 
 
 class User(Base):
-    __tablename__ = 'users'
+    __tablename__ = "users"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     username: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     # Kept only for compatibility with existing databases. PulseOps runs as a
     # single local workspace and never reads or verifies this legacy field.
-    password_hash: Mapped[str] = mapped_column(Text, default='auth-disabled')
+    password_hash: Mapped[str] = mapped_column(Text, default="auth-disabled")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class MonitoredServer(Base):
     """A remote host observed through standard Prometheus exporters."""
 
-    __tablename__ = 'monitored_servers'
+    __tablename__ = "monitored_servers"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
     name: Mapped[str] = mapped_column(String(200))
     node_metrics_url: Mapped[str] = mapped_column(Text)
     gpu_metrics_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    container_metrics_url: Mapped[str] = mapped_column(Text, nullable=False)
     collector_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     encrypted_collector_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-    __table_args__ = (UniqueConstraint('user_id', 'name', name='uq_monitored_server_user_name'),)
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_monitored_server_user_name"),)
 
 
 class Project(Base):
-    __tablename__ = 'projects'
+    __tablename__ = "projects"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
-    server_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('monitored_servers.id', ondelete='SET NULL'), nullable=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    server_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("monitored_servers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(200))
-    description: Mapped[str] = mapped_column(Text, default='')
+    description: Mapped[str] = mapped_column(Text, default="")
     # Deployment boundary used by the UI and runbooks. It is descriptive only;
     # remote collection still requires a worker/agent on that host.
-    environment: Mapped[str] = mapped_column(String(40), default='local')
+    environment: Mapped[str] = mapped_column(String(40), default="local")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    timezone: Mapped[str] = mapped_column(String(80), default='Asia/Singapore')
+    timezone: Mapped[str] = mapped_column(String(80), default="Asia/Singapore")
     poll_interval: Mapped[int] = mapped_column(Integer, default=300)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
@@ -85,21 +91,28 @@ class Service(Base):
     services let an operator reason about "the checkout service" as one unit and
     group incidents by service.
     """
-    __tablename__ = 'services'
+
+    __tablename__ = "services"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
     name: Mapped[str] = mapped_column(String(200))
-    description: Mapped[str] = mapped_column(Text, default='')
+    description: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class ProjectProcessTarget(Base):
-    __tablename__ = 'project_process_targets'
+    __tablename__ = "project_process_targets"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
-    name: Mapped[str] = mapped_column(String(200), default='target')
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    service_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("services.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), default="target")
     executable: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cmdline_filters: Mapped[list[str]] = mapped_column(JSONB, default=list)
     cwd: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -108,237 +121,130 @@ class ProjectProcessTarget(Base):
 
 
 class ProjectLogSource(Base):
-    __tablename__ = 'project_log_sources'
+    __tablename__ = "project_log_sources"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    service_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("services.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     path: Mapped[str] = mapped_column(Text)
-    encoding: Mapped[str] = mapped_column(String(40), default='utf-8')
+    encoding: Mapped[str] = mapped_column(String(40), default="utf-8")
     parser_config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class ProjectDockerTarget(Base):
-    __tablename__ = 'project_docker_targets'
+    __tablename__ = "project_docker_targets"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    service_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("services.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     container_ref: Mapped[str] = mapped_column(String(255))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class ProjectDatabaseProfile(Base):
-    __tablename__ = 'project_database_profiles'
+    __tablename__ = "project_database_profiles"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
-    type: Mapped[str] = mapped_column(String(40), default='postgresql')
-    host: Mapped[str] = mapped_column(String(255), default='127.0.0.1')
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    service_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("services.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    type: Mapped[str] = mapped_column(String(40), default="postgresql")
+    host: Mapped[str] = mapped_column(String(255), default="127.0.0.1")
     port: Mapped[int] = mapped_column(Integer, default=5432)
     database: Mapped[str] = mapped_column(String(255))
     username: Mapped[str] = mapped_column(String(255))
     encrypted_password: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    sslmode: Mapped[str] = mapped_column(String(40), default='prefer')
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
-class ProjectServiceEndpoint(Base):
-    __tablename__ = 'project_service_endpoints'
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
-    name: Mapped[str] = mapped_column(String(200), default='health')
-    url: Mapped[str] = mapped_column(Text)
-    method: Mapped[str] = mapped_column(String(20), default='GET')
-    expected_status: Mapped[int] = mapped_column(Integer, default=200)
-    timeout_ms: Mapped[int] = mapped_column(Integer, default=3000)
+    sslmode: Mapped[str] = mapped_column(String(40), default="prefer")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class ProjectMetricsSource(Base):
     """A Prometheus text-format scrape target (e.g. a FastAPI app exposing /metrics).
 
-    This is the "white box" data source: unlike HTTP probing it reports what the
-    application itself measured — request rate, error rate, latency percentiles.
+    This is the "white box" data source: the application exposes the numeric
+    signals that Prometheus evaluates for alerting.
     """
-    __tablename__ = 'project_metrics_sources'
+
+    __tablename__ = "project_metrics_sources"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    service_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
-    name: Mapped[str] = mapped_column(String(200), default='app')
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    service_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("services.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), default="app")
     url: Mapped[str] = mapped_column(Text)
-    auth_type: Mapped[str] = mapped_column(String(20), default='none')  # none | bearer | basic
+    auth_type: Mapped[str] = mapped_column(String(20), default="none")  # none | bearer | basic
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     scrape_timeout_ms: Mapped[int] = mapped_column(Integer, default=5000)
     # Label whose values identify individual routes, used for per-route drill-down.
     # FastAPI instrumentator uses "handler"; Spring Boot uses "uri"; Django uses "view".
-    route_label: Mapped[str] = mapped_column(String(80), default='handler')
+    route_label: Mapped[str] = mapped_column(String(80), default="handler")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
-class MetricCursor(Base):
-    """Last observed value of a cumulative counter, used to compute rates.
+class AlertmanagerAlert(Base):
+    """The durable copy of an alert received from Alertmanager.
 
-    Prometheus counters only ever increase (and reset to zero when the process
-    restarts), so rps and error rate must be derived from the delta between two
-    scrapes. Without persisting the previous sample, a restart of the monitoring
-    worker would produce a bogus rate spike.
+    Alertmanager's fingerprint is the source of truth for deduplication. The
+    application never re-evaluates the alert expression; it only stores the
+    event, opens/updates an incident and starts diagnosis.
     """
-    __tablename__ = 'metric_cursors'
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'))
-    resource_key: Mapped[str] = mapped_column(String(200))
-    metric_key: Mapped[str] = mapped_column(String(160))
-    last_value: Mapped[float] = mapped_column(Float, default=0)
-    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    __table_args__ = (PrimaryKeyConstraint('project_id', 'resource_key', 'metric_key'),)
 
-
-class MonitoringRule(Base):
-    __tablename__ = 'monitoring_rules'
+    __tablename__ = "alertmanager_alerts"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    metric_key: Mapped[str] = mapped_column(String(160), index=True)
-    resource_key: Mapped[str] = mapped_column(String(200), default='default')
-    operator: Mapped[str] = mapped_column(String(8), default='>')
-    trigger_threshold: Mapped[float] = mapped_column(Float)
-    trigger_for: Mapped[int] = mapped_column(Integer, default=2)
-    recovery_threshold: Mapped[float] = mapped_column(Float)
-    recovery_for: Mapped[int] = mapped_column(Integer, default=2)
-    severity: Mapped[str] = mapped_column(String(20), default='warning')
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    # threshold is deterministic; baseline compares against a learned window;
-    # hybrid fires when either the absolute threshold or the baseline is bad.
-    detection_mode: Mapped[str] = mapped_column(String(20), default='threshold')
-    baseline_window: Mapped[int] = mapped_column(Integer, default=60)
-    baseline_min_samples: Mapped[int] = mapped_column(Integer, default=12)
-    baseline_z_score: Mapped[float] = mapped_column(Float, default=3.0)
-    baseline_recovery_z_score: Mapped[float] = mapped_column(Float, default=2.0)
-    # Composite rule definition. When set, the scalar metric_key/
-    # operator/threshold fields are ignored and the rule fires only when EVERY
-    # condition in `conditions['all']` holds simultaneously. Structure:
-    #   {"all": [{"metric_key","resource_key","operator","threshold"}, ...],
-    #    "escalate_at": {"metric_key","resource_key","operator","threshold",
-    #                    "escalate_severity"} (optional)}
-    conditions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-
-
-class MonitoringRuleState(Base):
-    __tablename__ = 'monitoring_rule_states'
-    rule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('monitoring_rules.id', ondelete='CASCADE'), primary_key=True)
-    state: Mapped[str] = mapped_column(String(20), default='normal')
-    abnormal_hits: Mapped[int] = mapped_column(Integer, default=0)
-    recovery_hits: Mapped[int] = mapped_column(Integer, default=0)
-    last_value: Mapped[float | None] = mapped_column(Float, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-
-
-class MonitoringBaseline(Base):
-    """Bounded normal samples for adaptive rules.
-
-    Only samples observed while the rule is not abnormal are appended. Keeping
-    the window in the database makes baseline learning survive worker restarts
-    without turning the full metric history into the hot path.
-    """
-    __tablename__ = 'monitoring_baselines'
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    metric_key: Mapped[str] = mapped_column(String(160), index=True)
-    resource_key: Mapped[str] = mapped_column(String(200), default='default')
-    samples: Mapped[list[float]] = mapped_column(JSONB, default=list)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-    __table_args__ = (UniqueConstraint('project_id', 'metric_key', 'resource_key', name='uq_monitoring_baseline_key'),)
-
-
-class MonitoringRun(Base):
-    __tablename__ = 'monitoring_runs'
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(String(30), default='running')
-    collector_status: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-
-
-class MetricSample(Base):
-    __tablename__ = 'metric_samples'
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    metric_key: Mapped[str] = mapped_column(String(160), index=True)
-    resource_key: Mapped[str] = mapped_column(String(200), default='default', index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
-    value: Mapped[float] = mapped_column(Float)
-    __table_args__ = (Index('ix_metric_project_key_ts', 'project_id', 'metric_key', 'ts'),)
-
-
-class LogCursor(Base):
-    __tablename__ = 'log_cursors'
-    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('project_log_sources.id', ondelete='CASCADE'), primary_key=True)
-    file_identity: Mapped[str] = mapped_column(String(255), default='')
-    offset: Mapped[int] = mapped_column(Integer, default=0)
-    size: Mapped[int] = mapped_column(Integer, default=0)
-    mtime: Mapped[float] = mapped_column(Float, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-
-
-class AlertEvent(Base):
-    __tablename__ = 'alert_events'
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    rule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('monitoring_rules.id', ondelete='CASCADE'), index=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
-    resource_key: Mapped[str] = mapped_column(String(200), default='default')
-    state_from: Mapped[str] = mapped_column(String(20))
-    state_to: Mapped[str] = mapped_column(String(20))
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    fingerprint: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="firing", index=True)
+    alertname: Mapped[str] = mapped_column(String(200))
+    severity: Mapped[str] = mapped_column(String(20), default="warning")
+    labels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    annotations: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
 class Incident(Base):
-    __tablename__ = 'incidents'
+    __tablename__ = "incidents"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
     fingerprint: Mapped[str] = mapped_column(String(64), index=True)
-    status: Mapped[str] = mapped_column(String(30), default='open', index=True)
-    severity: Mapped[str] = mapped_column(String(20), default='warning')
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    severity: Mapped[str] = mapped_column(String(20), default="warning")
     anomaly_type: Mapped[str] = mapped_column(String(160))
-    resource_key: Mapped[str] = mapped_column(String(200), default='default')
-    summary: Mapped[str] = mapped_column(Text, default='')
+    resource_key: Mapped[str] = mapped_column(String(200), default="default")
+    summary: Mapped[str] = mapped_column(Text, default="")
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_investigated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    __table_args__ = (Index('ix_incident_open_fingerprint', 'project_id', 'fingerprint', 'status'),)
-
-
-class IncidentSignal(Base):
-    """A detector signal attached to a correlated user-facing incident.
-
-    Several rules may fire for one outage (for example database saturation,
-    API latency and exception logs).  Persisting membership lets the engine
-    send one notification thread and resolve it only after every contributing
-    detector has recovered.
-    """
-    __tablename__ = 'incident_signals'
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('incidents.id', ondelete='CASCADE'), index=True)
-    rule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('monitoring_rules.id', ondelete='CASCADE'), index=True)
-    resource_key: Mapped[str] = mapped_column(String(200), default='default')
-    anomaly_type: Mapped[str] = mapped_column(String(160))
-    severity: Mapped[str] = mapped_column(String(20), default='warning')
-    state: Mapped[str] = mapped_column(String(20), default='firing', index=True)
-    last_value: Mapped[float] = mapped_column(Float, default=0)
-    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    __table_args__ = (
-        UniqueConstraint('incident_id', 'rule_id', 'resource_key', name='uq_incident_signal_rule_resource'),
+    last_investigated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
+    __table_args__ = (Index("ix_incident_open_fingerprint", "project_id", "fingerprint", "status"),)
 
 
 class IncidentEvidence(Base):
-    __tablename__ = 'incident_evidence'
+    __tablename__ = "incident_evidence"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('incidents.id', ondelete='CASCADE'), index=True)
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), index=True
+    )
     type: Mapped[str] = mapped_column(String(80))
     source: Mapped[str] = mapped_column(String(160))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -348,72 +254,96 @@ class IncidentEvidence(Base):
 
 
 class Conversation(Base):
-    __tablename__ = 'conversations'
+    __tablename__ = "conversations"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
-    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('projects.id', ondelete='SET NULL'), nullable=True, index=True)
-    incident_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('incidents.id', ondelete='SET NULL'), nullable=True, index=True)
-    type: Mapped[str] = mapped_column(String(30), default='chat')
-    title: Mapped[str] = mapped_column(String(240), default='新会话')
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    type: Mapped[str] = mapped_column(String(30), default="chat")
+    title: Mapped[str] = mapped_column(String(240), default="新会话")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, onupdate=now, index=True
+    )
 
 
 class Message(Base):
-    __tablename__ = 'messages'
+    __tablename__ = "messages"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('conversations.id', ondelete='CASCADE'), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
     role: Mapped[str] = mapped_column(String(30))
     content: Mapped[str] = mapped_column(Text)
-    channel: Mapped[str] = mapped_column(String(30), default='web')
-    status: Mapped[str] = mapped_column(String(30), default='completed')
+    channel: Mapped[str] = mapped_column(String(30), default="web")
+    status: Mapped[str] = mapped_column(String(30), default="completed")
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
 class ConversationSummary(Base):
-    __tablename__ = 'conversation_summaries'
+    __tablename__ = "conversation_summaries"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('conversations.id', ondelete='CASCADE'), index=True)
-    through_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('messages.id', ondelete='SET NULL'), nullable=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    through_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
     summary: Mapped[str] = mapped_column(Text)
     token_estimate: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class AgentRun(Base):
-    __tablename__ = 'agent_runs'
+    __tablename__ = "agent_runs"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     mode: Mapped[str] = mapped_column(String(30))
-    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('conversations.id', ondelete='CASCADE'), index=True)
-    incident_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('incidents.id', ondelete='SET NULL'), nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(30), default='running')
-    model_profile: Mapped[str] = mapped_column(String(120), default='default')
-    prompt_version: Mapped[str] = mapped_column(String(80), default='current')
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="running")
+    model_profile: Mapped[str] = mapped_column(String(120), default="default")
+    prompt_version: Mapped[str] = mapped_column(String(80), default="current")
     usage: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Diagnosis(Base):
-    __tablename__ = 'diagnoses'
+    __tablename__ = "diagnoses"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('incidents.id', ondelete='CASCADE'), index=True)
-    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('agent_runs.id', ondelete='SET NULL'), nullable=True)
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), index=True
+    )
+    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
     structured_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
     confidence: Mapped[float] = mapped_column(Float, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class ToolRun(Base):
-    __tablename__ = 'tool_runs'
+    __tablename__ = "tool_runs"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    agent_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('agent_runs.id', ondelete='CASCADE'), index=True)
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
     tool_name: Mapped[str] = mapped_column(String(160), index=True)
     params_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(30))
-    summary: Mapped[str] = mapped_column(Text, default='')
+    summary: Mapped[str] = mapped_column(Text, default="")
     latency_ms: Mapped[float] = mapped_column(Float, default=0)
     result_size: Mapped[int] = mapped_column(Integer, default=0)
     truncated: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -422,55 +352,62 @@ class ToolRun(Base):
 
 
 class KnowledgeDocument(Base):
-    __tablename__ = 'knowledge_documents'
+    __tablename__ = "knowledge_documents"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
-    project_scope: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('projects.id', ondelete='SET NULL'), nullable=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
     title: Mapped[str] = mapped_column(String(300))
-    status: Mapped[str] = mapped_column(String(30), default='uploaded')
+    status: Mapped[str] = mapped_column(String(30), default="uploaded")
     active_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
 class KnowledgeDocumentVersion(Base):
-    __tablename__ = 'knowledge_document_versions'
+    __tablename__ = "knowledge_document_versions"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('knowledge_documents.id', ondelete='CASCADE'), index=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True
+    )
     checksum: Mapped[str] = mapped_column(String(64), index=True)
-    parser_version: Mapped[str] = mapped_column(String(80), default='docling')
+    parser_version: Mapped[str] = mapped_column(String(80), default="docling")
     original_filename: Mapped[str] = mapped_column(String(300))
     raw_path: Mapped[str] = mapped_column(Text)
     canonical_json_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     canonical_md_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(30), default='uploaded')
+    status: Mapped[str] = mapped_column(String(30), default="uploaded")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    __table_args__ = (UniqueConstraint('document_id', 'checksum', name='uq_doc_checksum'),)
+    __table_args__ = (UniqueConstraint("document_id", "checksum", name="uq_doc_checksum"),)
 
 
 class KnowledgeChunk(Base):
-    __tablename__ = 'knowledge_chunks'
+    __tablename__ = "knowledge_chunks"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('knowledge_document_versions.id', ondelete='CASCADE'), index=True)
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_document_versions.id", ondelete="CASCADE"), index=True
+    )
     chunk_index: Mapped[int] = mapped_column(Integer)
     heading_path: Mapped[list[str]] = mapped_column(JSONB, default=list)
     page_range: Mapped[str | None] = mapped_column(String(80), nullable=True)
     content: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    __table_args__ = (UniqueConstraint('version_id', 'chunk_index', name='uq_version_chunk_index'),)
+    __table_args__ = (UniqueConstraint("version_id", "chunk_index", name="uq_version_chunk_index"),)
 
 
 class BackgroundJob(Base):
-    __tablename__ = 'background_jobs'
+    __tablename__ = "background_jobs"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     type: Mapped[str] = mapped_column(String(100), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    status: Mapped[str] = mapped_column(String(30), default='pending', index=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     priority: Mapped[int] = mapped_column(Integer, default=100)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=5)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
@@ -480,13 +417,15 @@ class BackgroundJob(Base):
 
 
 class Notification(Base):
-    __tablename__ = 'notifications'
+    __tablename__ = "notifications"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    incident_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('incidents.id', ondelete='CASCADE'), nullable=True, index=True)
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     channel: Mapped[str] = mapped_column(String(40))
     target: Mapped[str] = mapped_column(String(255))
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    status: Mapped[str] = mapped_column(String(30), default='pending')
+    status: Mapped[str] = mapped_column(String(30), default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=5)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
@@ -498,31 +437,39 @@ class Notification(Base):
 
 
 class ChannelBinding(Base):
-    __tablename__ = 'channel_bindings'
+    __tablename__ = "channel_bindings"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     channel: Mapped[str] = mapped_column(String(40))
     external_user: Mapped[str | None] = mapped_column(String(255), nullable=True)
     external_chat: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    conversation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('conversations.id', ondelete='SET NULL'), nullable=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    __table_args__ = (UniqueConstraint('channel', 'external_user', 'external_chat', name='uq_channel_binding'),)
+    __table_args__ = (
+        UniqueConstraint("channel", "external_user", "external_chat", name="uq_channel_binding"),
+    )
 
 
 class FeishuMessageLink(Base):
-    __tablename__ = 'feishu_message_links'
+    __tablename__ = "feishu_message_links"
     message_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     root_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     chat_id: Mapped[str] = mapped_column(String(255), index=True)
-    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('conversations.id', ondelete='CASCADE'), index=True)
-    incident_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('incidents.id', ondelete='SET NULL'), nullable=True, index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class ProcessedChannelEvent(Base):
-    __tablename__ = 'processed_channel_events'
+    __tablename__ = "processed_channel_events"
     event_key: Mapped[str] = mapped_column(String(255), primary_key=True)
-    channel: Mapped[str] = mapped_column(String(40), default='feishu')
-    status: Mapped[str] = mapped_column(String(30), default='processing', index=True)
+    channel: Mapped[str] = mapped_column(String(40), default="feishu")
+    status: Mapped[str] = mapped_column(String(30), default="processing", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -530,26 +477,30 @@ class ProcessedChannelEvent(Base):
 
 
 class RetrievalTrace(Base):
-    __tablename__ = 'retrieval_traces'
+    __tablename__ = "retrieval_traces"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
-    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('agent_runs.id', ondelete='SET NULL'), nullable=True, index=True)
-    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('projects.id', ondelete='SET NULL'), nullable=True, index=True)
+    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     query: Mapped[str] = mapped_column(Text)
     hit_count: Mapped[int] = mapped_column(Integer, default=0)
     refs: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     latency_ms: Mapped[float] = mapped_column(Float, default=0)
-    status: Mapped[str] = mapped_column(String(30), default='ok')
+    status: Mapped[str] = mapped_column(String(30), default="ok")
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
 class ModelProfile(Base):
-    __tablename__ = 'model_profiles'
+    __tablename__ = "model_profiles"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uid)
     kind: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
     provider: Mapped[str] = mapped_column(String(80))
-    base_url: Mapped[str] = mapped_column(Text, default='')
+    base_url: Mapped[str] = mapped_column(Text, default="")
     model: Mapped[str] = mapped_column(String(200))
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     encrypted_api_key: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)

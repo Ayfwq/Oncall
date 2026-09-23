@@ -39,7 +39,7 @@ async function removeIncident(row: IncidentSummary) {
 
 <template>
   <div class="page">
-    <div class="page-head"><div><h1>告警</h1><p class="sub">由监控引擎确定性检测产生，可进入会话持续追问</p></div></div>
+    <div class="page-head"><div><h1>告警</h1><p class="sub">由 Prometheus 判断、Alertmanager 合并去重后进入，可继续让 LLM 查询指标、日志和数据库</p></div></div>
     <div class="grid" v-if="rows.length">
       <div class="card clickable incident-card" v-for="x in rows" :key="x.id" @click="router.push('/incidents/' + x.id)">
         <div class="incident-card-head">

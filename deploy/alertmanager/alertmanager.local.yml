@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: oncall-webhook
+  group_by: [project_id, alertname, category]
+  group_wait: 30s
+  group_interval: 10m
+  repeat_interval: 4h
+
+receivers:
+  - name: oncall-webhook
+    webhook_configs:
+      - url: http://host.docker.internal:9900/api/webhooks/alertmanager
+        send_resolved: true

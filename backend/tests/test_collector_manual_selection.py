@@ -73,18 +73,18 @@ def test_external_https_port_can_miss_but_manual_compose_scope_finds_container(m
     monkeypatch.setattr(collector, "_docker_client", lambda: FakeDocker(_containers()))
 
     automatic = collector._logs_sync(
-        collector.LogQuery(target_urls=["https://trading.hellowq.icu/health"])
+        collector.LogQuery(target_urls=["https://trading.hellowq.icu/metrics"])
     )
     manual = collector._logs_sync(
         collector.LogQuery(
-            target_urls=["https://trading.hellowq.icu/health"],
+            target_urls=["https://trading.hellowq.icu/metrics"],
             compose_project="tradingagents",
             services=["tradingagents"],
         )
     )
 
     assert automatic["ok"] is False
-    assert automatic["error"] == "没有根据 Health/Metrics 端口匹配到业务容器"
+    assert automatic["error"] == "没有根据 Metrics 端口匹配到业务容器"
     assert manual["ok"] is True
     assert manual["containers"] == ["tradingagents-tradingagents-1"]
     assert manual["error_count"] == 1

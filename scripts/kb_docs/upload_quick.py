@@ -1,13 +1,17 @@
-import os, sys
+import os
+import sys
+
 import httpx
 
-BASE = 'http://127.0.0.1:9900'
+BASE = "http://127.0.0.1:9900"
 
 with httpx.Client(base_url=BASE, timeout=120) as c:
     for path in sys.argv[1:]:
         name = os.path.basename(path)
-        with open(path, 'rb') as fh:
-            r = c.post('/api/knowledge/documents', files={'file': (name, fh, 'application/octet-stream')})
+        with open(path, "rb") as fh:
+            r = c.post(
+                "/api/knowledge/documents", files={"file": (name, fh, "application/octet-stream")}
+            )
         if r.status_code == 200:
             d = r.json()
             print(f"UPLOADED {name} doc_id={d.get('id')} job_id={d.get('job_id')}")

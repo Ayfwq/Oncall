@@ -1,6 +1,7 @@
 export const COLLECTOR_IMAGE = 'ghcr.io/ayfwq/oncall-collector:latest'
 export const NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v1.12.1'
 export const DCGM_EXPORTER_IMAGE = 'nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless'
+export const CADVISOR_IMAGE = 'ghcr.io/google/cadvisor:0.55.1'
 
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`
@@ -38,6 +39,23 @@ export function gpuExporterVerifyCommand(): string {
 
 export function gpuExporterRemoveCommand(): string {
   return `if ! command -v docker >/dev/null 2>&1; then echo 'GPU 采集器删除失败：未找到 Docker'; exit 1; fi && (docker rm -f oncall-dcgm-exporter >/dev/null 2>&1 || true) && if docker ps -a --format '{{.Names}}' | grep -Fxq 'oncall-dcgm-exporter'; then echo 'GPU 采集器删除失败'; exit 1; else echo 'GPU 采集器删除成功'; fi`
+}
+
+export function cadvisorInstallCommand(): string {
+  return [
+    `docker pull ${CADVISOR_IMAGE}`,
+    `(docker rm -f oncall-cadvisor >/dev/null 2>&1 || true)`,
+    `docker run -d --name oncall-cadvisor --restart unless-stopped --privileged --device=/dev/kmsg -p 8080:8080 -v /:/rootfs:ro -v /var/run:/var/run:ro -v /sys:/sys:ro -v /var/lib/docker/:/var/lib/docker:ro -v /dev/disk/:/dev/disk:ro ${CADVISOR_IMAGE}`,
+    `for i in $(seq 1 10); do if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/metrics | grep -q '^container_'; then echo 'cAdvisor 安装成功'; exit 0; fi; sleep 1; done; echo 'cAdvisor 启动失败，最近日志如下：'; docker logs --tail=80 oncall-cadvisor; exit 1`,
+  ].join(' && ')
+}
+
+export function cadvisorVerifyCommand(): string {
+  return `curl --fail --silent --show-error --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/metrics | grep -q '^container_' && echo 'cAdvisor 安装成功' || { echo 'cAdvisor 安装失败'; exit 1; }`
+}
+
+export function cadvisorRemoveCommand(): string {
+  return `if ! command -v docker >/dev/null 2>&1; then echo 'cAdvisor 删除失败：未找到 Docker'; exit 1; fi && (docker rm -f oncall-cadvisor >/dev/null 2>&1 || true) && if docker ps -a --format '{{.Names}}' | grep -Fxq 'oncall-cadvisor'; then echo 'cAdvisor 删除失败'; exit 1; else echo 'cAdvisor 删除成功'; fi`
 }
 
 export function collectorInstallCommand(token: string): string {

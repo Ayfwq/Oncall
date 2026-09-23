@@ -11,6 +11,10 @@ x-backend-environment: &backend-environment
     ONCALL_LANGGRAPH_DATABASE_URL: postgresql://oncall:${POSTGRES_PASSWORD:-oncall}@postgres:5432/oncall
     ONCALL_MILVUS_URI: http://milvus:19530
     ONCALL_DATA_DIR: /app/data
+    ONCALL_PROMETHEUS_URL: http://prometheus:9090
+    ONCALL_PROMETHEUS_SCRAPE_BASE_URL: http://api:9900
+    ONCALL_PROMETHEUS_SCRAPE_TOKEN: ${PROMETHEUS_SCRAPE_TOKEN:-change-me}
+    ONCALL_ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:-change-me}
 
 services:
   postgres:
@@ -155,30 +159,40 @@ services:
           cpus: "2.0"
           memory: 2g
 
-  monitor-worker:
-    image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
-    <<: *backend-environment
-    command: /opt/venv/bin/oncall-monitor-worker
-    healthcheck:
-      disable: true
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v2.55.1}
     restart: unless-stopped
-    pid: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
     volumes:
-      - ./.env:/app/.env
-      - ./backend:/app/backend:ro
-      - oncall_data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /opt:/host/opt:ro
-      - /var/log:/host/var/log:ro
-      - /home:/host/home:ro
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - oncall_data:/prometheus-data
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
     depends_on:
-      migrate:
-        condition: service_completed_successfully
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 1g
+      - alertmanager
+
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.27.0}
+    restart: unless-stopped
+    environment:
+      ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:-change-me}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        sed "s|__ALERTMANAGER_WEBHOOK_TOKEN__|$${ALERTMANAGER_WEBHOOK_TOKEN}|g"
+        /etc/alertmanager/alertmanager.template.yml > /tmp/alertmanager.yml
+        && exec /bin/alertmanager
+        --config.file=/tmp/alertmanager.yml
+        --storage.path=/alertmanager
+    volumes:
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.template.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
 
   notification-worker:
     image: oncall-ai-sre-backend:${ONCALL_IMAGE_TAG:-latest}
@@ -267,3 +281,5 @@ volumes:
   minio_data:
   milvus_data:
   oncall_data:
+  prometheus_data:
+  alertmanager_data:

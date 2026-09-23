@@ -9,7 +9,9 @@ from oncall.integrations.prometheus import PrometheusIntegration, _hist_quantile
 
 class WindowedPrometheus(PrometheusIntegration):
     def __init__(self, observations):
-        super().__init__(None, uuid4(), [MetricsSourceDTO(name='app', url='http://example.test/metrics')])
+        super().__init__(
+            None, uuid4(), [MetricsSourceDTO(name="app", url="http://example.test/metrics")]
+        )
         self.observations = iter(observations)
         self.cursors = {}
 
@@ -25,32 +27,40 @@ class WindowedPrometheus(PrometheusIntegration):
 
 def observation(total, errors, buckets):
     return {
-        'ok': True,
-        'routes': {'/quote': {'total': total, 'err5xx': errors, 'buckets': buckets}},
-        'process': {},
-        'meta': {'name': 'app', 'url': 'http://example.test/metrics', 'ok': True, 'routes': 1, 'process_metrics': False},
+        "ok": True,
+        "routes": {"/quote": {"total": total, "err5xx": errors, "buckets": buckets}},
+        "process": {},
+        "meta": {
+            "name": "app",
+            "url": "http://example.test/metrics",
+            "ok": True,
+            "routes": 1,
+            "process_metrics": False,
+        },
     }
 
 
 def test_histogram_quantile_never_returns_infinity():
-    assert _hist_quantile({0.1: 0, 1.0: 2, float('inf'): 10}, 0.95) == 1.0
-    assert _hist_quantile({float('inf'): 10}, 0.95) == 0.0
+    assert _hist_quantile({0.1: 0, 1.0: 2, float("inf"): 10}, 0.95) == 1.0
+    assert _hist_quantile({float("inf"): 10}, 0.95) == 0.0
 
 
 @pytest.mark.asyncio
 async def test_api_availability_and_latency_use_current_scrape_window(monkeypatch):
-    integration = WindowedPrometheus([
-        observation(100, 50, {0.1: 50, 1.0: 100, float('inf'): 100}),
-        observation(200, 50, {0.1: 150, 1.0: 200, float('inf'): 200}),
-    ])
+    integration = WindowedPrometheus(
+        [
+            observation(100, 50, {0.1: 50, 1.0: 100, float("inf"): 100}),
+            observation(200, 50, {0.1: 150, 1.0: 200, float("inf"): 200}),
+        ]
+    )
     times = iter((1000.0, 1010.0))
-    monkeypatch.setattr('oncall.integrations.prometheus.time.time', lambda: next(times))
+    monkeypatch.setattr("oncall.integrations.prometheus.time.time", lambda: next(times))
 
     first = await integration.collect()
     second = await integration.collect()
 
-    assert first.signals['app.http.rps'] == 0.0
-    assert second.signals['app.http.rps'] == pytest.approx(10.0)
-    assert second.signals['app.http.error_rate'] == 0.0
-    assert second.signals['app.http.availability'] == 100.0
-    assert second.signals['app.http.p95_ms'] == pytest.approx(100.0)
+    assert first.signals["app.http.rps"] == 0.0
+    assert second.signals["app.http.rps"] == pytest.approx(10.0)
+    assert second.signals["app.http.error_rate"] == 0.0
+    assert second.signals["app.http.availability"] == 100.0
+    assert second.signals["app.http.p95_ms"] == pytest.approx(100.0)

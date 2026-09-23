@@ -16,4 +16,6 @@ async def current_user(session: AsyncSession = Depends(get_session)) -> User:
     """
     return await ensure_local_user(session)
 
-def get_checkpointer(request:Request):return getattr(request.app.state,'checkpointer',None)
+
+def get_checkpointer(request: Request):
+    return getattr(request.app.state, "checkpointer", None)

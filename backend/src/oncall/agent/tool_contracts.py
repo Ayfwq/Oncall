@@ -24,11 +24,11 @@ RUNTIME_CHECKS = ["status", "cpu", "memory", "restarts", "oom", "processes", "po
 
 TOOL_SPECS: dict[str, dict[str, Any]] = {
     "query_incident_context": {
-        "description": "读取当前告警事件、触发信号、规则阈值和已有证据。诊断应优先调用。只读。",
+        "description": "读取当前 Alertmanager 告警、Prometheus 标签和已有证据。诊断应优先调用。只读。",
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     "query_current_metrics": {
-        "description": "读取最近一次指标快照；可筛选指标或指标组，必要时才强制实时采集。只读。",
+        "description": "从 Prometheus 读取项目当前数字指标；可按指标或指标组筛选。只读。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -42,7 +42,6 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string", "enum": METRIC_GROUPS},
                     "maxItems": 7,
                 },
-                "fresh": {"type": "boolean", "default": False},
             },
             "additionalProperties": False,
         },
@@ -63,17 +62,6 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "include_samples": {"type": "boolean", "default": False},
             },
             "required": ["metrics"],
-            "additionalProperties": False,
-        },
-    },
-    "query_service_health": {
-        "description": "主动探测一个或全部已配置 HTTP 服务，返回状态码和延迟。只读。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "endpoint": {"type": "string", "minLength": 1},
-                "include_body": {"type": "boolean", "default": False},
-            },
             "additionalProperties": False,
         },
     },
@@ -135,7 +123,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         },
     },
     "search_knowledge": {
-        "description": "检索 PulseOps 运维知识库/SOP；用于处置依据，不代表实时事实。只读。",
+        "description": "检索当前工作区共享的 PulseOps 运维知识库/SOP；用于处置依据，不代表实时事实。只读。",
         "parameters": {
             "type": "object",
             "properties": {

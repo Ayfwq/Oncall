@@ -54,8 +54,8 @@ class DiagnosisReport(BaseModel):
 
 
 class AgentDecision(BaseModel):
-    action: Literal['tool', 'final']
-    rationale: str = ''
+    action: Literal["tool", "final"]
+    rationale: str = ""
     tool_name: str | None = None
     tool_args: dict[str, Any] = Field(default_factory=dict)
     answer: str | None = None

@@ -6,8 +6,10 @@ automatically when PostgreSQL or Milvus is unreachable, and every run ingests
 the three SOP fixtures under a dedicated throwaway user so the suite is
 self-contained and idempotent (upload is deduplicated by checksum).
 """
+
 from __future__ import annotations
 
+import shutil
 import uuid
 from pathlib import Path
 
@@ -30,8 +32,12 @@ async def _pg_probe() -> bool:
     conn = None
     try:
         conn = await asyncpg.connect(
-            host=url.host, port=url.port, database=url.database,
-            user=url.username, password=url.password or "", timeout=3,
+            host=url.host,
+            port=url.port,
+            database=url.database,
+            user=url.username,
+            password=url.password or "",
+            timeout=3,
         )
         await conn.fetchval("select 1")
         return True
@@ -77,7 +83,7 @@ async def db(rag_ready, service_gate):
 async def rag_kb(rag_ready, service_gate):
     """Ingest the three SOP fixtures under a dedicated user; cleaned up after."""
     service_gate(rag_ready, "PostgreSQL/Milvus unreachable; skipping RAG integration test")
-    from oncall.infrastructure.db.models import User
+    from oncall.infrastructure.db.models import KnowledgeDocument, User
     from oncall.infrastructure.db.session import SessionFactory
     from oncall.rag.ingestion import KnowledgeIngestor
     from oncall.rag.milvus_store import MilvusKnowledgeIndex
@@ -92,11 +98,13 @@ async def rag_kb(rag_ready, service_gate):
         user_id = user.id
         ingestor = KnowledgeIngestor(session)
         versions = []
+        document_roots: set[Path] = set()
         try:
             for name in SOP_FILES:
                 ver = await ingestor.register_upload(user_id, FIXTURES / name, title=name)
                 await ingestor.ingest_version(ver.id)
                 versions.append(ver)
+                document_roots.add(Path(ver.raw_path).parent.parent)
         except Exception:
             # best-effort cleanup on setup failure
             index = MilvusKnowledgeIndex()
@@ -105,8 +113,13 @@ async def rag_kb(rag_ready, service_gate):
                     await index.delete_version(str(ver.id))
                 except Exception:
                     pass
+            await session.execute(
+                delete(KnowledgeDocument).where(KnowledgeDocument.user_id == user_id)
+            )
             await session.execute(delete(User).where(User.id == user_id))
             await session.commit()
+            for root in document_roots:
+                shutil.rmtree(root, ignore_errors=True)
             raise
         yield {"user_id": user_id, "versions": versions, "titles": SOP_FILES}
         index = MilvusKnowledgeIndex()
@@ -115,5 +128,8 @@ async def rag_kb(rag_ready, service_gate):
                 await index.delete_version(str(ver.id))
             except Exception:
                 pass
+        await session.execute(delete(KnowledgeDocument).where(KnowledgeDocument.user_id == user_id))
         await session.execute(delete(User).where(User.id == user_id))
         await session.commit()
+        for root in document_roots:
+            shutil.rmtree(root, ignore_errors=True)

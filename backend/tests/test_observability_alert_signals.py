@@ -1,7 +1,6 @@
 from uuid import uuid4
 
 import pytest
-
 from oncall.application.dtos import DatabaseProfileDTO, LogSourceDTO, MonitoredServerDTO
 from oncall.integrations.observability import RemoteObservabilityIntegration
 
@@ -11,6 +10,7 @@ def _integration() -> RemoteObservabilityIntegration:
         id=uuid4(),
         name="target",
         node_metrics_url="http://target:9100/metrics",
+        container_metrics_url="http://target:8080/metrics",
         collector_url="http://target:9910",
         collector_token="secret",
     )
@@ -61,10 +61,14 @@ async def test_diagnostic_tools_forward_narrow_scope_and_group_log_signatures(mo
     async def fake_post(path, body):
         requests.append((path, body))
         if path == "/v1/logs/search":
-            return {"ok": True, "containers": ["api-1"], "lines": [
-                {"container": "api-1", "line": "ERROR request 123 failed"},
-                {"container": "api-1", "line": "ERROR request 456 failed"},
-            ]}
+            return {
+                "ok": True,
+                "containers": ["api-1"],
+                "lines": [
+                    {"container": "api-1", "line": "ERROR request 123 failed"},
+                    {"container": "api-1", "line": "ERROR request 456 failed"},
+                ],
+            }
         if path == "/v1/database/diagnose":
             return {"ok": True, "signals": {"db.lock_waits": 2}}
         return {"ok": True, "containers": [{"name": "api-1", "cpu_percent": 12.0}]}
