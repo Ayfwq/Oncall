@@ -80,9 +80,9 @@ fi
 
 RECREATE=()
 if [ "$NEED_BACKEND_BUILD" = 1 ] || [ "$NEED_BACKEND_RESTART" = 1 ]; then
-  # Recreate every backend process, including notifications. Recreate the
-  # frontend proxy too so nginx resolves the API container's new address.
-  RECREATE+=(api notification-worker agent-worker rag-worker frontend prometheus alertmanager)
+  # Recreate every backend process, including notifications, and the frontend
+  # proxy. Monitoring services do not need a restart for application changes.
+  RECREATE+=(api notification-worker agent-worker rag-worker frontend)
 elif [ "$NEED_FRONTEND_BUILD" = 1 ]; then
   RECREATE+=(frontend)
 fi
