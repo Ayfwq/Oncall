@@ -18,7 +18,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.api.deps import current_user
@@ -54,9 +54,9 @@ from oncall.infrastructure.db.models import (
     Diagnosis,
     Incident,
     IncidentEvidence,
+    KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeDocumentVersion,
-    KnowledgeChunk,
     MonitoredServer,
     Notification,
     Project,
@@ -470,9 +470,14 @@ async def patch_conversation(
 
 @app.delete("/api/conversations/{cid}")
 async def delete_conversation(
-    cid: str, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+    cid: str,
+    request: Request,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
 ):
-    if not await ConversationService(db).delete(_uuid(cid), user.id):
+    if not await ConversationService(db).delete(
+        _uuid(cid), user.id, getattr(request.app.state, "checkpointer", None)
+    ):
         raise HTTPException(404, "not found")
     return {"ok": True}
 
@@ -1033,6 +1038,7 @@ async def list_incidents(user=Depends(current_user), db: AsyncSession = Depends(
 @app.delete("/api/incidents")
 async def delete_incidents(
     dto: IncidentBatchDeleteDTO,
+    request: Request,
     user=Depends(current_user),
     db: AsyncSession = Depends(get_session),
 ):
@@ -1050,7 +1056,9 @@ async def delete_incidents(
         raise HTTPException(404, "one or more incidents not found")
     from oncall.application.incident_service import IncidentService
 
-    deleted = await IncidentService(db).delete_many(ids)
+    deleted = await IncidentService(db).delete_many(
+        ids, getattr(request.app.state, "checkpointer", None)
+    )
     return {"ok": True, "deleted": deleted}
 
 
@@ -1118,7 +1126,10 @@ async def incident_detail(
 
 @app.delete("/api/incidents/{iid}")
 async def delete_incident(
-    iid: str, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+    iid: str,
+    request: Request,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
 ):
     from oncall.application.incident_service import IncidentService
 
@@ -1129,7 +1140,9 @@ async def delete_incident(
     )
     if not inc:
         raise HTTPException(404, "not found")
-    await IncidentService(db).delete(inc.id)
+    await IncidentService(db).delete(
+        inc.id, getattr(request.app.state, "checkpointer", None)
+    )
     return {"ok": True}
 
 
@@ -1428,10 +1441,24 @@ async def delete_document(
         logger.exception("failed to remove knowledge vectors document=%s", doc.id)
         raise HTTPException(503, "知识库索引暂时不可用，请稍后重试") from exc
     roots = {__import__("pathlib").Path(v.raw_path).parent.parent for v in versions if v.raw_path}
+    version_ids = [str(version.id) for version in versions]
+    if version_ids:
+        # Durable RAG jobs refer to versions through JSON, so they are invisible
+        # to foreign-key cascades and would otherwise retry against deleted rows.
+        await db.execute(
+            delete(BackgroundJob).where(
+                BackgroundJob.payload["version_id"].astext.in_(version_ids)
+            )
+        )
     await db.delete(doc)
     await db.commit()
     for root in roots:
-        shutil.rmtree(root, ignore_errors=True)
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception("failed to remove knowledge source files root=%s", root)
     return {"ok": True}
 
 

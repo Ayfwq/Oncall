@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.bootstrap.config import get_settings
@@ -425,13 +425,32 @@ class IncidentService:
         await self.session.commit()
         return incident
 
-    async def delete(self, incident_id: UUID) -> bool:
+    async def _delete_conversation_threads(self, incident_ids: list[UUID], checkpointer) -> list[UUID]:
+        conversation_ids = list(
+            (
+                await self.session.scalars(
+                    select(Conversation.id).where(Conversation.incident_id.in_(incident_ids))
+                )
+            ).all()
+        )
+        if checkpointer is not None:
+            for conversation_id in conversation_ids:
+                await checkpointer.adelete_thread(str(conversation_id))
+        return conversation_ids
+
+    async def delete(self, incident_id: UUID, checkpointer=None) -> bool:
         incident = await self.session.get(Incident, incident_id)
         if not incident:
             return False
+        conversation_ids = await self._delete_conversation_threads([incident_id], checkpointer)
         await self.session.execute(
             delete(BackgroundJob).where(
-                BackgroundJob.payload["incident_id"].astext == str(incident_id)
+                or_(
+                    BackgroundJob.payload["incident_id"].astext == str(incident_id),
+                    BackgroundJob.payload["conversation_id"].astext.in_(
+                        [str(item) for item in conversation_ids]
+                    ),
+                )
             )
         )
         await self.session.execute(
@@ -441,15 +460,21 @@ class IncidentService:
         await self.session.commit()
         return True
 
-    async def delete_many(self, incident_ids: list[UUID]) -> int:
+    async def delete_many(self, incident_ids: list[UUID], checkpointer=None) -> int:
         """Delete a validated batch of incidents in one transaction."""
         ids = list(dict.fromkeys(incident_ids))
         if not ids:
             return 0
+        conversation_ids = await self._delete_conversation_threads(ids, checkpointer)
         id_strings = [str(x) for x in ids]
         await self.session.execute(
             delete(BackgroundJob).where(
-                BackgroundJob.payload["incident_id"].astext.in_(id_strings)
+                or_(
+                    BackgroundJob.payload["incident_id"].astext.in_(id_strings),
+                    BackgroundJob.payload["conversation_id"].astext.in_(
+                        [str(item) for item in conversation_ids]
+                    ),
+                )
             )
         )
         await self.session.execute(delete(Conversation).where(Conversation.incident_id.in_(ids)))

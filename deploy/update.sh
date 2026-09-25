@@ -92,5 +92,13 @@ fi
 
 "${COMPOSE[@]}" up -d
 "${COMPOSE[@]}" ps
+
+# Remove only stopped migration containers and dangling images carrying this
+# repository's OCI source label. Docker's default image-prune scope is dangling
+# images; the label keeps unrelated projects on the shared host untouched.
+"${COMPOSE[@]}" rm --force migrate
+docker image prune --force \
+  --filter "label=org.opencontainers.image.source=https://github.com/Ayfwq/Oncall"
+
 commit_stamps
 echo "==> 更新完成"

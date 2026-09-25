@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from uuid import UUID
 
 from oncall.bootstrap.config import get_settings
@@ -15,16 +16,18 @@ logger = logging.getLogger(__name__)
 
 async def loop():
     s = get_settings()
-    reconciled = False
+    last_reconciled_at = 0.0
+    reconcile_interval_seconds = 300
     while True:
         did_work = False
         try:
             async with SessionFactory() as db:
                 ingestor = KnowledgeIngestor(db)
-                if not reconciled:
+                now = time.monotonic()
+                if now - last_reconciled_at >= reconcile_interval_seconds:
                     stats = await ingestor.reconcile_index()
                     logger.info("rag index reconciled stats=%s", stats)
-                    reconciled = True
+                    last_reconciled_at = time.monotonic()
 
                 q = JobQueue(db)
                 job = await q.claim(["rag_ingest", "knowledge_reindex"], s.job_lease_seconds)
@@ -44,7 +47,7 @@ async def loop():
             # A transient database/Milvus/provider outage must not permanently
             # stop ingestion.  The durable job remains pending/running and is
             # reclaimed after its lease expires.
-            reconciled = False
+            last_reconciled_at = 0.0
             logger.exception("rag worker loop iteration failed")
             await asyncio.sleep(max(1.0, s.job_poll_seconds))
         if not did_work:

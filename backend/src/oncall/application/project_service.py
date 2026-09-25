@@ -4,7 +4,7 @@ import logging
 from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.application.dtos import (
@@ -18,6 +18,8 @@ from oncall.application.dtos import (
 )
 from oncall.bootstrap.config import get_settings
 from oncall.infrastructure.db.models import (
+    BackgroundJob,
+    Incident,
     MonitoredServer,
     Project,
     ProjectDatabaseProfile,
@@ -166,6 +168,19 @@ class ProjectService:
         project = await self.get(project_id, user_id)
         if not project:
             return False
+        incident_ids = list(
+            (
+                await self.session.scalars(
+                    select(Incident.id).where(Incident.project_id == project.id)
+                )
+            ).all()
+        )
+        if incident_ids:
+            await self.session.execute(
+                delete(BackgroundJob).where(
+                    BackgroundJob.payload["incident_id"].astext.in_([str(x) for x in incident_ids])
+                )
+            )
         await self.session.delete(project)
         await self.session.commit()
         await self._reconcile_prometheus()

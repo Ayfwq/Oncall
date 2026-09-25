@@ -3,10 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from oncall.infrastructure.db.models import Conversation, ConversationSummary, Message
+from oncall.infrastructure.db.models import (
+    BackgroundJob,
+    Conversation,
+    ConversationSummary,
+    Message,
+)
 
 
 class ConversationService:
@@ -117,10 +122,19 @@ class ConversationService:
         await self.session.refresh(c)
         return c
 
-    async def delete(self, conversation_id: UUID, user_id: UUID) -> bool:
+    async def delete(self, conversation_id: UUID, user_id: UUID, checkpointer=None) -> bool:
         c = await self.get(conversation_id, user_id)
         if not c:
             return False
+        await self.session.execute(
+            delete(BackgroundJob).where(
+                BackgroundJob.payload["conversation_id"].astext == str(c.id)
+            )
+        )
+        # LangGraph stores state by thread_id outside the conversations table,
+        # so the SQL foreign-key cascades cannot remove it for us.
+        if checkpointer is not None:
+            await checkpointer.adelete_thread(str(c.id))
         await self.session.delete(c)
         await self.session.commit()
         return True

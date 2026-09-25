@@ -100,7 +100,8 @@ def main() -> int:
     os.chdir(root)
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
     print(f"==> connecting {USER}@{HOST} ...")
     client.connect(HOST, username=USER, password=PWD, timeout=20)
     sftp = client.open_sftp()

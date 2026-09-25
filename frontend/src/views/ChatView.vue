@@ -276,14 +276,20 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
                           <span v-if="citationDetail(citation)?.heading_path.length">章节：{{ citationDetail(citation)?.heading_path.join(' / ') }}</span>
                           <span>分块：{{ (citationDetail(citation)?.chunk_index || 0) + 1 }}</span>
                         </div>
-                        <div class="citation-source-label">命中的原文</div>
+                        <div class="citation-source-label">命中分块 · 第 {{ (citationDetail(citation)?.chunk_index || 0) + 1 }} 块</div>
                         <div class="citation-source-text">{{ citationDetail(citation)?.content }}</div>
                         <div v-if="citationDetail(citation)?.truncated" class="citation-loading">原文较长，当前仅展示前 24000 个字符。</div>
                         <details v-if="citationDetail(citation)?.neighbors.length" class="citation-neighbors">
-                          <summary>查看相邻知识分块</summary>
-                          <div v-for="neighbor in citationDetail(citation)?.neighbors || []" :key="neighbor.chunk_id" class="citation-neighbor">
-                            <div><b>{{ neighbor.heading_path.join(' / ') || `分块 ${neighbor.chunk_index + 1}` }}</b><span v-if="neighbor.page_range"> · 第 {{ neighbor.page_range }} 页</span></div>
+                          <summary>相邻分块 · {{ citationDetail(citation)?.neighbors.length }} 块</summary>
+                          <div class="citation-neighbor-list">
+                          <article v-for="neighbor in citationDetail(citation)?.neighbors || []" :key="neighbor.chunk_id" class="citation-neighbor">
+                            <div class="citation-neighbor-head">
+                              <span class="citation-neighbor-position">{{ neighbor.chunk_index < (citationDetail(citation)?.chunk_index || 0) ? '上一块' : '下一块' }} · 第 {{ neighbor.chunk_index + 1 }} 块</span>
+                              <b>{{ neighbor.heading_path.join(' / ') || '无章节标题' }}</b>
+                              <span v-if="neighbor.page_range" class="citation-neighbor-page">第 {{ neighbor.page_range }} 页</span>
+                            </div>
                             <p>{{ neighbor.content }}</p>
+                          </article>
                           </div>
                         </details>
                       </template>
