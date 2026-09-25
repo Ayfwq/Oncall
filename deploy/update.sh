@@ -46,9 +46,17 @@ NEED_MIGRATE=0
 # this checksum so description/entry-point metadata changes do not trigger a
 # multi-minute Torch/Docling rebuild.
 if files_changed deps.backend Dockerfile.backend uv.lock .dockerignore; then
-  echo "==> backend 依赖/镜像定义变化：重建后端镜像（国内镜像加速）"
-  NEED_BACKEND_BUILD=1
-  NEED_MIGRATE=1
+  # On an already deployed host, the first run may have no checksum file at
+  # all. If the backend runtime image exists, seed the baseline instead of
+  # redownloading the large Torch/Docling dependency set. Subsequent changes
+  # to these files still trigger an image build.
+  if [ ! -f "$STAMP/deps.backend" ] && docker image inspect oncall-ai-sre-backend:latest >/dev/null 2>&1; then
+    echo "==> 后端依赖校验基线缺失，复用服务器现有镜像"
+  else
+    echo "==> backend 依赖/镜像定义变化：重建后端镜像（国内镜像加速）"
+    NEED_BACKEND_BUILD=1
+    NEED_MIGRATE=1
+  fi
 fi
 
 if files_changed deps.frontend Dockerfile.frontend frontend/package.json frontend/package-lock.json; then
