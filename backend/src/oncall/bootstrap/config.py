@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import re
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from dotenv import dotenv_values
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     secret_master_key: str = ""
     model_provider: str = "openai-compatible"
+    model_display_name: str = "大语言模型"
     model_base_url: str = "https://api.siliconflow.cn/v1"
     model_api_key: str = ""
     model_name: str = "deepseek-ai/DeepSeek-V4-Flash"
@@ -114,8 +115,35 @@ def update_env_values(values: dict[str, str]) -> None:
     env_path.write_text(content, encoding="utf-8", newline="\n")
 
 
-@lru_cache(maxsize=1)
+_cached_settings: Settings | None = None
+_cached_settings_mtime_ns: int | None = None
+
+
 def get_settings() -> Settings:
-    settings = Settings()
-    settings.ensure_dirs()
-    return settings
+    """Cache settings until the shared .env changes, including across workers.
+
+    Docker Compose also injects ``env_file`` values into each process at
+    container startup.  Normal BaseSettings precedence would keep those stale
+    process values above a subsequently edited bind-mounted .env.  Explicit
+    init values from the shared file deliberately win here, so a model switch
+    made in the UI reaches API, Agent and RAG workers without container restarts.
+    """
+    global _cached_settings, _cached_settings_mtime_ns
+    env_file = Path(".env")
+    try:
+        mtime_ns = env_file.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = None
+    if _cached_settings is None or mtime_ns != _cached_settings_mtime_ns:
+        file_values = dotenv_values(env_file) if env_file.exists() else {}
+        overrides = {
+            field_name: file_values[env_key]
+            for field_name in Settings.model_fields
+            if (env_key := f"ONCALL_{field_name.upper()}") in file_values
+            and file_values[env_key] is not None
+        }
+        settings = Settings(**overrides)
+        settings.ensure_dirs()
+        _cached_settings = settings
+        _cached_settings_mtime_ns = mtime_ns
+    return _cached_settings

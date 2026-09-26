@@ -281,6 +281,40 @@ class FeishuSettingsDTO(BaseModel):
     default_receive_id_type: Literal["chat_id", "open_id", "user_id", "union_id"] = "chat_id"
 
 
+class ModelSettingsDTO(BaseModel):
+    model_provider: Literal["openai-compatible", "mock"] = "openai-compatible"
+    model_display_name: str = Field(default="大语言模型", min_length=1, max_length=100)
+    model_base_url: str = Field(min_length=1, max_length=500)
+    model_name: str = Field(min_length=1, max_length=200)
+    model_api_key: str | None = Field(default=None, max_length=2000)
+    embedding_base_url: str = Field(min_length=1, max_length=500)
+    embedding_model: str = Field(min_length=1, max_length=200)
+    embedding_api_key: str | None = Field(default=None, max_length=2000)
+    rerank_base_url: str = Field(min_length=1, max_length=500)
+    rerank_model: str = Field(min_length=1, max_length=200)
+    rerank_api_key: str | None = Field(default=None, max_length=2000)
+
+
+class ModelProbeDTO(BaseModel):
+    service: Literal["llm", "embedding", "rerank"]
+    base_url: str = Field(min_length=1, max_length=1000)
+    model: str = Field(default="", max_length=300)
+    api_key: str | None = Field(default=None, max_length=2000)
+    profile_id: UUID | None = None
+
+
+class ModelProfileDTO(BaseModel):
+    kind: Literal["llm", "embedding", "rerank"]
+    name: str = Field(min_length=1, max_length=120)
+    provider: Literal["openai-compatible", "mock"] = "openai-compatible"
+    base_url: str = Field(min_length=1, max_length=1000)
+    model: str = Field(min_length=1, max_length=300)
+    api_key: str | None = Field(default=None, max_length=2000)
+    embedding_dimension: int | None = Field(default=None, ge=1, le=65536)
+    clear_api_key: bool = False
+    activate: bool = False
+
+
 class SnapshotDTO(BaseModel):
     project_id: UUID
     observed_at: datetime

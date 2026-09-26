@@ -31,6 +31,9 @@ from oncall.application.dtos import (
     FeishuSettingsDTO,
     IncidentBatchDeleteDTO,
     LogSourceDTO,
+    ModelSettingsDTO,
+    ModelProbeDTO,
+    ModelProfileDTO,
     MetricsApplyDTO,
     MetricsDiscoverDTO,
     MetricsSourceDTO,
@@ -46,6 +49,7 @@ from oncall.application.server_service import MonitoredServerService, to_dto
 from oncall.application.workspace_service import ensure_local_user
 from oncall.bootstrap.config import get_settings, update_env_values
 from oncall.bootstrap.logging import configure_logging, set_request_id
+from oncall.security.crypto import SecretBox
 from oncall.infrastructure.db.models import (
     AgentRun,
     AlertmanagerAlert,
@@ -58,6 +62,7 @@ from oncall.infrastructure.db.models import (
     KnowledgeDocument,
     KnowledgeDocumentVersion,
     MonitoredServer,
+    ModelProfile,
     Notification,
     Project,
     RetrievalTrace,
@@ -1677,6 +1682,459 @@ async def settings_readiness(user=Depends(current_user)):
     }
 
 
+@app.get("/api/settings/models")
+async def model_settings(user=Depends(current_user)):
+    return {
+        "model_provider": s.model_provider,
+        "model_display_name": s.model_display_name,
+        "model_base_url": s.model_base_url,
+        "model_name": s.model_name,
+        "model_api_key_configured": bool(s.model_api_key),
+        "embedding_base_url": s.embedding_base_url,
+        "embedding_model": s.embedding_model,
+        "embedding_api_key_configured": bool(s.embedding_api_key),
+        "rerank_base_url": s.rerank_base_url,
+        "rerank_model": s.rerank_model,
+        "rerank_api_key_configured": bool(s.rerank_api_key),
+    }
+
+
+@app.put("/api/settings/models")
+async def update_model_settings(dto: ModelSettingsDTO, user=Depends(current_user)):
+    values = {
+        "ONCALL_MODEL_PROVIDER": dto.model_provider,
+        "ONCALL_MODEL_DISPLAY_NAME": dto.model_display_name.strip(),
+        "ONCALL_MODEL_BASE_URL": dto.model_base_url.strip().rstrip("/"),
+        "ONCALL_MODEL_NAME": dto.model_name.strip(),
+        "ONCALL_EMBEDDING_BASE_URL": dto.embedding_base_url.strip().rstrip("/"),
+        "ONCALL_EMBEDDING_MODEL": dto.embedding_model.strip(),
+        "ONCALL_RERANK_BASE_URL": dto.rerank_base_url.strip(),
+        "ONCALL_RERANK_MODEL": dto.rerank_model.strip(),
+    }
+    secrets = {
+        "model_api_key": "ONCALL_MODEL_API_KEY",
+        "embedding_api_key": "ONCALL_EMBEDDING_API_KEY",
+        "rerank_api_key": "ONCALL_RERANK_API_KEY",
+    }
+    for field, env_key in secrets.items():
+        value = getattr(dto, field)
+        if value and value.strip():
+            values[env_key] = value.strip()
+
+    update_env_values(values)
+    # Keep this API process in sync immediately; local workers observe the
+    # changed .env mtime when they next load model settings.
+    for field, env_key in {
+        "model_provider": "ONCALL_MODEL_PROVIDER",
+        "model_display_name": "ONCALL_MODEL_DISPLAY_NAME",
+        "model_base_url": "ONCALL_MODEL_BASE_URL",
+        "model_name": "ONCALL_MODEL_NAME",
+        "embedding_base_url": "ONCALL_EMBEDDING_BASE_URL",
+        "embedding_model": "ONCALL_EMBEDDING_MODEL",
+        "rerank_base_url": "ONCALL_RERANK_BASE_URL",
+        "rerank_model": "ONCALL_RERANK_MODEL",
+    }.items():
+        setattr(s, field, values[env_key])
+    for field, env_key in secrets.items():
+        if env_key in values:
+            setattr(s, field, values[env_key])
+    return {
+        "ok": True,
+        "message": "模型配置已保存并立即生效。",
+        "worker_restart_required": False,
+    }
+
+
+def _model_profile_box() -> SecretBox:
+    return SecretBox(get_settings().secret_master_key)
+
+
+def _model_profile_view(row: ModelProfile) -> dict:
+    return {
+        "id": str(row.id),
+        "kind": row.kind,
+        "name": row.name,
+        "provider": row.provider,
+        "base_url": row.base_url,
+        "model": row.model,
+        "api_key_configured": bool(row.encrypted_api_key),
+        "embedding_dimension": (row.capabilities or {}).get("embedding_dimension"),
+        "active": row.enabled,
+        "created_at": row.created_at,
+    }
+
+
+def _current_model_config() -> dict:
+    # This is the runtime config loaded from .env. It is intentionally not
+    # presented as a saved profile: only profiles added by the user are history.
+    current = get_settings()
+    return {
+        "llm": {
+            "kind": "llm", "name": current.model_display_name, "provider": current.model_provider,
+            "base_url": current.model_base_url, "model": current.model_name,
+            "api_key_configured": bool(current.model_api_key),
+        },
+        "embedding": {
+            "kind": "embedding", "name": "Embedding", "provider": "openai-compatible",
+            "base_url": current.embedding_base_url, "model": current.embedding_model,
+            "api_key_configured": bool(current.embedding_api_key),
+            "embedding_dimension": current.embedding_dimension,
+        },
+        "rerank": {
+            "kind": "rerank", "name": "Rerank", "provider": "openai-compatible",
+            "base_url": current.rerank_base_url, "model": current.rerank_model,
+            "api_key_configured": bool(current.rerank_api_key),
+        },
+    }
+
+
+def _apply_model_profile(row: ModelProfile) -> None:
+    key = _model_profile_box().decrypt(row.encrypted_api_key)
+    if row.kind == "llm":
+        values = {
+            "ONCALL_MODEL_PROVIDER": row.provider,
+            "ONCALL_MODEL_DISPLAY_NAME": row.name,
+            "ONCALL_MODEL_BASE_URL": row.base_url,
+            "ONCALL_MODEL_NAME": row.model,
+            "ONCALL_MODEL_API_KEY": key,
+        }
+        for field, value in {
+            "model_provider": row.provider, "model_display_name": row.name,
+            "model_base_url": row.base_url, "model_name": row.model, "model_api_key": key,
+        }.items():
+            setattr(s, field, value)
+    elif row.kind == "embedding":
+        dimension = int((row.capabilities or {}).get("embedding_dimension") or s.embedding_dimension)
+        values = {
+            "ONCALL_EMBEDDING_BASE_URL": row.base_url,
+            "ONCALL_EMBEDDING_MODEL": row.model,
+            "ONCALL_EMBEDDING_API_KEY": key,
+            "ONCALL_EMBEDDING_DIMENSION": str(dimension),
+        }
+        for field, value in {
+            "embedding_base_url": row.base_url, "embedding_model": row.model,
+            "embedding_api_key": key, "embedding_dimension": dimension,
+        }.items():
+            setattr(s, field, value)
+    else:
+        values = {
+            "ONCALL_RERANK_BASE_URL": row.base_url,
+            "ONCALL_RERANK_MODEL": row.model,
+            "ONCALL_RERANK_API_KEY": key,
+        }
+        for field, value in {
+            "rerank_base_url": row.base_url, "rerank_model": row.model, "rerank_api_key": key,
+        }.items():
+            setattr(s, field, value)
+    update_env_values(values)
+
+
+async def _activate_model_profile(db: AsyncSession, row: ModelProfile) -> int:
+    reindex_queued = 0
+    previous_embedding_dimension = get_settings().embedding_dimension
+    if row.kind == "embedding" and not (row.capabilities or {}).get("embedding_dimension"):
+        raise HTTPException(400, "请先测试 Embedding 连接；系统需要识别向量维度后才能启用。")
+    db.add(row)
+    await db.flush()
+    active_rows = list((await db.scalars(
+        select(ModelProfile).where(ModelProfile.kind == row.kind, ModelProfile.enabled.is_(True))
+    )).all())
+    for active in active_rows:
+        if active.id != row.id:
+            active.enabled = False
+    await db.flush()
+    row.enabled = True
+    await db.commit()
+    _apply_model_profile(row)
+    if row.kind == "embedding":
+        new_dimension = int((row.capabilities or {})["embedding_dimension"])
+        if new_dimension != previous_embedding_dimension:
+            from uuid import uuid4
+
+            from oncall.jobs.queue import JobQueue
+            from oncall.rag.milvus_store import MilvusKnowledgeIndex
+
+            # Milvus vector dimensions are fixed at collection creation. The
+            # index is derived data; PostgreSQL documents remain the source of
+            # truth and are queued for a complete rebuild at the new dimension.
+            await MilvusKnowledgeIndex().reset_collection()
+            version_ids = list((await db.scalars(
+                select(KnowledgeDocument.active_version_id).where(
+                    KnowledgeDocument.active_version_id.is_not(None)
+                )
+            )).all())
+            queue = JobQueue(db)
+            for version_id in version_ids:
+                await queue.enqueue(
+                    "knowledge_reindex",
+                    {"version_id": str(version_id)},
+                    idempotency_key=f"embedding-reindex:{new_dimension}:{version_id}:{uuid4()}",
+                    priority=20,
+                    commit=False,
+                )
+            await db.commit()
+            reindex_queued = len(version_ids)
+    return reindex_queued
+
+
+async def _profile_api_key(dto: ModelProbeDTO, db: AsyncSession) -> str:
+    key = (dto.api_key or "").strip()
+    if key:
+        return key
+    if dto.profile_id:
+        profile = await db.get(ModelProfile, dto.profile_id)
+        if profile and profile.kind == dto.service:
+            return _model_profile_box().decrypt(profile.encrypted_api_key)
+    current = get_settings()
+    return {
+        "llm": current.model_api_key,
+        "embedding": current.embedding_api_key,
+        "rerank": current.rerank_api_key,
+    }[dto.service]
+
+
+@app.get("/api/model-profiles")
+async def list_model_profiles(user=Depends(current_user), db: AsyncSession = Depends(get_session)):
+    rows = list((await db.scalars(select(ModelProfile).order_by(ModelProfile.created_at.desc()))).all())
+    return {"profiles": [_model_profile_view(row) for row in rows], "current": _current_model_config()}
+
+
+@app.post("/api/model-profiles")
+async def create_model_profile(
+    dto: ModelProfileDTO, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    if dto.kind != "llm" and dto.provider == "mock":
+        raise HTTPException(400, "Mock 类型只适用于大语言模型")
+    row = ModelProfile(
+        kind=dto.kind,
+        name=dto.name.strip(),
+        provider=dto.provider,
+        base_url=dto.base_url.strip().rstrip("/"),
+        model=dto.model.strip(),
+        encrypted_api_key=_model_profile_box().encrypt(dto.api_key.strip()) if dto.api_key and dto.api_key.strip() else None,
+        capabilities={"embedding_dimension": dto.embedding_dimension} if dto.kind == "embedding" and dto.embedding_dimension else {},
+        enabled=False,
+    )
+    if dto.activate:
+        reindex_queued = await _activate_model_profile(db, row)
+    else:
+        reindex_queued = 0
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return _model_profile_view(row) | {"reindex_queued": reindex_queued}
+
+
+@app.put("/api/model-profiles/{profile_id}")
+async def update_model_profile(
+    profile_id: str,
+    dto: ModelProfileDTO,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    row = await db.get(ModelProfile, _uuid(profile_id, "model profile"))
+    if not row:
+        raise HTTPException(404, "model profile not found")
+    if dto.kind != "llm" and dto.provider == "mock":
+        raise HTTPException(400, "Mock 类型只适用于大语言模型")
+    if dto.kind != row.kind:
+        raise HTTPException(400, "模型用途不能修改；请新建对应用途的模型连接。")
+    row.kind = dto.kind
+    row.name = dto.name.strip()
+    row.provider = dto.provider
+    row.base_url = dto.base_url.strip().rstrip("/")
+    row.model = dto.model.strip()
+    row.capabilities = (
+        {"embedding_dimension": dto.embedding_dimension}
+        if row.kind == "embedding" and dto.embedding_dimension
+        else (row.capabilities or {})
+    )
+    if dto.clear_api_key:
+        row.encrypted_api_key = None
+    elif dto.api_key and dto.api_key.strip():
+        row.encrypted_api_key = _model_profile_box().encrypt(dto.api_key.strip())
+    activate = dto.activate or row.enabled
+    if activate:
+        reindex_queued = await _activate_model_profile(db, row)
+    else:
+        reindex_queued = 0
+        await db.commit()
+        await db.refresh(row)
+    return _model_profile_view(row) | {"reindex_queued": reindex_queued}
+
+
+@app.post("/api/model-profiles/{profile_id}/activate")
+async def activate_model_profile(
+    profile_id: str, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    row = await db.get(ModelProfile, _uuid(profile_id, "model profile"))
+    if not row:
+        raise HTTPException(404, "model profile not found")
+    reindex_queued = await _activate_model_profile(db, row)
+    message = f"已切换当前{ {'llm': '大语言模型', 'embedding': 'Embedding 模型', 'rerank': 'Rerank 模型'}[row.kind] }。"
+    if reindex_queued:
+        message += f" 已安排 {reindex_queued} 个知识文档重新索引。"
+    return {"ok": True, "message": message, "reindex_queued": reindex_queued}
+
+
+@app.delete("/api/model-profiles/{profile_id}")
+async def delete_model_profile(
+    profile_id: str, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    row = await db.get(ModelProfile, _uuid(profile_id, "model profile"))
+    if not row:
+        raise HTTPException(404, "model profile not found")
+    if row.enabled:
+        raise HTTPException(409, "当前正在使用此模型；请先切换到其他配置，再删除。")
+    await db.delete(row)
+    await db.commit()
+    return {"ok": True}
+
+
+def _model_api_error(status_code: int) -> str:
+    if status_code in (401, 403):
+        reason = "API Key 无效或没有调用权限"
+    elif status_code == 402:
+        reason = "服务商账户余额或计费状态异常"
+    elif status_code == 429:
+        reason = "调用频率受限或模型额度不足"
+    elif status_code == 404:
+        reason = "接口地址或模型名称不存在"
+    elif status_code >= 500:
+        reason = "模型服务商暂时不可用"
+    else:
+        reason = "请求配置错误"
+    return f"模型服务异常：{reason}（HTTP {status_code}）"
+
+
+def _model_endpoints(base_url: str, suffix: str) -> list[str]:
+    base = base_url.strip().rstrip("/")
+    paths = [base]
+    if not base.endswith("/v1"):
+        paths.append(base + "/v1")
+    return [f"{path}/{suffix.lstrip('/')}" for path in paths]
+
+
+@app.post("/api/settings/models/test")
+async def test_model_connection(
+    dto: ModelProbeDTO, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    key = await _profile_api_key(dto, db)
+    if not key:
+        return {"ok": False, "message": "请先填写该模型服务的 API Key。"}
+    headers = {"Authorization": f"Bearer {key}"}
+    try:
+        embedding_dimension = None
+        async with httpx.AsyncClient(timeout=20) as client:
+            if dto.service == "llm":
+                if not dto.model.strip():
+                    return {"ok": False, "message": "请先选择或填写模型名称。"}
+                response = None
+                for endpoint in _model_endpoints(dto.base_url, "chat/completions"):
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json={
+                            "model": dto.model.strip(),
+                            "messages": [{"role": "user", "content": "Reply with OK."}],
+                            "max_tokens": 4,
+                            "temperature": 0,
+                        },
+                    )
+                    if response.status_code != 404:
+                        break
+            elif dto.service == "embedding":
+                if not dto.model.strip():
+                    return {"ok": False, "message": "请先选择或填写 Embedding 模型名称。"}
+                response = None
+                for endpoint in _model_endpoints(dto.base_url, "embeddings"):
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json={"model": dto.model.strip(), "input": ["connection check"]},
+                    )
+                    if response.status_code != 404:
+                        break
+            else:
+                if not dto.model.strip():
+                    return {"ok": False, "message": "请先选择或填写 Rerank 模型名称。"}
+                response = await client.post(
+                    dto.base_url.strip(),
+                    headers=headers,
+                    json={
+                        "model": dto.model.strip(),
+                        "query": "connection check",
+                        "documents": ["connection check"],
+                        "top_n": 1,
+                    },
+                )
+            response.raise_for_status()
+            if dto.service == "embedding":
+                payload = response.json()
+                vectors = payload.get("data", []) if isinstance(payload, dict) else []
+                vector = vectors[0].get("embedding") if vectors and isinstance(vectors[0], dict) else None
+                if not isinstance(vector, list) or not vector:
+                    return {"ok": False, "message": "Embedding 服务已响应，但没有返回有效向量。"}
+                embedding_dimension = len(vector)
+        return {
+            "ok": True,
+            "message": (
+                f"连接成功，已识别向量维度 {embedding_dimension}。"
+                if embedding_dimension
+                else "连接成功，模型服务已响应。"
+            ),
+            "embedding_dimension": embedding_dimension,
+        }
+    except httpx.HTTPStatusError as exc:
+        return {"ok": False, "message": _model_api_error(exc.response.status_code)}
+    except httpx.TimeoutException:
+        return {"ok": False, "message": "模型服务异常：连接超时，请检查 Endpoint 和网络。"}
+    except httpx.RequestError:
+        return {"ok": False, "message": "模型服务异常：无法连接，请检查 Endpoint 和网络。"}
+    except Exception:
+        return {"ok": False, "message": "模型服务异常：测试请求失败，请检查 Endpoint、模型名称和请求格式。"}
+
+
+@app.post("/api/settings/models/discover")
+async def discover_models(
+    dto: ModelProbeDTO, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    key = await _profile_api_key(dto, db)
+    if not key:
+        return {"ok": False, "message": "请先填写该模型服务的 API Key。", "models": []}
+    try:
+        discover_base = dto.base_url.strip().rstrip("/")
+        if dto.service == "rerank" and discover_base.endswith("/rerank"):
+            discover_base = discover_base[: -len("/rerank")]
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = None
+            for endpoint in _model_endpoints(discover_base, "models"):
+                response = await client.get(endpoint, headers={"Authorization": f"Bearer {key}"})
+                if response.status_code != 404:
+                    break
+            response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        names = sorted(
+            {
+                str(item.get("id") or item.get("name") or "").strip()
+                for item in data
+                if isinstance(item, dict) and (item.get("id") or item.get("name"))
+            }
+        )
+        return {
+            "ok": True,
+            "models": names,
+            "message": f"发现 {len(names)} 个模型。" if names else "服务响应正常，但没有返回可选模型。",
+        }
+    except httpx.HTTPStatusError as exc:
+        return {"ok": False, "message": _model_api_error(exc.response.status_code), "models": []}
+    except httpx.TimeoutException:
+        return {"ok": False, "message": "模型服务异常：发现模型请求超时。", "models": []}
+    except httpx.RequestError:
+        return {"ok": False, "message": "模型服务异常：无法连接，请检查 Endpoint 和网络。", "models": []}
+    except Exception:
+        return {"ok": False, "message": "发现模型失败，请确认服务商支持 OpenAI 兼容的 /models 接口。", "models": []}
 @app.get("/api/settings/feishu")
 async def feishu_settings(user=Depends(current_user)):
     return {

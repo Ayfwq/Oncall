@@ -40,7 +40,7 @@ function metricValueText(key: string, value: unknown) {
   if (key === 'db.replication_lag_seconds') return `${numberText(n)} 秒`
   return numberText(n)
 }
-function evidenceTitle(e: IncidentDetail['evidence'][number]) { return e.type === 'alertmanager' ? 'Prometheus 触发告警' : toolLabel(e.source) }
+function evidenceTitle(e: IncidentDetail['evidence'][number]) { return e.type === 'alertmanager' ? 'Prometheus 触发告警' : e.type === 'model_service_error' ? '大模型服务异常' : toolLabel(e.source) }
 function evidenceText(e: IncidentDetail['evidence'][number]) {
   const data = recordData(e)
   const result = resultData(e)

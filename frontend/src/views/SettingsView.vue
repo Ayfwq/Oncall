@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { FeishuReceiveType, FeishuSettings, Readiness } from '../types'
+import ModelsView from './ModelsView.vue'
 
 interface FeishuForm {
   enabled: boolean
@@ -57,17 +58,17 @@ onMounted(load)
 <template>
   <div class="page settings-page">
     <div class="page-head">
-      <div><h1>设置</h1><p class="sub">配置巡脉工作区、模型能力和飞书接入</p></div>
+      <div><h1>设置</h1><p class="sub">配置巡脉工作区、模型服务和飞书接入</p></div>
       <el-button @click="load">刷新</el-button>
     </div>
     <p v-if="error" style="color: var(--danger)">{{ error }}</p>
     <p v-if="message" style="color: var(--success)">{{ message }}</p>
 
     <div class="settings-stack settings-forms">
-      <div class="card">
-        <h3>本地工作区</h3>
-        <p class="muted">当前部署为单工作区模式，打开页面即可使用，无需登录或维护账户密码。</p>
-        <div style="margin-top: 14px"><span class="badge ok">已启用</span><span class="badge neutral" style="margin-left: 6px">免登录模式</span></div>
+      <div class="card model-settings-card">
+        <h3>模型接入</h3>
+        <p class="muted">选择当前使用的三类模型，或添加新的模型服务配置。</p>
+        <ModelsView embedded />
       </div>
 
       <div class="card">
@@ -83,8 +84,6 @@ onMounted(load)
     </div>
 
     <div class="settings-stack status-stack" v-if="readiness">
-      <div class="card"><h3>模型</h3><p class="muted" style="margin: 0">{{ readiness.llm.provider }} · {{ readiness.llm.model }}</p><div style="margin-top: 12px"><span class="badge" :class="badge(readiness.llm.configured)">{{ readiness.llm.configured ? '已连接' : '未配置' }}</span></div></div>
-      <div class="card"><h3>知识检索</h3><p class="muted" style="margin: 0">Embedding · {{ readiness.embedding.model }}</p><div style="margin-top: 12px"><span class="badge" :class="badge(readiness.embedding.configured)">{{ readiness.embedding.configured ? '已配置' : '未配置' }}</span><span class="badge" :class="badge(readiness.rerank.configured)" style="margin-left: 6px">Rerank · {{ readiness.rerank.configured ? '已配置' : '未配置' }}</span></div></div>
       <div class="card"><h3>飞书状态</h3><p class="muted" style="margin: 0">{{ readiness.feishu.enabled ? '已启用' : '未启用' }}</p><div style="margin-top: 12px"><span class="badge" :class="readiness.feishu.configured ? 'ok' : 'neutral'">{{ readiness.feishu.configured ? '凭证完整' : '未接入' }}</span></div></div>
       <div class="card"><h3>数据存储</h3><div class="kv"><span>PostgreSQL</span><span class="badge ok">已连接</span></div><div class="kv"><span>Milvus</span><span class="badge ok">已连接</span></div></div>
     </div>
@@ -92,5 +91,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.settings-page{max-width:900px}.settings-stack{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}.settings-forms{margin-bottom:18px}.settings-stack>.card{width:100%;padding:24px 26px}.settings-stack>.card h3{margin-top:0}.settings-forms :deep(.el-form){max-width:680px}.status-stack>.card{padding-top:20px;padding-bottom:20px}@media(max-width:700px){.settings-stack>.card{padding:20px 18px}}
+.settings-page{max-width:1160px}.settings-stack{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}.settings-forms{margin-bottom:18px}.settings-stack>.card{width:100%;padding:24px 26px}.settings-stack>.card h3{margin-top:0}.model-settings-card>p{margin:0 0 18px}.settings-forms :deep(.el-form){max-width:680px}.status-stack>.card{padding-top:20px;padding-bottom:20px}@media(max-width:700px){.settings-stack>.card{padding:20px 18px}}
 </style>

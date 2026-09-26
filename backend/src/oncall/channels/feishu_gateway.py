@@ -6,6 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from oncall.application.agent_service import AgentService
+from oncall.agent.model_gateway import ModelServiceError
 from oncall.application.conversation_service import ConversationService
 from oncall.application.workspace_service import ensure_local_user
 from oncall.channels.feishu_events import FeishuInboundMessage, parse_lark_message
@@ -198,7 +199,7 @@ class FeishuGateway:
                             status="pending",
                             payload={
                                 "kind": "reply",
-                                "text": f"抱歉，本次请求处理失败（{type(exc).__name__}），请稍后再试或联系管理员。",
+                                "text": str(exc) if isinstance(exc, ModelServiceError) else f"抱歉，本次请求处理失败（{type(exc).__name__}），请稍后再试或联系管理员。",
                                 "conversation_id": (str(conv.id) if conv else None),
                                 "root_id": msg.root_id or msg.message_id,
                                 "receive_id_type": "chat_id",

@@ -30,6 +30,28 @@ class ModelProvider:
         return ans
 
 
+class ModelServiceError(RuntimeError):
+    """An upstream model endpoint could not serve a model request."""
+
+    category = "model_service_unavailable"
+
+
+def _model_service_failure(status_code: int) -> str:
+    if status_code in (401, 403):
+        reason = "API Key 无效或没有调用权限"
+    elif status_code == 402:
+        reason = "服务商账户余额或计费状态异常"
+    elif status_code == 429:
+        reason = "调用频率受限或模型额度不足"
+    elif status_code == 404:
+        reason = "接口地址或模型名称不存在"
+    elif status_code >= 500:
+        reason = "服务商暂时不可用"
+    else:
+        reason = "请求配置错误"
+    return f"大模型服务异常：{reason}（HTTP {status_code}）"
+
+
 class MockProvider(ModelProvider):
     """Deterministic development provider. It proves graph/tool/persistence wiring without external API keys."""
 
@@ -239,20 +261,22 @@ class OpenAICompatibleProvider(ModelProvider):
                             "messages": messages,
                         },
                     )
-                    if r.status_code == 429 or r.status_code >= 500:
-                        last = RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:500]}")
-                        if attempt < 2:
-                            await __import__("asyncio").sleep(2**attempt)
-                            continue
                     r.raise_for_status()
                     body = r.json()
                     return str(body["choices"][0]["message"]["content"])
+            except httpx.HTTPStatusError as exc:
+                last = exc
+                if (exc.response.status_code == 429 or exc.response.status_code >= 500) and attempt < 2:
+                    await __import__("asyncio").sleep(2**attempt)
+                    continue
+                raise ModelServiceError(_model_service_failure(exc.response.status_code)) from exc
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last = exc
                 if attempt < 2:
                     await __import__("asyncio").sleep(2**attempt)
                     continue
-        raise RuntimeError(f"LLM request failed: {last}")
+        reason = "连接超时" if isinstance(last, httpx.TimeoutException) else "无法连接"
+        raise ModelServiceError(f"大模型服务异常：{reason}，请检查 Endpoint 和网络。") from last
 
     @staticmethod
     def _json_candidate(content: str) -> str:
@@ -416,13 +440,6 @@ class OpenAICompatibleProvider(ModelProvider):
                             "messages": messages,
                         },
                     ) as resp:
-                        if resp.status_code == 429 or resp.status_code >= 500:
-                            last = RuntimeError(
-                                f"LLM stream HTTP {resp.status_code}: {resp.text[:500]}"
-                            )
-                            if attempt < 2:
-                                await __import__("asyncio").sleep(2**attempt)
-                                continue
                         resp.raise_for_status()
                         async for line in resp.aiter_lines():
                             if not line or not line.startswith("data:"):
@@ -440,18 +457,25 @@ class OpenAICompatibleProvider(ModelProvider):
                                 if on_token:
                                     on_token(delta)
                 return "".join(parts).strip()
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as exc:
+            except httpx.HTTPStatusError as exc:
+                last = exc
+                if (exc.response.status_code == 429 or exc.response.status_code >= 500) and attempt < 2:
+                    await __import__("asyncio").sleep(2**attempt)
+                    continue
+                raise ModelServiceError(_model_service_failure(exc.response.status_code)) from exc
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last = exc
                 if attempt < 2:
                     await __import__("asyncio").sleep(2**attempt)
                     continue
-        raise RuntimeError(f"LLM stream answer failed: {last}")
+        reason = "连接超时" if isinstance(last, httpx.TimeoutException) else "无法连接"
+        raise ModelServiceError(f"大模型服务异常：{reason}，请检查 Endpoint 和网络。") from last
 
 
 def get_model_provider() -> ModelProvider:
     s = get_settings()
-    return (
-        MockProvider()
-        if s.model_provider == "mock" or not s.model_api_key
-        else OpenAICompatibleProvider()
-    )
+    if s.model_provider == "mock":
+        return MockProvider()
+    if not s.model_api_key:
+        raise ModelServiceError("大模型服务异常：尚未配置 API Key，请前往“模型接入”补充密钥。")
+    return OpenAICompatibleProvider()

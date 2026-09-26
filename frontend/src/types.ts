@@ -278,6 +278,23 @@ export interface FeishuSettings {
   restart_required: boolean
 }
 
+export interface ModelSettings {
+  model_provider: 'openai-compatible' | 'mock'
+  model_display_name: string
+  model_base_url: string
+  model_name: string
+  model_api_key_configured: boolean
+  model_api_key?: string
+  embedding_base_url: string
+  embedding_model: string
+  embedding_api_key_configured: boolean
+  embedding_api_key?: string
+  rerank_base_url: string
+  rerank_model: string
+  rerank_api_key_configured: boolean
+  rerank_api_key?: string
+}
+
 export interface SSEEventMap {
   status: { stage: string }
   intent_routed: { intent: string; confidence?: number; reason?: string }

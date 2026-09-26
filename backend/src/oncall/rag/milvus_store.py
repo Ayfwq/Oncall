@@ -30,6 +30,17 @@ class MilvusKnowledgeIndex:
     async def ensure(self) -> None:
         await asyncio.to_thread(self._ensure_sync)
 
+    async def reset_collection(self) -> None:
+        """Drop the derived vector index so it can be rebuilt at a new dimension."""
+        await asyncio.to_thread(self._reset_collection_sync)
+
+    def _reset_collection_sync(self) -> None:
+        with self._ensure_lock:
+            client = self._client()
+            if client.has_collection(self.collection):
+                client.drop_collection(self.collection)
+            self._ensure_done = False
+
     def _ensure_sync(self) -> None:
         with self._ensure_lock:
             if self._ensure_done:
