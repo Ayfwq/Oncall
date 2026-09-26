@@ -4,7 +4,7 @@ global:
   scrape_timeout: 10s
 
 rule_files:
-  - /prometheus-data/rules/*.yml
+  - /prometheus-data/prometheus/rules/*.yml
 
 alerting:
   alertmanagers:
@@ -15,5 +15,5 @@ scrape_configs:
   - job_name: oncall-managed-targets
     file_sd_configs:
       - files:
-          - /prometheus-data/targets/*.json
+          - /prometheus-data/prometheus/targets/*.json
         refresh_interval: 30s

@@ -168,7 +168,7 @@ services:
       - --web.enable-lifecycle
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - oncall_data:/prometheus-data
+      - oncall_data:/prometheus-data:ro
       - prometheus_data:/prometheus
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"

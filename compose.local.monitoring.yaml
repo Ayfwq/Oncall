@@ -12,7 +12,7 @@ services:
       - "19090:9090"
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./data/prometheus:/prometheus-data
+      - ./data:/prometheus-data:ro
       - oncall_local_prometheus_data:/prometheus
     depends_on:
       - alertmanager
