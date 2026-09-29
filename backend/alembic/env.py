@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 from alembic import context
-from sqlalchemy import pool
+from alembic.script import ScriptDirectory
+from sqlalchemy import inspect, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from oncall.bootstrap.config import get_settings
@@ -38,7 +39,17 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
-        context.run_migrations()
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        app_tables = set(target_metadata.tables)
+        if "alembic_version" not in tables and not (tables & app_tables):
+            # The original 0001 revision calls create_all() against current ORM
+            # metadata. On a fresh database this creates the latest schema, so
+            # replaying historical revisions would attempt to recreate tables.
+            target_metadata.create_all(connection)
+            context.get_context().stamp(ScriptDirectory.from_config(config), "head")
+        else:
+            context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
