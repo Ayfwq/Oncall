@@ -17,7 +17,18 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   exit 1
 fi
 
-git fetch --prune origin main
+git config http.version HTTP/1.1
+for attempt in 1 2 3; do
+  if git fetch --prune origin main; then
+    break
+  fi
+  if [ "$attempt" -eq 3 ]; then
+    echo "Could not fetch origin/main after 3 attempts." >&2
+    exit 1
+  fi
+  echo "GitHub fetch failed; retrying in 10 seconds (attempt $attempt/3)." >&2
+  sleep 10
+done
 if ! git merge-base --is-ancestor HEAD origin/main; then
   echo "The server checkout has diverged from origin/main; resolve it before deploying." >&2
   exit 1
