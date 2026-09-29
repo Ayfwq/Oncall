@@ -29,6 +29,7 @@ type ContextUsage = {
 const contextUsage = ref<ContextUsage | null>(null)
 const compacting = ref(false)
 const contextPercent = computed(() => Math.min(100, Math.round((contextUsage.value?.estimated_tokens || 0) / (contextUsage.value?.context_window_tokens || 64000) * 100)))
+function formatTokenCount(value?: number) { return new Intl.NumberFormat('zh-CN').format(value || 0) }
 const contextTitle = computed(() => contextUsage.value
   ? `上下文约 ${contextUsage.value.estimated_tokens} / ${contextUsage.value.context_window_tokens} token；自动压缩阈值 ${contextUsage.value.compact_at_tokens} token`
   : '正在读取上下文用量')
@@ -403,8 +404,18 @@ onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) cle
 
       <div class="composer">
         <div v-if="active" class="context-toolbar">
-          <div class="context-meter" role="progressbar" :aria-label="contextTitle" :title="contextTitle" :aria-valuenow="contextPercent" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: contextPercent + '%' }"></span></div>
-          <button class="context-compact" :disabled="compacting || busy" title="将较早对话交给模型压缩；没有可压缩内容时会提示" @click="compactContext">{{ compacting ? '压缩中…' : '手动压缩' }}</button>
+          <div class="context-summary" :title="contextTitle">
+            <span class="context-label">上下文占用</span>
+            <div class="context-meter" role="progressbar" :aria-label="contextTitle" :aria-valuenow="contextPercent" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: contextPercent + '%' }"></span></div>
+            <span class="context-value">
+              <template v-if="contextUsage"><span class="context-token-counts">{{ formatTokenCount(contextUsage.estimated_tokens) }} / {{ formatTokenCount(contextUsage.context_window_tokens) }} tokens</span><b>{{ contextPercent }}%</b></template>
+              <template v-else>正在读取…</template>
+            </span>
+          </div>
+          <button class="context-compact" :disabled="compacting || busy" :title="contextTitle + '；将较早对话交给模型压缩'" @click="compactContext">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7.5" ry="3"/><path d="M4.5 5v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3V5M4.5 11v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3v-6"/></svg>
+            <span>{{ compacting ? '压缩中…' : '手动压缩' }}</span>
+          </button>
         </div>
         <div class="composer-inner">
           <textarea v-model="input" placeholder="输入运维问题，Enter 发送 / Shift+Enter 换行" @input="autoresize" @keydown.enter.exact.prevent="onEnterKey" @keydown.ctrl.enter.prevent="onEnterKey"></textarea>
@@ -429,12 +440,12 @@ onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) cle
 .conv-icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .conv-icon:hover { background: #eaf6f1; border-color: #a9d9c7; color: var(--accent-strong); }
 .conv-icon.danger:hover { background: #fff1f0; border-color: #f2c5c2; color: #c0393f; }
-.empty-state { min-height: 100%; display:flex; flex-direction:column; justify-content:center; text-align: center; padding: 36px 20px 155px; }
+.empty-state { min-height: 100%; display:flex; flex-direction:column; justify-content:center; text-align: center; padding: 36px 20px; }
 .empty-icon { width: 58px; height: 58px; margin: 0 auto 17px; border-radius: 18px; object-fit: contain; display: block; box-shadow: 0 15px 36px -18px rgba(25,132,99,.7); }
 .welcome-kicker { color: var(--accent-strong); font-size: 11px; font-weight: 700; letter-spacing: .14em; margin-bottom: 7px; }
 .empty-state h2 { font-size: 20px; }
 .empty-state > p { max-width: 510px; margin: 0 auto 24px; }
-.chat-error{margin:7px auto 0;color:#c0393f;font-size:12px;text-align:center;max-width:680px}
+.chat-error{margin:7px auto 0;color:#c0393f;font-size:12px;text-align:center;max-width:980px}
 .incident-focus{padding:8px 18px;background:#fff6e8;color:#8a5513;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:12px}.incident-focus button{border:0;background:none;color:#a86413;cursor:pointer;font-weight:600}
 .msg-row.event{justify-content:center;box-sizing:border-box;width:100%}
 .msg-row.event .msg-bubble{box-sizing:border-box;width:100%;max-width:700px;min-width:0;padding:18px 20px;background:#fff8ed;border:1px solid #edd7b5;border-radius:20px;color:#6d4a1f;box-shadow:0 5px 18px rgba(123,79,27,.035);overflow-wrap:anywhere}
@@ -443,11 +454,16 @@ onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) cle
 .event-actions{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .event-actions button{margin-top:12px;padding:0;border:0;background:none;color:#a86413;font:inherit;font-weight:600;cursor:pointer}
 .event-actions button:hover{text-decoration:underline}
-.composer-hint{margin:7px auto 0;color:#9aa8a3;font-size:10px;text-align:center}
-.context-toolbar{box-sizing:border-box;max-width:780px;min-height:36px;margin:0 auto 10px;padding:0 4px;display:flex;align-items:center;gap:14px}
-.context-meter{box-sizing:border-box;width:174px;height:9px;flex:0 0 174px;overflow:hidden;border:1px solid #dceae2;border-radius:999px;background:#eaf2ed;box-shadow:inset 0 1px 2px rgba(32,91,65,.08)}
+.composer-hint{width:100%;max-width:980px;margin:9px auto 0;color:#83948d;font-size:11px;line-height:1.5;text-align:center}
+.context-toolbar{box-sizing:border-box;width:100%;max-width:980px;min-height:38px;margin:0 auto 11px;padding:0 2px;display:flex;align-items:center;gap:16px}
+.context-summary{display:grid;grid-template-columns:auto minmax(120px,220px) auto;align-items:center;gap:12px;min-width:0;flex:1}
+.context-label{color:#61736b;font-size:12px;font-weight:650;white-space:nowrap}
+.context-value{color:#82928b;font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.context-value b{margin-left:5px;color:#338365;font-size:11px;font-weight:700}
+.context-meter{box-sizing:border-box;width:100%;height:8px;overflow:hidden;border:1px solid #dceae2;border-radius:999px;background:#eaf2ed;box-shadow:inset 0 1px 2px rgba(32,91,65,.08)}
 .context-meter span{display:block;height:100%;min-width:3px;border-radius:inherit;background:linear-gradient(90deg,#27a977,#66c897);box-shadow:0 0 8px rgba(39,169,119,.18);transition:width .3s ease}
-.context-compact{min-height:32px;padding:6px 13px;border:1px solid #c8e7d6;border-radius:10px;background:#eef9f3;color:#17815a;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 5px rgba(31,112,76,.05);transition:background .16s,border-color .16s,box-shadow .16s,transform .16s}
+.context-compact{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:7px 13px;border:1px solid #c8e7d6;border-radius:11px;background:#f1faf5;color:#17815a;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 5px rgba(31,112,76,.05);transition:background .16s,border-color .16s,box-shadow .16s,transform .16s}
+.context-compact svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .context-compact:hover:not(:disabled){background:#def3e8;border-color:#8fd0ad;box-shadow:0 3px 10px rgba(31,112,76,.11)}
 .context-compact:active:not(:disabled){transform:translateY(1px)}
 .context-compact:focus-visible{outline:2px solid #2daa7a;outline-offset:2px}
@@ -459,8 +475,14 @@ onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) cle
 .mobile-conv-toggle { display: none; }
 .conv-scrim { display: none; }
 @media (max-width: 680px) {
-  .context-toolbar{gap:10px;margin-bottom:8px}
-  .context-meter{width:min(38vw,150px);flex-basis:min(38vw,150px)}
+  .context-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 10px;margin-bottom:9px}
+  .context-summary{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto 7px;gap:6px 9px;grid-column:1;grid-row:1/3}
+  .context-value{justify-self:end;font-size:11px}
+  .context-token-counts{display:none}
+  .context-meter{grid-column:1/3;grid-row:2}
+  .context-compact{grid-column:2;grid-row:1/3;align-self:center;min-height:34px;padding:6px 10px;font-size:11px}
+  .context-compact svg{width:15px;height:15px}
+  .composer-hint{margin-top:8px;font-size:10px}
   .mobile-conv-toggle { display: inline-flex; margin-left: -6px; flex-shrink: 0; }
   .conv-list { display: flex; position: fixed; z-index: 45; inset: 0 auto 0 0; width: 280px; max-width: 86vw; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow-lg); background: #fbfbfc; }
   .conv-list.open { transform: translateX(0); }
