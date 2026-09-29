@@ -16,7 +16,7 @@ sudo bash deploy/pull.sh
 sudo bash deploy/install-pull-timer.sh  # 每 5 分钟拉取 main 并增量更新
 sudo systemctl start oncall-pull.service
 sudo systemctl status oncall-pull.service
-curl -fsS http://127.0.0.1:3000/api/health
+curl -fsS http://127.0.0.1:5000/api/health
 ```
 
 `sudo git clone` 让目录归 root 所有，便于 timer 以 root 执行。若用其他用户克隆，请确保 timer 的运行用户对仓库和 Docker 有权限，且 Git 凭证属于同一用户。

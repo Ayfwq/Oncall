@@ -13,4 +13,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host ""
 Write-Host "deploy done. Health check:" -ForegroundColor Green
-Write-Host "  curl http://8.138.47.45:3000/api/health"
+Write-Host "  curl http://47.111.128.185:5000/api/health"
