@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from logging.config import fileConfig
+
 from alembic import context
 from alembic.script import ScriptDirectory
+from oncall.bootstrap.config import get_settings
+from oncall.infrastructure.db import models  # noqa: F401
+from oncall.infrastructure.db.base import Base
 from sqlalchemy import inspect, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from oncall.bootstrap.config import get_settings
-from oncall.infrastructure.db.base import Base
-from oncall.infrastructure.db import models  # noqa: F401
 
 config = context.config
 if config.config_file_name:
@@ -39,6 +39,16 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
+        context.run_migrations()
+
+
+def do_run_migrations(connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+    )
+    with context.begin_transaction():
         inspector = inspect(connection)
         tables = set(inspector.get_table_names())
         app_tables = set(target_metadata.tables)
@@ -50,16 +60,6 @@ def run_migrations_offline() -> None:
             context.get_context().stamp(ScriptDirectory.from_config(config), "head")
         else:
             context.run_migrations()
-
-
-def do_run_migrations(connection) -> None:
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        include_object=include_object,
-    )
-    with context.begin_transaction():
-        context.run_migrations()
 
 
 async def run_async_migrations() -> None:
