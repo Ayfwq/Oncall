@@ -28,11 +28,23 @@ type ContextUsage = {
 }
 const contextUsage = ref<ContextUsage | null>(null)
 const compacting = ref(false)
+const contextMenuOpen = ref(false)
 const contextPercent = computed(() => Math.min(100, Math.round((contextUsage.value?.estimated_tokens || 0) / (contextUsage.value?.context_window_tokens || 64000) * 100)))
 function formatTokenCount(value?: number) { return new Intl.NumberFormat('zh-CN').format(value || 0) }
 const contextTitle = computed(() => contextUsage.value
-  ? `上下文约 ${contextUsage.value.estimated_tokens} / ${contextUsage.value.context_window_tokens} token；自动压缩阈值 ${contextUsage.value.compact_at_tokens} token`
+  ? `上下文约 ${formatTokenCount(contextUsage.value.estimated_tokens)} / ${formatTokenCount(contextUsage.value.context_window_tokens)} token（${contextPercent.value}%）；自动压缩阈值 ${formatTokenCount(contextUsage.value.compact_at_tokens)} token`
   : '正在读取上下文用量')
+function closeContextMenuOnOutside(event: PointerEvent) {
+  if (!(event.target as HTMLElement | null)?.closest('.context-control')) contextMenuOpen.value = false
+}
+function compressFromContextMenu() {
+  contextMenuOpen.value = false
+  if (!active.value) {
+    ElMessage.info('请先打开一个会话')
+    return
+  }
+  void compactContext()
+}
 async function refreshContextUsage(id: string) {
   try {
     const usage = await api<ContextUsage>(`/conversations/${id}/context-usage`)
@@ -230,6 +242,7 @@ watch(showArchived, load)
 let opsTimer: ReturnType<typeof setInterval> | undefined
 let contextTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
+  document.addEventListener('pointerdown', closeContextMenuOnOutside)
   load()
   contextTimer = setInterval(() => {
     if (active.value && compacting.value) void refreshContextUsage(active.value)
@@ -251,7 +264,7 @@ onMounted(() => {
     } catch { /* The next refresh will retry. */ }
   }, 5000)
 })
-onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) clearInterval(contextTimer); clearTimeout(timer) })
+onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenuOnOutside); if (opsTimer) clearInterval(opsTimer); if (contextTimer) clearInterval(contextTimer); clearTimeout(timer) })
 </script>
 
 <template>
@@ -403,22 +416,18 @@ onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) cle
       </div>
 
       <div class="composer">
-        <div v-if="active" class="context-toolbar">
-          <div class="context-summary" :title="contextTitle">
-            <span class="context-label">上下文占用</span>
-            <div class="context-meter" role="progressbar" :aria-label="contextTitle" :aria-valuenow="contextPercent" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: contextPercent + '%' }"></span></div>
-            <span class="context-value">
-              <template v-if="contextUsage"><span class="context-token-counts">{{ formatTokenCount(contextUsage.estimated_tokens) }} / {{ formatTokenCount(contextUsage.context_window_tokens) }} tokens</span><b>{{ contextPercent }}%</b></template>
-              <template v-else>正在读取…</template>
-            </span>
-          </div>
-          <button class="context-compact" :disabled="compacting || busy" :title="contextTitle + '；将较早对话交给模型压缩'" @click="compactContext">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7.5" ry="3"/><path d="M4.5 5v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3V5M4.5 11v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3v-6"/></svg>
-            <span>{{ compacting ? '压缩中…' : '手动压缩' }}</span>
-          </button>
-        </div>
         <div class="composer-inner">
           <textarea v-model="input" placeholder="输入运维问题，Enter 发送 / Shift+Enter 换行" @input="autoresize" @keydown.enter.exact.prevent="onEnterKey" @keydown.ctrl.enter.prevent="onEnterKey"></textarea>
+          <div class="context-control">
+            <button class="context-circle" type="button" :title="contextTitle" :aria-label="contextTitle + '；压缩上文'" :aria-expanded="contextMenuOpen" @click="contextMenuOpen = !contextMenuOpen">
+              <svg class="context-ring" viewBox="0 0 20 20" aria-hidden="true"><circle class="context-ring-track" cx="10" cy="10" r="7.5"/><circle class="context-ring-used" cx="10" cy="10" r="7.5" :stroke-dashoffset="47.124 * (1 - contextPercent / 100)"/></svg>
+            </button>
+            <div v-if="contextMenuOpen" class="context-menu" role="menu">
+              <button class="context-option" type="button" role="menuitem" :disabled="compacting || busy || (contextUsage !== null && !contextUsage.can_compact)" @click="compressFromContextMenu">
+                {{ compacting ? '正在压缩…' : '压缩上文' }}
+              </button>
+            </div>
+          </div>
           <button class="send-btn" :disabled="busy || !input.trim()" @click="send" title="发送">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </button>
@@ -455,19 +464,21 @@ onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) cle
 .event-actions button{margin-top:12px;padding:0;border:0;background:none;color:#a86413;font:inherit;font-weight:600;cursor:pointer}
 .event-actions button:hover{text-decoration:underline}
 .composer-hint{width:100%;max-width:980px;margin:9px auto 0;color:#83948d;font-size:11px;line-height:1.5;text-align:center}
-.context-toolbar{box-sizing:border-box;width:100%;max-width:980px;min-height:38px;margin:0 auto 11px;padding:0 2px;display:flex;align-items:center;gap:16px}
-.context-summary{display:grid;grid-template-columns:auto minmax(120px,220px) auto;align-items:center;gap:12px;min-width:0;flex:1}
-.context-label{color:#61736b;font-size:12px;font-weight:650;white-space:nowrap}
-.context-value{color:#82928b;font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
-.context-value b{margin-left:5px;color:#338365;font-size:11px;font-weight:700}
-.context-meter{box-sizing:border-box;width:100%;height:8px;overflow:hidden;border:1px solid #dceae2;border-radius:999px;background:#eaf2ed;box-shadow:inset 0 1px 2px rgba(32,91,65,.08)}
-.context-meter span{display:block;height:100%;min-width:3px;border-radius:inherit;background:linear-gradient(90deg,#27a977,#66c897);box-shadow:0 0 8px rgba(39,169,119,.18);transition:width .3s ease}
-.context-compact{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:7px 13px;border:1px solid #c8e7d6;border-radius:11px;background:#f1faf5;color:#17815a;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 5px rgba(31,112,76,.05);transition:background .16s,border-color .16s,box-shadow .16s,transform .16s}
-.context-compact svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-.context-compact:hover:not(:disabled){background:#def3e8;border-color:#8fd0ad;box-shadow:0 3px 10px rgba(31,112,76,.11)}
-.context-compact:active:not(:disabled){transform:translateY(1px)}
-.context-compact:focus-visible{outline:2px solid #2daa7a;outline-offset:2px}
-.context-compact:disabled{opacity:.6;cursor:default;box-shadow:none}
+.context-control{position:relative;flex:0 0 auto}
+.context-circle{position:relative;box-sizing:border-box;display:grid;place-items:center;width:36px;height:36px;flex:0 0 auto;padding:0;border:0;border-radius:50%;background:transparent;cursor:pointer;transition:background .16s,transform .16s}
+.context-circle:hover{background:#f3f6f4;transform:scale(1.03)}
+.context-circle:focus-visible{outline:2px solid #2daa7a;outline-offset:1px}
+.context-ring{width:22px;height:22px;overflow:visible}
+.context-ring circle{fill:none;stroke-width:2}
+.context-ring-track{stroke:#c9d2ce}
+.context-ring-used{stroke:#17191a;stroke-dasharray:47.124;stroke-linecap:round;transform:rotate(-90deg);transform-origin:10px 10px;transition:stroke-dashoffset .3s ease}
+.context-menu{position:absolute;right:-4px;bottom:calc(100% + 12px);z-index:8;box-sizing:border-box;width:max-content;min-width:136px;padding:6px;border:1px solid #deebe5;border-radius:14px;background:#fff;box-shadow:0 12px 32px rgba(28,76,59,.15);animation:context-menu-in .14s ease-out}
+.context-menu::after{position:absolute;right:17px;bottom:-6px;width:10px;height:10px;border-right:1px solid #deebe5;border-bottom:1px solid #deebe5;background:#fff;content:"";transform:rotate(45deg)}
+.context-option{position:relative;z-index:1;display:flex;align-items:center;justify-content:flex-start;gap:20px;width:100%;min-height:40px;padding:0 9px;border:0;border-radius:9px;background:transparent;color:#33453d;font:inherit;font-size:13px;text-align:left;cursor:pointer}
+.context-option:hover{background:#f5faf7}
+.context-option:disabled{color:#9ba8a2;cursor:not-allowed}
+.context-option:disabled:hover{background:transparent}
+@keyframes context-menu-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 .composer-inner{transition:border-color .18s,box-shadow .18s}
 .composer-inner:focus-within{border-color:#a5d6bf;box-shadow:0 12px 38px -20px rgba(24,84,66,.38),0 0 0 3px rgba(49,169,116,.08)}
 @media (max-width: 760px) { .empty-state { padding-top: 55px; } }
@@ -475,13 +486,8 @@ onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) cle
 .mobile-conv-toggle { display: none; }
 .conv-scrim { display: none; }
 @media (max-width: 680px) {
-  .context-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 10px;margin-bottom:9px}
-  .context-summary{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto 7px;gap:6px 9px;grid-column:1;grid-row:1/3}
-  .context-value{justify-self:end;font-size:11px}
-  .context-token-counts{display:none}
-  .context-meter{grid-column:1/3;grid-row:2}
-  .context-compact{grid-column:2;grid-row:1/3;align-self:center;min-height:34px;padding:6px 10px;font-size:11px}
-  .context-compact svg{width:15px;height:15px}
+  .context-circle{width:34px;height:34px}
+  .context-menu{right:-3px;min-width:204px}
   .composer-hint{margin-top:8px;font-size:10px}
   .mobile-conv-toggle { display: inline-flex; margin-left: -6px; flex-shrink: 0; }
   .conv-list { display: flex; position: fixed; z-index: 45; inset: 0 auto 0 0; width: 280px; max-width: 86vw; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow-lg); background: #fbfbfc; }
