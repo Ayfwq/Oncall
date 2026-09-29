@@ -267,6 +267,12 @@ class ConversationPatchDTO(BaseModel):
 class ChatMessageDTO(BaseModel):
     content: str = Field(min_length=1, max_length=30000)
     channel: str = "web"
+    incident_id: UUID | None = None
+
+
+class MemoryFactCreateDTO(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    project_id: UUID | None = None
 
 
 class IncidentBatchDeleteDTO(BaseModel):

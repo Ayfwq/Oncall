@@ -7,7 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from oncall.application.conversation_service import ConversationService
-from oncall.infrastructure.db.models import Diagnosis, Incident, IncidentEvidence, Project
+from oncall.application.long_term_memory import LongTermMemoryService
+from oncall.application.memory_policy import take_recent_whole_turns
+from oncall.bootstrap.config import get_settings
+from oncall.infrastructure.db.models import (
+    Conversation,
+    Diagnosis,
+    Incident,
+    IncidentEvidence,
+    Message,
+    Project,
+)
 from oncall.infrastructure.db.session import SessionFactory
 
 
@@ -17,12 +27,19 @@ class ContextBuilder:
         self.session_factory = session_factory or SessionFactory
 
     async def build(
-        self, conversation_id: UUID, project_id: UUID | None, incident_id: UUID | None
+        self,
+        conversation_id: UUID,
+        project_id: UUID | None,
+        incident_id: UUID | None,
+        *,
+        channel: str = "web",
+        user_message: str = "",
     ) -> dict:
-        msgs_pack, project, incident_pack = await asyncio.gather(
-            self._load_messages(conversation_id),
+        msgs_pack, project, incident_pack, facts = await asyncio.gather(
+            self._load_messages(conversation_id, incident_id),
             self._load_project(project_id),
             self._load_incident(incident_id),
+            self._load_facts(conversation_id, project_id, channel, user_message),
         )
         msgs, summary = msgs_pack
         incident, evidence, latest_diag = incident_pack
@@ -35,14 +52,46 @@ class ContextBuilder:
             "incident_context": incident,
             "evidence": evidence,
             "previous_diagnosis": latest_diag,
+            "long_term_facts": facts,
         }
 
-    async def _load_messages(self, conversation_id: UUID):
+    async def _load_facts(
+        self, conversation_id: UUID, project_id: UUID | None, channel: str, query: str
+    ) -> list[dict]:
+        if channel != "web":
+            return []
+        async with self.session_factory() as s:
+            conv = await s.get(Conversation, conversation_id)
+            if not conv:
+                return []
+            return await LongTermMemoryService(s).relevant(conv.user_id, project_id, query)
+
+    async def _load_messages(self, conversation_id: UUID, incident_id: UUID | None):
         async with self.session_factory() as s:
             cs = ConversationService(s)
-            msgs = await cs.recent_messages(conversation_id, 30)
+            conv = await s.get(Conversation, conversation_id)
+            if conv and conv.type == "ops" and incident_id:
+                stmt = (
+                    select(Message)
+                    .where(
+                        Message.conversation_id == conversation_id,
+                        Message.role.in_(["user", "assistant"]),
+                        Message.metadata_json["incident_id"].astext == str(incident_id),
+                    )
+                    .order_by(Message.created_at.desc(), Message.id.desc())
+                    .limit(30)
+                )
+                rows = list((await s.scalars(stmt)).all())
+                rows.reverse()
+                return take_recent_whole_turns(rows, get_settings().memory_recent_tokens)[1], None
             summary = await cs.latest_summary(conversation_id)
-            return msgs, summary.summary if summary else None
+            msgs = await cs.messages_after_summary(conversation_id, summary)
+            return [
+                m
+                for m in msgs
+                if m.role != "event"
+                and not (conv and conv.type == "ops" and m.metadata_json.get("incident_id"))
+            ], summary.summary if summary else None
 
     async def _load_project(self, project_id: UUID | None):
         if not project_id:

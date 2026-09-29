@@ -71,7 +71,7 @@ docker compose up -d
 docker compose -f compose.local.monitoring.yaml up -d
 ```
 
-基础 Compose 运行 PostgreSQL/Milvus/etcd/MinIO；本地监控 Compose 运行 Prometheus 与 Alertmanager。生产部署使用 `compose.server.yaml` 一次性包含全部依赖。
+基础 Compose 运行 PostgreSQL/Milvus/etcd/MinIO；本地监控 Compose 运行 Prometheus 与 Alertmanager。生产部署使用 `compose.server.yaml` 一次性包含全部依赖；服务器从 GitHub 拉取并自动增量更新的步骤见 [部署说明](deploy/README.md)。
 
 目标服务器还需运行轻量 Collector，以只读方式发现 Docker stdout 日志并执行预定义 PostgreSQL 诊断。正式接入时，从“添加服务器”页面复制安装命令；目标服务器只需安装 Docker，不需要本仓库源码或 Compose。页面同时提供携带相同 Token 的验证命令。
 

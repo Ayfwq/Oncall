@@ -84,6 +84,18 @@ def classify_intent(
         return _route(
             "incident_investigation", True, True, True, bool(project_id), True, "监控事件触发调查"
         )
+    # A list of outstanding alerts spans the user's projects. The shared ops
+    # conversation has no project_id, but the database query is user-scoped.
+    if any(marker in text for marker in ("告警", "异常", "incident")) and any(
+        marker in text for marker in ("哪些", "列表", "还有", "有没有", "多少", "未恢复", "未解决")
+    ):
+        return _route("active_alerts", True, False, False, False, True, "查询用户项目的未恢复告警")
+    if not incident_id and any(
+        marker in text for marker in ("这个告警", "这条告警", "刚才的告警", "上面那个告警", "该告警")
+    ):
+        route = _route("clarification", True, False, True, False, False, "多告警主会话需要明确事件")
+        route["clarification_question"] = "请在对应的告警卡片点击“追问此告警”，或提供事件 ID。"
+        return route
     if (
         incident_id
         and mode in ("follow_up", "chat")

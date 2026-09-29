@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smart incremental deploy. Run on the server after deploy/deploy.ps1 syncs code.
+# Smart incremental deploy. Run on the server after deploy/pull.sh updates code.
 # Decides what to rebuild/restart by comparing checksums stored in .deploy/checksums.
 set -euo pipefail
 
@@ -41,22 +41,12 @@ NEED_BACKEND_RESTART=0
 NEED_MIGRATE=0
 
 # The runtime mounts ./backend into the containers, so ordinary Python source
-# and project metadata changes do not require rebuilding the large dependency
-# image. Dependency changes are captured by uv.lock; keep pyproject.toml out of
-# this checksum so description/entry-point metadata changes do not trigger a
-# multi-minute Torch/Docling rebuild.
-if files_changed deps.backend Dockerfile.backend uv.lock .dockerignore; then
-  # On an already deployed host, the first run may have no checksum file at
-  # all. If the backend runtime image exists, seed the baseline instead of
-  # redownloading the large Torch/Docling dependency set. Subsequent changes
-  # to these files still trigger an image build.
-  if [ ! -f "$STAMP/deps.backend" ] && docker image inspect oncall-ai-sre-backend:latest >/dev/null 2>&1; then
-    echo "==> 后端依赖校验基线缺失，复用服务器现有镜像"
-  else
-    echo "==> backend 依赖/镜像定义变化：重建后端镜像（国内镜像加速）"
-    NEED_BACKEND_BUILD=1
-    NEED_MIGRATE=1
-  fi
+# changes only require a restart. Project metadata and lockfile changes rebuild
+# the image so its installed package and entry points remain in sync.
+if files_changed deps.backend Dockerfile.backend pyproject.toml uv.lock .dockerignore; then
+  echo "==> backend 依赖/镜像定义变化：重建后端镜像（国内镜像加速）"
+  NEED_BACKEND_BUILD=1
+  NEED_MIGRATE=1
 fi
 
 if files_changed deps.frontend Dockerfile.frontend frontend/package.json frontend/package-lock.json; then
@@ -100,13 +90,6 @@ fi
 
 "${COMPOSE[@]}" up -d
 "${COMPOSE[@]}" ps
-
-# Remove only stopped migration containers and dangling images carrying this
-# repository's OCI source label. Docker's default image-prune scope is dangling
-# images; the label keeps unrelated projects on the shared host untouched.
-"${COMPOSE[@]}" rm --force migrate
-docker image prune --force \
-  --filter "label=org.opencontainers.image.source=https://github.com/Ayfwq/Oncall"
 
 commit_stamps
 echo "==> 更新完成"

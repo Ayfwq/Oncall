@@ -12,6 +12,7 @@ def test_has_single_remote_python_signal_contract():
 
 def test_has_only_remote_read_tools():
     assert ALLOWED_TOOLS == {
+        "query_active_alerts",
         "query_incident_context",
         "query_current_metrics",
         "query_metric_history",

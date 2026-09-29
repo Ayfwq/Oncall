@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.infrastructure.db.models import (
@@ -37,7 +37,9 @@ class ConversationService:
     async def list(
         self, user_id: UUID, include_archived: bool = False, query: str | None = None
     ) -> list[Conversation]:
-        stmt = select(Conversation).where(Conversation.user_id == user_id)
+        stmt = select(Conversation).where(
+            Conversation.user_id == user_id, Conversation.type != "incident"
+        )
         if not include_archived:
             stmt = stmt.where(Conversation.archived.is_(False))
         if query and query.strip():
@@ -56,27 +58,45 @@ class ConversationService:
         stmt = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-            .limit(limit)
-        )
-        return list((await self.session.scalars(stmt)).all())
-
-    async def recent_messages(self, conversation_id: UUID, limit: int = 30) -> list[Message]:
-        stmt = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(limit)
         )
         rows = list((await self.session.scalars(stmt)).all())
         rows.reverse()
         return rows
 
+    async def recent_messages(self, conversation_id: UUID, limit: int = 30) -> list[Message]:
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit)
+        )
+        rows = list((await self.session.scalars(stmt)).all())
+        rows.reverse()
+        return rows
+
+    async def messages_after_summary(
+        self, conversation_id: UUID, summary: ConversationSummary | None
+    ) -> list[Message]:
+        stmt = select(Message).where(Message.conversation_id == conversation_id)
+        if summary and summary.through_message_id:
+            boundary = await self.session.get(Message, summary.through_message_id)
+            if boundary:
+                stmt = stmt.where(
+                    or_(
+                        Message.created_at > boundary.created_at,
+                        and_(Message.created_at == boundary.created_at, Message.id > boundary.id),
+                    )
+                )
+        stmt = stmt.order_by(Message.created_at.asc(), Message.id.asc())
+        return list((await self.session.scalars(stmt)).all())
+
     async def latest_summary(self, conversation_id: UUID) -> ConversationSummary | None:
         stmt = (
             select(ConversationSummary)
             .where(ConversationSummary.conversation_id == conversation_id)
-            .order_by(ConversationSummary.created_at.desc())
+            .order_by(ConversationSummary.created_at.desc(), ConversationSummary.id.desc())
             .limit(1)
         )
         return await self.session.scalar(stmt)
@@ -117,6 +137,8 @@ class ConversationService:
         if title is not None:
             c.title = title
         if archived is not None:
+            if c.type == "ops" and archived:
+                raise ValueError("运维主会话不能归档")
             c.archived = archived
         await self.session.commit()
         await self.session.refresh(c)
@@ -126,6 +148,8 @@ class ConversationService:
         c = await self.get(conversation_id, user_id)
         if not c:
             return False
+        if c.type == "ops":
+            raise ValueError("运维主会话不能删除")
         await self.session.execute(
             delete(BackgroundJob).where(
                 BackgroundJob.payload["conversation_id"].astext == str(c.id)

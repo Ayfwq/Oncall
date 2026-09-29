@@ -103,7 +103,8 @@ def main() -> int:
     client.load_system_host_keys()
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
     print(f"==> connecting {USER}@{HOST} ...")
-    client.connect(HOST, username=USER, password=PWD, timeout=20)
+    # 增加超时时间以应对高负载服务器
+    client.connect(HOST, username=USER, password=PWD, timeout=60, banner_timeout=120, auth_timeout=120)
     sftp = client.open_sftp()
 
     try:

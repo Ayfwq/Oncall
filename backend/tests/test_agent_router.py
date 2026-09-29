@@ -42,6 +42,20 @@ def test_realtime_metric_query_still_requires_project():
     assert route["requires_realtime"] is True
 
 
+def test_current_alert_list_uses_user_scoped_query_without_project():
+    route = classify_intent("目前还有哪些异常告警呢？", project_id=None, incident_id=None)
+    assert route["intent"] == "active_alerts"
+    assert route["requires_realtime"] is True
+    assert route["requires_project"] is False
+    assert route["requires_knowledge"] is False
+
+
+def test_ambiguous_alert_reference_asks_for_explicit_anchor():
+    route = classify_intent("这个告警为什么发生？", project_id=None, incident_id=None)
+    assert route["intent"] == "clarification"
+    assert "追问此告警" in route["clarification_question"]
+
+
 def test_incident_conversation_keeps_incident_context():
     route = classify_intent(
         "现在恢复了吗？", project_id="project-1", incident_id="incident-1", mode="follow_up"

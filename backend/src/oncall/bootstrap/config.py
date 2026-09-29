@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     model_base_url: str = "https://api.siliconflow.cn/v1"
     model_api_key: str = ""
     model_name: str = "deepseek-ai/DeepSeek-V4-Flash"
+    memory_context_window_tokens: int = Field(default=64000, ge=8192)
+    memory_compact_at_tokens: int = Field(default=44800, ge=4096)
+    memory_input_hard_limit_tokens: int = Field(default=48000, ge=4096)
+    memory_recent_tokens: int = Field(default=4000, ge=256)
+    memory_summary_tokens: int = Field(default=1500, ge=128)
+    memory_facts_tokens: int = Field(default=500, ge=0)
+    memory_post_compact_tokens: int = Field(default=6400, ge=1024)
+    memory_tokenizer_path: Path | None = None
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_api_key: str = ""
     embedding_model: str = "BAAI/bge-m3"
@@ -73,6 +81,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_safety(self):
+        if not (
+            self.memory_compact_at_tokens
+            < self.memory_input_hard_limit_tokens
+            < self.memory_context_window_tokens
+        ):
+            raise ValueError("memory thresholds must satisfy compact < input limit < context window")
+        if self.memory_recent_tokens + self.memory_summary_tokens + self.memory_facts_tokens > min(
+            self.memory_post_compact_tokens, self.memory_context_window_tokens // 10
+        ):
+            raise ValueError("post-compaction memory budget exceeds its limit")
         if self.incident_reminder_final_seconds <= self.incident_reminder_first_seconds:
             raise ValueError("incident final reminder must be later than first reminder")
         if self.env.lower() == "production":

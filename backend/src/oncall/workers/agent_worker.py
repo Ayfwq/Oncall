@@ -4,7 +4,9 @@ import asyncio
 import logging
 from uuid import UUID
 
+from oncall.agent.model_gateway import get_model_provider
 from oncall.application.agent_service import AgentService
+from oncall.application.memory_service import ConversationMemoryService
 from oncall.bootstrap.config import get_settings
 from oncall.bootstrap.logging import configure_logging
 from oncall.domain.enums import AgentMode
@@ -32,23 +34,29 @@ async def loop() -> None:
             did_work = False
             async with SessionFactory() as db:
                 queue = JobQueue(db)
-                job = await queue.claim(["incident_investigate"], settings.job_lease_seconds)
+                job = await queue.claim(["incident_investigate", "memory_compact"], settings.job_lease_seconds)
                 if job:
                     did_work = True
                     job_id = job.id
                     try:
                         conversation_id = UUID(job.payload["conversation_id"])
-                        await AgentService(db, checkpointer).run(
-                            conversation_id,
-                            "请基于当前 Incident 主动调查并生成完整故障报告。",
-                            channel="monitor",
-                            mode=AgentMode.INVESTIGATE,
-                        )
+                        if job.type == "memory_compact":
+                            await ConversationMemoryService(db, get_model_provider()).compact_if_needed(
+                                conversation_id, force=bool(job.payload.get("force"))
+                            )
+                        else:
+                            await AgentService(db, checkpointer).run(
+                                conversation_id,
+                                "请基于当前 Incident 主动调查并生成完整故障报告。",
+                                channel="monitor",
+                                mode=AgentMode.INVESTIGATE,
+                                force_notification=bool(job.payload.get("manual")),
+                            )
                         await queue.complete(job_id)
-                        logger.info("incident investigation completed job=%s", job_id)
+                        logger.info("background job completed type=%s job=%s", job.type, job_id)
                     except Exception as exc:
                         await queue.fail(job_id, str(exc))
-                        logger.exception("incident investigation failed job=%s: %s", job_id, exc)
+                        logger.exception("background job failed type=%s job=%s: %s", job.type, job_id, exc)
 
                 # Alert delivery is deliberately NOT done here. It now belongs to
                 # oncall-notification-worker, so an alert queued the moment an Incident

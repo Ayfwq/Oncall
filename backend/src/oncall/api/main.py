@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from oncall.agent.model_gateway import get_model_provider
 from oncall.api.deps import current_user
 from oncall.application.agent_service import AgentService
 from oncall.application.conversation_service import ConversationService
@@ -31,12 +33,13 @@ from oncall.application.dtos import (
     FeishuSettingsDTO,
     IncidentBatchDeleteDTO,
     LogSourceDTO,
-    ModelSettingsDTO,
-    ModelProbeDTO,
-    ModelProfileDTO,
+    MemoryFactCreateDTO,
     MetricsApplyDTO,
     MetricsDiscoverDTO,
     MetricsSourceDTO,
+    ModelProbeDTO,
+    ModelProfileDTO,
+    ModelSettingsDTO,
     MonitoredServerCreateDTO,
     MonitoredServerDTO,
     ProjectCreateDTO,
@@ -44,31 +47,37 @@ from oncall.application.dtos import (
     PythonProjectOnboardDTO,
 )
 from oncall.application.knowledge_service import KnowledgeService
+from oncall.application.long_term_memory import LongTermMemoryService
+from oncall.application.memory_service import ConversationMemoryService
+from oncall.application.ops_conversation import OpsConversationService
 from oncall.application.project_service import ProjectService
 from oncall.application.server_service import MonitoredServerService, to_dto
 from oncall.application.workspace_service import ensure_local_user
 from oncall.bootstrap.config import get_settings, update_env_values
 from oncall.bootstrap.logging import configure_logging, set_request_id
-from oncall.security.crypto import SecretBox
 from oncall.infrastructure.db.models import (
     AgentRun,
     AlertmanagerAlert,
     BackgroundJob,
+    ChannelBinding,
     Conversation,
     Diagnosis,
+    FeishuMessageLink,
     Incident,
     IncidentEvidence,
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeDocumentVersion,
-    MonitoredServer,
     ModelProfile,
+    MonitoredServer,
     Notification,
     Project,
     RetrievalTrace,
     ToolRun,
+    User,
 )
 from oncall.infrastructure.db.session import SessionFactory, get_session
+from oncall.security.crypto import SecretBox
 
 logger = logging.getLogger(__name__)
 s = get_settings()
@@ -122,6 +131,9 @@ async def lifespan(app: FastAPI):
         logger.error("langgraph checkpointer unavailable: %s", e)
     async with SessionFactory() as db:
         await ensure_local_user(db)
+        for user_id in (await db.scalars(select(User.id))).all():
+            await OpsConversationService(db).backfill_notifications(user_id)
+        await db.commit()
         try:
             from oncall.integrations.prometheus_api import PrometheusProvisioner
 
@@ -146,6 +158,9 @@ async def lifespan(app: FastAPI):
             logger.error("feishu websocket listener failed: %s", e)
     yield
     logger.info("stopping oncall api")
+    listener = getattr(app.state, "feishu_ws_thread", None)
+    if listener:
+        await asyncio.to_thread(listener.stop)
     if getattr(app.state, "checkpointer_cm", None):
         await app.state.checkpointer_cm.__aexit__(None, None, None)
 
@@ -200,6 +215,9 @@ async def health(request: Request):
         "checkpointer": bool(request.app.state.checkpointer),
         "checkpointer_error": getattr(request.app.state, "checkpointer_error", None),
         "feishu_ws_error": getattr(request.app.state, "feishu_ws_error", None),
+        "feishu_ws_connected": bool(
+            getattr(getattr(request.app.state, "feishu_ws_thread", None), "connected", False)
+        ),
     }
 
 
@@ -452,6 +470,57 @@ async def conversations(
     ]
 
 
+@app.get("/api/memories")
+async def list_memories(
+    project_id: str | None = None,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    rows = await LongTermMemoryService(db).list(
+        user.id, _uuid(project_id) if project_id else None, all_projects=project_id is None
+    )
+    return [
+        {
+            "id": str(row.id),
+            "content": row.content,
+            "project_id": str(row.project_id) if row.project_id else None,
+            "source_message_id": str(row.source_message_id) if row.source_message_id else None,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/memories")
+async def create_memory(
+    dto: MemoryFactCreateDTO,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    if dto.project_id:
+        project = await db.get(Project, dto.project_id)
+        if not project or project.user_id != user.id:
+            raise HTTPException(404, "project not found")
+    try:
+        row = await LongTermMemoryService(db).remember(
+            user.id, dto.content, project_id=dto.project_id
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"id": str(row.id), "content": row.content}
+
+
+@app.delete("/api/memories/{memory_id}")
+async def delete_memory(
+    memory_id: str,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    if not await LongTermMemoryService(db).forget(user.id, _uuid(memory_id)):
+        raise HTTPException(404, "memory not found")
+    return {"ok": True}
+
+
 @app.post("/api/conversations")
 async def create_conversation(
     dto: ConversationCreateDTO, user=Depends(current_user), db: AsyncSession = Depends(get_session)
@@ -467,7 +536,10 @@ async def patch_conversation(
     user=Depends(current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    c = await ConversationService(db).patch(_uuid(cid), user.id, dto.title, dto.archived)
+    try:
+        c = await ConversationService(db).patch(_uuid(cid), user.id, dto.title, dto.archived)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not c:
         raise HTTPException(404, "not found")
     return {"id": str(c.id), "title": c.title, "archived": c.archived}
@@ -480,9 +552,13 @@ async def delete_conversation(
     user=Depends(current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    if not await ConversationService(db).delete(
-        _uuid(cid), user.id, getattr(request.app.state, "checkpointer", None)
-    ):
+    try:
+        deleted = await ConversationService(db).delete(
+            _uuid(cid), user.id, getattr(request.app.state, "checkpointer", None)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "not found")
     return {"ok": True}
 
@@ -506,6 +582,74 @@ async def list_messages(
         }
         for x in rows
     ]
+
+
+@app.get("/api/conversations/{cid}/context-usage")
+async def conversation_context_usage(
+    cid: str, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    cid_u = _uuid(cid)
+    if not await ConversationService(db).get(cid_u, user.id):
+        raise HTTPException(404, "not found")
+    usage = await ConversationMemoryService(db, get_model_provider()).usage(cid_u)
+    job = await db.scalar(
+        select(BackgroundJob)
+        .where(
+            BackgroundJob.type == "memory_compact",
+            BackgroundJob.status.in_(["pending", "running"]),
+            BackgroundJob.payload.contains({"conversation_id": str(cid_u)}),
+        )
+        .order_by(BackgroundJob.created_at.desc(), BackgroundJob.id.desc())
+        .limit(1)
+    )
+    if not job:
+        job = await db.scalar(
+            select(BackgroundJob)
+            .where(
+                BackgroundJob.type == "memory_compact",
+                BackgroundJob.payload.contains({"conversation_id": str(cid_u), "force": True}),
+            )
+            .order_by(BackgroundJob.created_at.desc(), BackgroundJob.id.desc())
+            .limit(1)
+        )
+    usage["compaction"] = (
+        {"status": job.status, "error": job.last_error if job.status == "dead" else None}
+        if job else None
+    )
+    return usage
+
+
+@app.post("/api/conversations/{cid}/compact")
+async def compact_conversation(
+    cid: str, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    from uuid import uuid4
+
+    from oncall.jobs.queue import JobQueue
+
+    cid_u = _uuid(cid)
+    if not await ConversationService(db).get(cid_u, user.id):
+        raise HTTPException(404, "not found")
+    usage = await ConversationMemoryService(db, get_model_provider()).usage(cid_u)
+    if not usage["can_compact"]:
+        raise HTTPException(409, "目前没有可压缩的对话")
+    active = await db.scalar(
+        select(BackgroundJob)
+        .where(
+            BackgroundJob.type == "memory_compact",
+            BackgroundJob.status.in_(["pending", "running"]),
+            BackgroundJob.payload.contains({"conversation_id": str(cid_u)}),
+        )
+        .limit(1)
+    )
+    if active:
+        return {"job_id": str(active.id), "status": active.status}
+    job = await JobQueue(db).enqueue(
+        "memory_compact",
+        {"conversation_id": str(cid_u), "force": True},
+        idempotency_key=f"manual-memory-compact:{cid_u}:{uuid4()}",
+    )
+    return {"job_id": str(job.id), "status": job.status}
 
 
 @app.post("/api/conversations/{cid}/messages:stream")
@@ -536,7 +680,11 @@ async def chat(
                 # Agent its own DB session so persistence remains valid until the stream ends.
                 async with SessionFactory() as agent_db:
                     state = await AgentService(agent_db, checkpointer).run(
-                        cid_u, dto.content, dto.channel, emit=emit
+                        cid_u,
+                        dto.content,
+                        dto.channel,
+                        emit=emit,
+                        incident_id_override=dto.incident_id,
                     )
                 text = (state or {}).get("final_response", "")
                 queue.put_nowait(("final", {"content": text}))
@@ -1145,9 +1293,7 @@ async def delete_incident(
     )
     if not inc:
         raise HTTPException(404, "not found")
-    await IncidentService(db).delete(
-        inc.id, getattr(request.app.state, "checkpointer", None)
-    )
+    await IncidentService(db).delete(inc.id, getattr(request.app.state, "checkpointer", None))
     return {"ok": True}
 
 
@@ -1182,7 +1328,7 @@ async def reinvestigate(
 
     job = await JobQueue(db).enqueue(
         "incident_investigate",
-        {"incident_id": str(inc.id), "conversation_id": str(conv.id)},
+        {"incident_id": str(inc.id), "conversation_id": str(conv.id), "manual": True},
         idempotency_key=f"incident_investigate:{inc.id}:manual:{uuid4()}",
         priority=10,
     )
@@ -1217,20 +1363,8 @@ async def incident_conversation(
     )
     if not inc:
         raise HTTPException(404, "not found")
-    conv = await db.scalar(
-        select(Conversation)
-        .where(Conversation.incident_id == inc.id)
-        .order_by(Conversation.created_at.asc())
-        .limit(1)
-    )
-    if not conv:
-        conv = await ConversationService(db).create(
-            user.id,
-            title=f"🚨 {inc.anomaly_type}",
-            project_id=inc.project_id,
-            incident_id=inc.id,
-            type_="incident",
-        )
+    conv = await OpsConversationService(db).get_or_create(user.id)
+    await db.commit()
     return {"conversation_id": str(conv.id)}
 
 
@@ -1286,7 +1420,9 @@ async def knowledge_citation(
         select(KnowledgeChunk, KnowledgeDocumentVersion, KnowledgeDocument)
         .join(KnowledgeDocumentVersion, KnowledgeDocumentVersion.id == KnowledgeChunk.version_id)
         .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeDocumentVersion.document_id)
-        .where(KnowledgeChunk.id == _uuid(chunk_id, "citation"), KnowledgeDocument.user_id == user.id)
+        .where(
+            KnowledgeChunk.id == _uuid(chunk_id, "citation"), KnowledgeDocument.user_id == user.id
+        )
     )
     result = row.first()
     if not result:
@@ -1451,9 +1587,7 @@ async def delete_document(
         # Durable RAG jobs refer to versions through JSON, so they are invisible
         # to foreign-key cascades and would otherwise retry against deleted rows.
         await db.execute(
-            delete(BackgroundJob).where(
-                BackgroundJob.payload["version_id"].astext.in_(version_ids)
-            )
+            delete(BackgroundJob).where(BackgroundJob.payload["version_id"].astext.in_(version_ids))
         )
     await db.delete(doc)
     await db.commit()
@@ -1648,36 +1782,48 @@ async def dev_recover_incident(
 
 
 @app.get("/api/settings/readiness")
-async def settings_readiness(user=Depends(current_user)):
+async def settings_readiness(
+    request: Request, user=Depends(current_user), db: AsyncSession = Depends(get_session)
+):
+    current = get_settings()
+    listener = getattr(request.app.state, "feishu_ws_thread", None)
+    binding = await db.scalar(
+        select(ChannelBinding.id).where(ChannelBinding.channel == "feishu").limit(1)
+    )
     return {
-        "environment": s.env,
+        "environment": current.env,
         "llm": {
-            "provider": s.model_provider,
-            "model": s.model_name,
-            "configured": s.model_provider == "mock" or bool(s.model_api_key),
+            "provider": current.model_provider,
+            "model": current.model_name,
+            "configured": current.model_provider == "mock" or bool(current.model_api_key),
         },
         "embedding": {
-            "model": s.embedding_model,
-            "configured": bool(s.embedding_base_url and s.embedding_api_key),
+            "model": current.embedding_model,
+            "configured": bool(current.embedding_base_url and current.embedding_api_key),
         },
         "rerank": {
-            "model": s.rerank_model or None,
-            "configured": bool(s.rerank_base_url and s.rerank_api_key and s.rerank_model),
+            "model": current.rerank_model or None,
+            "configured": bool(
+                current.rerank_base_url and current.rerank_api_key and current.rerank_model
+            ),
         },
         # A default receive_id is optional: inbound messages auto-bind the
         # latest Feishu chat for proactive delivery. Requiring it here made a
         # working bot appear unconfigured in the Settings page.
         "feishu": {
-            "enabled": s.feishu_enabled,
-            "configured": bool(s.feishu_app_id and s.feishu_app_secret),
-            "default_receive_id_configured": bool(s.feishu_default_receive_id),
+            "enabled": current.feishu_enabled,
+            "configured": bool(current.feishu_app_id and current.feishu_app_secret),
+            "connected": bool(listener and listener.connected),
+            "error": listener.error if listener else None,
+            "bound": bool(binding),
+            "default_receive_id_configured": bool(current.feishu_default_receive_id),
             "auto_bind_supported": True,
         },
-        "security": {"secret_master_key_configured": bool(s.secret_master_key)},
+        "security": {"secret_master_key_configured": bool(current.secret_master_key)},
         "storage": {
-            "database": "postgresql" if s.database_url.startswith("postgresql") else "other",
-            "milvus_uri": s.milvus_uri,
-            "data_dir": str(s.data_dir),
+            "database": "postgresql" if current.database_url.startswith("postgresql") else "other",
+            "milvus_uri": current.milvus_uri,
+            "data_dir": str(current.data_dir),
         },
     }
 
@@ -1770,19 +1916,28 @@ def _current_model_config() -> dict:
     current = get_settings()
     return {
         "llm": {
-            "kind": "llm", "name": current.model_display_name, "provider": current.model_provider,
-            "base_url": current.model_base_url, "model": current.model_name,
+            "kind": "llm",
+            "name": current.model_display_name,
+            "provider": current.model_provider,
+            "base_url": current.model_base_url,
+            "model": current.model_name,
             "api_key_configured": bool(current.model_api_key),
         },
         "embedding": {
-            "kind": "embedding", "name": "Embedding", "provider": "openai-compatible",
-            "base_url": current.embedding_base_url, "model": current.embedding_model,
+            "kind": "embedding",
+            "name": "Embedding",
+            "provider": "openai-compatible",
+            "base_url": current.embedding_base_url,
+            "model": current.embedding_model,
             "api_key_configured": bool(current.embedding_api_key),
             "embedding_dimension": current.embedding_dimension,
         },
         "rerank": {
-            "kind": "rerank", "name": "Rerank", "provider": "openai-compatible",
-            "base_url": current.rerank_base_url, "model": current.rerank_model,
+            "kind": "rerank",
+            "name": "Rerank",
+            "provider": "openai-compatible",
+            "base_url": current.rerank_base_url,
+            "model": current.rerank_model,
             "api_key_configured": bool(current.rerank_api_key),
         },
     }
@@ -1799,12 +1954,17 @@ def _apply_model_profile(row: ModelProfile) -> None:
             "ONCALL_MODEL_API_KEY": key,
         }
         for field, value in {
-            "model_provider": row.provider, "model_display_name": row.name,
-            "model_base_url": row.base_url, "model_name": row.model, "model_api_key": key,
+            "model_provider": row.provider,
+            "model_display_name": row.name,
+            "model_base_url": row.base_url,
+            "model_name": row.model,
+            "model_api_key": key,
         }.items():
             setattr(s, field, value)
     elif row.kind == "embedding":
-        dimension = int((row.capabilities or {}).get("embedding_dimension") or s.embedding_dimension)
+        dimension = int(
+            (row.capabilities or {}).get("embedding_dimension") or s.embedding_dimension
+        )
         values = {
             "ONCALL_EMBEDDING_BASE_URL": row.base_url,
             "ONCALL_EMBEDDING_MODEL": row.model,
@@ -1812,8 +1972,10 @@ def _apply_model_profile(row: ModelProfile) -> None:
             "ONCALL_EMBEDDING_DIMENSION": str(dimension),
         }
         for field, value in {
-            "embedding_base_url": row.base_url, "embedding_model": row.model,
-            "embedding_api_key": key, "embedding_dimension": dimension,
+            "embedding_base_url": row.base_url,
+            "embedding_model": row.model,
+            "embedding_api_key": key,
+            "embedding_dimension": dimension,
         }.items():
             setattr(s, field, value)
     else:
@@ -1823,7 +1985,9 @@ def _apply_model_profile(row: ModelProfile) -> None:
             "ONCALL_RERANK_API_KEY": key,
         }
         for field, value in {
-            "rerank_base_url": row.base_url, "rerank_model": row.model, "rerank_api_key": key,
+            "rerank_base_url": row.base_url,
+            "rerank_model": row.model,
+            "rerank_api_key": key,
         }.items():
             setattr(s, field, value)
     update_env_values(values)
@@ -1836,9 +2000,15 @@ async def _activate_model_profile(db: AsyncSession, row: ModelProfile) -> int:
         raise HTTPException(400, "请先测试 Embedding 连接；系统需要识别向量维度后才能启用。")
     db.add(row)
     await db.flush()
-    active_rows = list((await db.scalars(
-        select(ModelProfile).where(ModelProfile.kind == row.kind, ModelProfile.enabled.is_(True))
-    )).all())
+    active_rows = list(
+        (
+            await db.scalars(
+                select(ModelProfile).where(
+                    ModelProfile.kind == row.kind, ModelProfile.enabled.is_(True)
+                )
+            )
+        ).all()
+    )
     for active in active_rows:
         if active.id != row.id:
             active.enabled = False
@@ -1858,11 +2028,15 @@ async def _activate_model_profile(db: AsyncSession, row: ModelProfile) -> int:
             # index is derived data; PostgreSQL documents remain the source of
             # truth and are queued for a complete rebuild at the new dimension.
             await MilvusKnowledgeIndex().reset_collection()
-            version_ids = list((await db.scalars(
-                select(KnowledgeDocument.active_version_id).where(
-                    KnowledgeDocument.active_version_id.is_not(None)
-                )
-            )).all())
+            version_ids = list(
+                (
+                    await db.scalars(
+                        select(KnowledgeDocument.active_version_id).where(
+                            KnowledgeDocument.active_version_id.is_not(None)
+                        )
+                    )
+                ).all()
+            )
             queue = JobQueue(db)
             for version_id in version_ids:
                 await queue.enqueue(
@@ -1895,8 +2069,13 @@ async def _profile_api_key(dto: ModelProbeDTO, db: AsyncSession) -> str:
 
 @app.get("/api/model-profiles")
 async def list_model_profiles(user=Depends(current_user), db: AsyncSession = Depends(get_session)):
-    rows = list((await db.scalars(select(ModelProfile).order_by(ModelProfile.created_at.desc()))).all())
-    return {"profiles": [_model_profile_view(row) for row in rows], "current": _current_model_config()}
+    rows = list(
+        (await db.scalars(select(ModelProfile).order_by(ModelProfile.created_at.desc()))).all()
+    )
+    return {
+        "profiles": [_model_profile_view(row) for row in rows],
+        "current": _current_model_config(),
+    }
 
 
 @app.post("/api/model-profiles")
@@ -1911,8 +2090,12 @@ async def create_model_profile(
         provider=dto.provider,
         base_url=dto.base_url.strip().rstrip("/"),
         model=dto.model.strip(),
-        encrypted_api_key=_model_profile_box().encrypt(dto.api_key.strip()) if dto.api_key and dto.api_key.strip() else None,
-        capabilities={"embedding_dimension": dto.embedding_dimension} if dto.kind == "embedding" and dto.embedding_dimension else {},
+        encrypted_api_key=_model_profile_box().encrypt(dto.api_key.strip())
+        if dto.api_key and dto.api_key.strip()
+        else None,
+        capabilities={"embedding_dimension": dto.embedding_dimension}
+        if dto.kind == "embedding" and dto.embedding_dimension
+        else {},
         enabled=False,
     )
     if dto.activate:
@@ -2072,7 +2255,11 @@ async def test_model_connection(
             if dto.service == "embedding":
                 payload = response.json()
                 vectors = payload.get("data", []) if isinstance(payload, dict) else []
-                vector = vectors[0].get("embedding") if vectors and isinstance(vectors[0], dict) else None
+                vector = (
+                    vectors[0].get("embedding")
+                    if vectors and isinstance(vectors[0], dict)
+                    else None
+                )
                 if not isinstance(vector, list) or not vector:
                     return {"ok": False, "message": "Embedding 服务已响应，但没有返回有效向量。"}
                 embedding_dimension = len(vector)
@@ -2092,7 +2279,10 @@ async def test_model_connection(
     except httpx.RequestError:
         return {"ok": False, "message": "模型服务异常：无法连接，请检查 Endpoint 和网络。"}
     except Exception:
-        return {"ok": False, "message": "模型服务异常：测试请求失败，请检查 Endpoint、模型名称和请求格式。"}
+        return {
+            "ok": False,
+            "message": "模型服务异常：测试请求失败，请检查 Endpoint、模型名称和请求格式。",
+        }
 
 
 @app.post("/api/settings/models/discover")
@@ -2125,32 +2315,91 @@ async def discover_models(
         return {
             "ok": True,
             "models": names,
-            "message": f"发现 {len(names)} 个模型。" if names else "服务响应正常，但没有返回可选模型。",
+            "message": f"发现 {len(names)} 个模型。"
+            if names
+            else "服务响应正常，但没有返回可选模型。",
         }
     except httpx.HTTPStatusError as exc:
         return {"ok": False, "message": _model_api_error(exc.response.status_code), "models": []}
     except httpx.TimeoutException:
         return {"ok": False, "message": "模型服务异常：发现模型请求超时。", "models": []}
     except httpx.RequestError:
-        return {"ok": False, "message": "模型服务异常：无法连接，请检查 Endpoint 和网络。", "models": []}
+        return {
+            "ok": False,
+            "message": "模型服务异常：无法连接，请检查 Endpoint 和网络。",
+            "models": [],
+        }
     except Exception:
-        return {"ok": False, "message": "发现模型失败，请确认服务商支持 OpenAI 兼容的 /models 接口。", "models": []}
+        return {
+            "ok": False,
+            "message": "发现模型失败，请确认服务商支持 OpenAI 兼容的 /models 接口。",
+            "models": [],
+        }
+
+
 @app.get("/api/settings/feishu")
-async def feishu_settings(user=Depends(current_user)):
+async def feishu_settings(request: Request, user=Depends(current_user)):
+    current = get_settings()
+    listener = getattr(request.app.state, "feishu_ws_thread", None)
     return {
-        "enabled": s.feishu_enabled,
-        "app_id": s.feishu_app_id,
-        "app_secret_configured": bool(s.feishu_app_secret),
-        "default_receive_id": s.feishu_default_receive_id,
-        "default_receive_id_type": s.feishu_default_receive_id_type,
-        "restart_required": True,
+        "enabled": current.feishu_enabled,
+        "app_id": current.feishu_app_id,
+        "app_secret_configured": bool(current.feishu_app_secret),
+        "default_receive_id": current.feishu_default_receive_id,
+        "default_receive_id_type": current.feishu_default_receive_id_type,
+        "connected": bool(listener and listener.connected),
+        "connection_error": listener.error if listener else None,
     }
 
 
+async def _reload_feishu_listener(request: Request) -> None:
+    listener = getattr(request.app.state, "feishu_ws_thread", None)
+    if listener:
+        stopped = await asyncio.to_thread(listener.stop)
+        if not stopped:
+            raise HTTPException(503, "旧飞书连接正在关闭，请稍后重试")
+    request.app.state.feishu_ws_thread = None
+    request.app.state.feishu_ws_error = None
+    current = get_settings()
+    if current.feishu_enabled:
+        from oncall.channels.feishu import start_ws_listener
+        from oncall.channels.feishu_gateway import FeishuGateway, build_lark_callback
+
+        request.app.state.feishu_ws_thread = start_ws_listener(
+            build_lark_callback(
+                asyncio.get_running_loop(), FeishuGateway(request.app.state.checkpointer)
+            )
+        )
+
+
+async def _clear_feishu_binding(db: AsyncSession) -> None:
+    # Old chat IDs and queued sends belong to the old bot. Keep the Web history.
+    await db.execute(
+        Notification.__table__.update()
+        .where(Notification.channel == "feishu", Notification.status.in_(["pending", "sending"]))
+        .values(status="suppressed", last_error="Feishu bot disconnected or replaced")
+    )
+    await db.execute(delete(ChannelBinding).where(ChannelBinding.channel == "feishu"))
+    await db.execute(delete(FeishuMessageLink))
+    await db.execute(
+        Notification.__table__.update()
+        .where(Notification.channel == "feishu", Notification.status == "sent")
+        .values(payload=Notification.payload.op("-")("message_id").op("-")("root_id"))
+    )
+
+
 @app.put("/api/settings/feishu")
-async def update_feishu_settings(dto: FeishuSettingsDTO, user=Depends(current_user)):
+async def update_feishu_settings(
+    dto: FeishuSettingsDTO,
+    request: Request,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    current = get_settings()
     app_id = dto.app_id.strip()
-    app_secret = (dto.app_secret or "").strip() or s.feishu_app_secret
+    app_secret = (dto.app_secret or "").strip() or (
+        current.feishu_app_secret if app_id == current.feishu_app_id else ""
+    )
     if dto.enabled and (not app_id or not app_secret):
         raise HTTPException(400, "启用飞书时必须填写 App ID 和 App Secret")
     if dto.enabled:
@@ -2171,6 +2420,9 @@ async def update_feishu_settings(dto: FeishuSettingsDTO, user=Depends(current_us
             or not body.get("tenant_access_token")
         ):
             raise HTTPException(400, f"飞书凭证验证失败：{body.get('msg') or 'unknown error'}")
+    if app_id != current.feishu_app_id:
+        await _clear_feishu_binding(db)
+        await db.commit()
     update_env_values(
         {
             "ONCALL_FEISHU_ENABLED": str(dto.enabled).lower(),
@@ -2180,11 +2432,35 @@ async def update_feishu_settings(dto: FeishuSettingsDTO, user=Depends(current_us
             "ONCALL_FEISHU_DEFAULT_RECEIVE_ID_TYPE": dto.default_receive_id_type,
         }
     )
+    await _reload_feishu_listener(request)
     return {
         "ok": True,
-        "message": "飞书配置已保存，重启 API 和 Agent Worker 后生效",
-        "restart_required": True,
+        "message": "飞书配置已保存，连接正在建立。请在飞书给机器人发送一条消息以绑定接收会话。"
+        if dto.enabled
+        else "飞书已停用。",
+        "restart_required": False,
     }
+
+
+@app.delete("/api/settings/feishu")
+async def delete_feishu_settings(
+    request: Request,
+    user=Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    update_env_values(
+        {
+            "ONCALL_FEISHU_ENABLED": "false",
+            "ONCALL_FEISHU_APP_ID": "",
+            "ONCALL_FEISHU_APP_SECRET": "",
+            "ONCALL_FEISHU_DEFAULT_RECEIVE_ID": "",
+            "ONCALL_FEISHU_DEFAULT_RECEIVE_ID_TYPE": "chat_id",
+        }
+    )
+    await _reload_feishu_listener(request)
+    await _clear_feishu_binding(db)
+    await db.commit()
+    return {"ok": True, "message": "已解绑飞书机器人；Web 运维主会话和历史消息已保留。"}
 
 
 @app.get("/api/settings/tool-contracts")

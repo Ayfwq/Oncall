@@ -1,21 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from uuid import UUID
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
-from oncall.application.agent_service import AgentService
 from oncall.agent.model_gateway import ModelServiceError
-from oncall.application.conversation_service import ConversationService
+from oncall.application.agent_service import AgentService
+from oncall.application.ops_conversation import OpsConversationService
 from oncall.application.workspace_service import ensure_local_user
 from oncall.channels.feishu_events import FeishuInboundMessage, parse_lark_message
 from oncall.infrastructure.db.models import (
     ChannelBinding,
     Conversation,
+    ConversationSummary,
     FeishuMessageLink,
+    Incident,
+    Message,
     Notification,
     ProcessedChannelEvent,
+    Project,
     User,
 )
 from oncall.infrastructure.db.session import SessionFactory
@@ -32,23 +38,6 @@ class FeishuGateway:
         return user
 
     async def _conversation_for_message(self, db, msg: FeishuInboundMessage) -> Conversation:
-        anchors = [x for x in (msg.root_id, msg.parent_id) if x]
-        if anchors:
-            link = await db.scalar(
-                select(FeishuMessageLink)
-                .where(
-                    or_(
-                        FeishuMessageLink.message_id.in_(anchors),
-                        FeishuMessageLink.root_id.in_(anchors),
-                    )
-                )
-                .order_by(FeishuMessageLink.created_at.desc())
-                .limit(1)
-            )
-            if link:
-                conv = await db.get(Conversation, link.conversation_id)
-                if conv:
-                    return conv
         binding = await db.scalar(
             select(ChannelBinding)
             .where(
@@ -58,12 +47,13 @@ class FeishuGateway:
             )
             .limit(1)
         )
-        if binding and binding.conversation_id:
-            conv = await db.get(Conversation, binding.conversation_id)
-            if conv:
-                return conv
-        user = await self._first_user(db)
-        conv = await ConversationService(db).create(user.id, title="飞书运维会话", type_="chat")
+        bound = (
+            await db.get(Conversation, binding.conversation_id)
+            if binding and binding.conversation_id
+            else None
+        )
+        user = await db.get(User, bound.user_id) if bound else await self._first_user(db)
+        conv = await OpsConversationService(db).get_or_create(user.id)
         if binding:
             binding.conversation_id = conv.id
         else:
@@ -78,29 +68,57 @@ class FeishuGateway:
         await db.commit()
         return conv
 
-    async def _new_conversation(self, db, msg: FeishuInboundMessage) -> Conversation:
-        user = await self._first_user(db)
-        conv = await ConversationService(db).create(user.id, title="飞书新会话", type_="chat")
-        binding = await db.scalar(
-            select(ChannelBinding).where(
-                ChannelBinding.channel == "feishu",
-                ChannelBinding.external_chat == msg.chat_id,
-                ChannelBinding.external_user == msg.sender_id,
+    async def _incident_for_message(
+        self, db, msg: FeishuInboundMessage, user_id: UUID
+    ) -> UUID | None:
+        anchors = [value for value in (msg.root_id, msg.parent_id) if value]
+        if anchors:
+            link = await db.scalar(
+                select(FeishuMessageLink)
+                .where(
+                    FeishuMessageLink.chat_id == msg.chat_id,
+                    or_(
+                        FeishuMessageLink.message_id.in_(anchors),
+                        FeishuMessageLink.root_id.in_(anchors),
+                    ),
+                    FeishuMessageLink.incident_id.is_not(None),
+                )
+                .order_by(FeishuMessageLink.created_at.desc())
+                .limit(1)
             )
+            if link:
+                return link.incident_id
+        for match in re.finditer(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}\b", msg.text):
+            try:
+                candidate = UUID(match.group())
+            except ValueError:
+                continue
+            owned = await db.scalar(
+                select(Incident.id)
+                .join(Project, Project.id == Incident.project_id)
+                .where(Incident.id == candidate, Project.user_id == user_id)
+            )
+            if owned:
+                return owned
+        return None
+
+    async def _reset_conversation(self, db, conv: Conversation) -> None:
+        latest = await db.scalar(
+            select(Message)
+            .where(Message.conversation_id == conv.id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(1)
         )
-        if binding:
-            binding.conversation_id = conv.id
-        else:
+        if latest:
             db.add(
-                ChannelBinding(
-                    channel="feishu",
-                    external_user=msg.sender_id,
-                    external_chat=msg.chat_id,
+                ConversationSummary(
                     conversation_id=conv.id,
+                    through_message_id=latest.id,
+                    summary="",
+                    token_estimate=0,
                 )
             )
         await db.commit()
-        return conv
 
     async def handle(self, msg: FeishuInboundMessage) -> None:
         async with SessionFactory() as db:
@@ -128,17 +146,20 @@ class FeishuGateway:
                 event.attempts += 1
                 event.last_error = None
                 await db.commit()
+            incident_id = None
             try:
                 if msg.text.strip().lower() in {"/new", "新会话", "新建会话"}:
-                    conv = await self._new_conversation(db, msg)
-                    reply = f"已创建新会话：{conv.title}"
+                    conv = await self._conversation_for_message(db, msg)
+                    await self._reset_conversation(db, conv)
+                    reply = "已清空当前运维会话的模型上下文，历史消息仍可在 Web 查看。"
                 elif msg.text.strip().lower() in {"/help", "帮助"}:
                     conv = await self._conversation_for_message(db, msg)
-                    reply = "可以直接询问运维问题；回复 Incident 告警可继续追问。发送 /new 可创建新会话。"
+                    reply = "可以直接询问运维问题；回复告警消息或附上事件 ID 可查询对应告警。发送 /new 可重置上下文。"
                 else:
                     conv = await self._conversation_for_message(db, msg)
+                    incident_id = await self._incident_for_message(db, msg, conv.user_id)
                     state = await AgentService(db, self.checkpointer).run(
-                        conv.id, msg.text, channel="feishu"
+                        conv.id, msg.text, channel="feishu", incident_id_override=incident_id
                     )
                     reply = state.get("final_response") or "PulseOps 未生成有效回复。"
 
@@ -149,14 +170,14 @@ class FeishuGateway:
                             root_id=msg.root_id or msg.parent_id,
                             chat_id=msg.chat_id,
                             conversation_id=conv.id,
-                            incident_id=conv.incident_id,
+                            incident_id=incident_id,
                         )
                     )
                 # Do not perform Feishu network I/O inside event processing. Durable outbox
                 # makes retries safe and prevents a transient send error from re-running Agent.
                 db.add(
                     Notification(
-                        incident_id=conv.incident_id,
+                        incident_id=incident_id,
                         channel="feishu",
                         target=msg.chat_id,
                         status="pending",
@@ -193,13 +214,15 @@ class FeishuGateway:
                 try:
                     db.add(
                         Notification(
-                            incident_id=(conv.incident_id if conv else None),
+                            incident_id=incident_id,
                             channel="feishu",
                             target=msg.chat_id,
                             status="pending",
                             payload={
                                 "kind": "reply",
-                                "text": str(exc) if isinstance(exc, ModelServiceError) else f"抱歉，本次请求处理失败（{type(exc).__name__}），请稍后再试或联系管理员。",
+                                "text": str(exc)
+                                if isinstance(exc, ModelServiceError)
+                                else f"抱歉，本次请求处理失败（{type(exc).__name__}），请稍后再试或联系管理员。",
                                 "conversation_id": (str(conv.id) if conv else None),
                                 "root_id": msg.root_id or msg.message_id,
                                 "receive_id_type": "chat_id",

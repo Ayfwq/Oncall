@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+import httpx
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -158,7 +159,23 @@ class KnowledgeRetriever:
                     ok=False, summary="知识库检索参数为空", error_code="INVALID_QUERY"
                 )
             top_k = max(1, min(int(top_k), 10))
-            vector = (await self.embedder.embed([query]))[0]
+            try:
+                vector = (await self.embedder.embed([query]))[0]
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                return ToolResult(
+                    ok=False,
+                    summary=f"Embedding 模型不可用（HTTP {status}），本次未检索知识库。",
+                    error_code="EMBEDDING_UNAVAILABLE",
+                    data={"error": redact_text(str(exc))},
+                )
+            except Exception as exc:
+                return ToolResult(
+                    ok=False,
+                    summary="Embedding 模型不可用，本次未检索知识库。",
+                    error_code="EMBEDDING_UNAVAILABLE",
+                    data={"error": redact_text(str(exc))},
+                )
             dense, bm25 = await __import__("asyncio").gather(
                 self.index.dense_search(vector, 20), self.index.bm25_search(query, 20)
             )

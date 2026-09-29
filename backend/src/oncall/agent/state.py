@@ -22,6 +22,7 @@ class OncallState(TypedDict, total=False):
     clarification_question: str | None
     working_messages: list[dict[str, str]]
     conversation_summary: str | None
+    long_term_facts: list[dict[str, Any]]
     project_context: dict[str, Any] | None
     previous_diagnosis: dict[str, Any] | None
     incident_context: dict[str, Any] | None
@@ -38,6 +39,7 @@ class OncallState(TypedDict, total=False):
     knowledge_refs: list[dict[str, Any]]
     knowledge_query: str | None
     knowledge_status: str
+    knowledge_error: str | None
     knowledge_hits: list[dict[str, Any]]
     retrieved_citations: list[dict[str, Any]]
     used_citations: list[dict[str, Any]]
@@ -47,4 +49,5 @@ class OncallState(TypedDict, total=False):
     answer_sources: list[dict[str, Any]]
     diagnosis: dict[str, Any] | None
     final_response: str | None
+    force_notification: bool
     exhausted: bool

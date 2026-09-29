@@ -9,7 +9,7 @@ const route = useRoute(), router = useRouter(), id = String(route.params.id), it
 async function load() { item.value = await api<IncidentDetail>(`/incidents/${id}`); trace.value = await api<IncidentTrace>(`/incidents/${id}/trace`) }
 async function investigate() { busy.value = true; try { await api(`/incidents/${id}/investigate`, { method: 'POST' }); await load() } finally { busy.value = false } }
 async function resolve() { await api(`/incidents/${id}/resolve`, { method: 'POST' }); await load() }
-async function chat() { const r = await api<{ conversation_id: string }>(`/incidents/${id}/conversation`, { method: 'POST' }); router.push('/?conversation=' + r.conversation_id) }
+async function chat() { const r = await api<{ conversation_id: string }>(`/incidents/${id}/conversation`, { method: 'POST' }); router.push('/?conversation=' + r.conversation_id + '&incident=' + id) }
 onMounted(load)
 const sev = (s: string) => s === 'critical' ? 'err' : 'warn'
 const toolLabels: Record<string, string> = {

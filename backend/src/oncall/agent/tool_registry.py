@@ -13,13 +13,16 @@ from sqlalchemy.exc import IntegrityError, PendingRollbackError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.agent.tool_contracts import ALLOWED_TOOLS, validate_tool_args
+from oncall.application.alert_labels import severity_label, status_label
 from oncall.application.project_service import ProjectService
 from oncall.domain.schemas import ToolResult
 from oncall.infrastructure.db.models import (
     AgentRun,
     AlertmanagerAlert,
+    Conversation,
     Incident,
     IncidentEvidence,
+    Project,
     RetrievalTrace,
     ToolRun,
 )
@@ -47,7 +50,7 @@ class ToolRegistry:
     ) -> ToolResult:
         if name not in ALLOWED_TOOLS:
             return ToolResult(ok=False, summary="工具未授权", error_code="TOOL_NOT_ALLOWED")
-        if name != "search_knowledge" and not ctx.project_id:
+        if name not in ("search_knowledge", "query_active_alerts") and not ctx.project_id:
             return ToolResult(
                 ok=False, summary="该工具需要绑定 Project", error_code="PROJECT_REQUIRED"
             )
@@ -139,6 +142,45 @@ class ToolRegistry:
             # returning the tool evidence to the graph.
             await self.session.rollback()
         return result
+
+    async def _active_alerts(self, ctx: ToolExecutionContext) -> ToolResult:
+        run = await self.session.get(AgentRun, ctx.agent_run_id)
+        conv = await self.session.get(Conversation, run.conversation_id) if run else None
+        if not conv:
+            return ToolResult(ok=False, summary="无法确认当前会话所属用户", error_code="CONVERSATION_REQUIRED")
+        rows = (
+            await self.session.execute(
+                select(Incident, Project.name)
+                .join(Project, Project.id == Incident.project_id)
+                .where(
+                    Project.user_id == conv.user_id,
+                    Incident.resolved_at.is_(None),
+                    Incident.status.in_(["open", "investigating", "diagnosed"]),
+                )
+                .order_by(Incident.last_seen.desc(), Incident.id.desc())
+                .limit(51)
+            )
+        ).all()
+        alerts = [
+            {
+                "incident_id": str(inc.id),
+                "project": project_name,
+                "alertname": inc.anomaly_type,
+                "resource": inc.resource_key,
+                "severity": severity_label(inc.severity),
+                "status": status_label(inc.status),
+                "summary": inc.summary[:400],
+                "last_seen": inc.last_seen.isoformat() if inc.last_seen else None,
+            }
+            for inc, project_name in rows[:50]
+        ]
+        return ToolResult(
+            ok=True,
+            summary=f"PulseOps 当前记录 {len(alerts)} 条未恢复告警事件"
+            + ("（仅显示最近 50 条）" if len(rows) > 50 else ""),
+            observed_at=datetime.now().astimezone(),
+            data={"source": "pulseops_incidents", "alerts": alerts, "truncated": len(rows) > 50},
+        )
 
     async def _incident_context(self, ctx: ToolExecutionContext) -> ToolResult:
         if not ctx.incident_id:
@@ -284,6 +326,8 @@ class ToolRegistry:
         )
 
     async def _dispatch(self, name: str, args: dict, ctx: ToolExecutionContext) -> ToolResult:
+        if name == "query_active_alerts":
+            return await self._active_alerts(ctx)
         if name == "search_knowledge":
             if self._retriever is None:
                 # Reuse the DB session to load adjacent chunks for complete

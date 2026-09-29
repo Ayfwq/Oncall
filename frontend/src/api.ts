@@ -25,11 +25,12 @@ export async function streamChat(
   id: string,
   content: string,
   onEvent: StreamEventHandler,
+  incidentId?: string | null,
 ): Promise<void> {
   const r = await fetch(`/api/conversations/${id}/messages:stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, incident_id: incidentId || null }),
   })
   if (!r.ok) throw new ApiError(r.status, await r.text())
   const reader = r.body!.getReader()

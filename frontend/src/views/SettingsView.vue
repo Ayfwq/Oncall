@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../api'
 import type { FeishuReceiveType, FeishuSettings, Readiness } from '../types'
 import ModelsView from './ModelsView.vue'
@@ -13,22 +13,33 @@ interface FeishuForm {
   default_receive_id_type: FeishuReceiveType
 }
 
+interface MemoryFact {
+  id: string
+  content: string
+  project_id: string | null
+}
+
 const readiness = ref<Readiness | null>(null)
 const feishu = ref<FeishuForm>({ enabled: false, app_id: '', app_secret: '', app_secret_configured: false, default_receive_id: '', default_receive_id_type: 'chat_id' })
 const error = ref('')
 const message = ref('')
 const savingFeishu = ref(false)
+const deletingFeishu = ref(false)
+const memories = ref<MemoryFact[]>([])
+const newMemory = ref('')
+const savingMemory = ref(false)
 
 function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e) }
 
 async function load() {
   error.value = ''
   try {
-    const [r, f] = await Promise.all([
-      api<Readiness>('/settings/readiness'), api<FeishuSettings>('/settings/feishu'),
+    const [r, f, m] = await Promise.all([
+      api<Readiness>('/settings/readiness'), api<FeishuSettings>('/settings/feishu'), api<MemoryFact[]>('/memories'),
     ])
     readiness.value = r
     feishu.value = { ...f, app_secret: '' }
+    memories.value = m
   } catch (e) { error.value = errorText(e) }
 }
 
@@ -47,12 +58,53 @@ async function saveFeishu() {
     message.value = result.message || '飞书配置已保存'
     feishu.value.app_secret = ''
     feishu.value.app_secret_configured = Boolean(payload.app_secret || feishu.value.app_secret_configured)
+    readiness.value = await api<Readiness>('/settings/readiness')
+    setTimeout(() => { load() }, 2500)
   } catch (e) { error.value = errorText(e) }
   finally { savingFeishu.value = false }
 }
 
+async function deleteFeishu() {
+  if (!confirm('解绑当前飞书机器人？旧凭证、接收位置和待发送飞书消息会清除；Web 会话历史会保留。')) return
+  error.value = ''; message.value = ''; deletingFeishu.value = true
+  try {
+    const result = await api<{ message: string }>('/settings/feishu', { method: 'DELETE' })
+    await load()
+    message.value = result.message
+  } catch (e) { error.value = errorText(e) }
+  finally { deletingFeishu.value = false }
+}
+
+async function addMemory() {
+  if (!newMemory.value.trim()) return
+  error.value = ''; message.value = ''; savingMemory.value = true
+  try {
+    await api('/memories', { method: 'POST', body: JSON.stringify({ content: newMemory.value.trim() }) })
+    newMemory.value = ''
+    memories.value = await api<MemoryFact[]>('/memories')
+    message.value = '记忆已保存'
+  } catch (e) { error.value = errorText(e) }
+  finally { savingMemory.value = false }
+}
+
+async function removeMemory(id: string) {
+  error.value = ''; message.value = ''
+  try {
+    await api(`/memories/${id}`, { method: 'DELETE' })
+    memories.value = memories.value.filter(item => item.id !== id)
+    message.value = '记忆已删除'
+  } catch (e) { error.value = errorText(e) }
+}
+
 function badge(ok: boolean) { return ok ? 'ok' : 'err' }
-onMounted(load)
+let statusTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  load()
+  statusTimer = setInterval(async () => {
+    try { readiness.value = await api<Readiness>('/settings/readiness') } catch { /* Keep last known state. */ }
+  }, 10000)
+})
+onUnmounted(() => { if (statusTimer) clearInterval(statusTimer) })
 </script>
 
 <template>
@@ -72,19 +124,33 @@ onMounted(load)
       </div>
 
       <div class="card">
+        <h3>长期记忆</h3>
+        <p class="muted">只保存你明确要求记住的事实；新建对话后仍可使用。</p>
+        <el-input v-model="newMemory" type="textarea" :rows="2" placeholder="例如：我偏好先给出排查步骤，再给出原因分析" />
+        <el-button type="primary" :loading="savingMemory" style="margin-top: 10px" @click="addMemory">保存记忆</el-button>
+        <div v-if="memories.length" class="memory-list">
+          <div v-for="item in memories" :key="item.id" class="memory-row">
+            <span>{{ item.content }}<small v-if="item.project_id" class="muted">（项目记忆）</small></span>
+            <el-button type="danger" link @click="removeMemory(item.id)">删除</el-button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>飞书接入</h3>
-        <p class="muted">只需填写应用凭证。保存并重启服务后，在目标飞书会话中给机器人发送一条消息，系统会自动绑定接收位置。</p>
+        <p class="muted">填写应用凭证并保存，系统会验证并连接。随后在目标飞书会话中给机器人发送一条消息，即可绑定告警接收位置。所有告警会同步到 Web 的运维主会话。</p>
         <el-form label-position="top">
           <el-form-item label="启用飞书"><el-switch v-model="feishu.enabled" /></el-form-item>
           <el-form-item label="App ID"><el-input v-model="feishu.app_id" placeholder="cli_..." /></el-form-item>
-          <el-form-item label="App Secret"><el-input v-model="feishu.app_secret" type="password" show-password placeholder="留空表示保持已有密钥" /><small v-if="feishu.app_secret_configured" class="muted">已有密钥已配置，页面不会回显。</small></el-form-item>
+          <el-form-item label="App Secret"><el-input v-model="feishu.app_secret" type="password" show-password placeholder="App ID 不变时可留空" /><small v-if="feishu.app_secret_configured" class="muted">已有密钥已配置，页面不会回显；更换 App ID 时请填写新密钥。</small></el-form-item>
           <el-button type="primary" :loading="savingFeishu" @click="saveFeishu">验证凭证并保存</el-button>
+          <el-button v-if="feishu.app_id || feishu.app_secret_configured" type="danger" plain :loading="deletingFeishu" @click="deleteFeishu">解绑并删除当前机器人</el-button>
         </el-form>
       </div>
     </div>
 
     <div class="settings-stack status-stack" v-if="readiness">
-      <div class="card"><h3>飞书状态</h3><p class="muted" style="margin: 0">{{ readiness.feishu.enabled ? '已启用' : '未启用' }}</p><div style="margin-top: 12px"><span class="badge" :class="readiness.feishu.configured ? 'ok' : 'neutral'">{{ readiness.feishu.configured ? '凭证完整' : '未接入' }}</span></div></div>
+      <div class="card"><h3>飞书状态</h3><p class="muted" style="margin: 0">{{ !readiness.feishu.enabled ? '未启用' : readiness.feishu.connected ? '已连接' : '连接中 / 待检查' }}</p><div style="margin-top: 12px"><span class="badge" :class="readiness.feishu.connected ? 'ok' : 'neutral'">{{ readiness.feishu.connected ? '长连接正常' : readiness.feishu.configured ? '凭证已验证' : '未接入' }}</span><span v-if="readiness.feishu.bound" class="badge ok" style="margin-left: 8px">接收会话已绑定</span></div><p v-if="readiness.feishu.error" class="muted" style="margin: 10px 0 0">连接错误：{{ readiness.feishu.error }}</p></div>
       <div class="card"><h3>数据存储</h3><div class="kv"><span>PostgreSQL</span><span class="badge ok">已连接</span></div><div class="kv"><span>Milvus</span><span class="badge ok">已连接</span></div></div>
     </div>
   </div>
@@ -92,4 +158,5 @@ onMounted(load)
 
 <style scoped>
 .settings-page{max-width:1160px}.settings-stack{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}.settings-forms{margin-bottom:18px}.settings-stack>.card{width:100%;padding:24px 26px}.settings-stack>.card h3{margin-top:0}.model-settings-card>p{margin:0 0 18px}.settings-forms :deep(.el-form){max-width:680px}.status-stack>.card{padding-top:20px;padding-bottom:20px}@media(max-width:700px){.settings-stack>.card{padding:20px 18px}}
+.memory-list{margin-top:18px;border-top:1px solid #e5e7eb}.memory-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid #e5e7eb}.memory-row span{overflow-wrap:anywhere}
 </style>

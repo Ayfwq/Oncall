@@ -7,14 +7,16 @@ import httpx
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from oncall.application.ops_conversation import OpsConversationService
 from oncall.bootstrap.config import get_settings
 from oncall.channels.notification_policy import is_cooldown_kind, retry_delay_seconds
 from oncall.infrastructure.db.models import (
+    ChannelBinding,
     Conversation,
     FeishuMessageLink,
     Incident,
-    Message,
     Notification,
+    Project,
 )
 
 
@@ -176,6 +178,7 @@ class FeishuOutboxSender:
         if (
             not n.incident_id
             or not is_cooldown_kind(kind)
+            or n.payload.get("force_delivery")
             or self.s.notification_cooldown_seconds <= 0
         ):
             return False
@@ -217,9 +220,13 @@ class FeishuOutboxSender:
             ).all()
         )
         for row in rows:
-            if row.payload.get("kind") in {"triggered", "escalated", "reopened"} and row.payload.get(
-                "message_id"
-            ):
+            if row.payload.get("app_id") not in (None, self.s.feishu_app_id):
+                continue
+            if row.payload.get("kind") in {
+                "triggered",
+                "escalated",
+                "reopened",
+            } and row.payload.get("message_id"):
                 return str(row.payload["message_id"])
         return None
 
@@ -261,19 +268,21 @@ class FeishuOutboxSender:
         # Resolve the "default" push target once per outbox tick. If the
         # env default is set, use it (and honour the env receive_id_type,
         # which may be 'chat_id' or 'open_id'). Otherwise fall back to the
-        # chat of the most recent Feishu message so a brand-new user only
-        # needs to message the bot once for active push to start working
-        # (no chat_id hunting). The fallback is always a chat_id.
+        # first bound Feishu chat. Later questions from other chats must not
+        # silently redirect every proactive alert to a different recipient.
         default_target = self.s.feishu_default_receive_id
         if default_target:
             default_type = self.s.feishu_default_receive_id_type
         else:
             default_type = "chat_id"
-            fb = await self.session.scalar(
-                select(FeishuMessageLink).order_by(FeishuMessageLink.created_at.desc()).limit(1)
+            binding = await self.session.scalar(
+                select(ChannelBinding)
+                .where(ChannelBinding.channel == "feishu", ChannelBinding.external_chat.is_not(None))
+                .order_by(ChannelBinding.created_at.asc(), ChannelBinding.id.asc())
+                .limit(1)
             )
-            if fb:
-                default_target = fb.chat_id
+            if binding:
+                default_target = binding.external_chat
         sent = 0
         for n in rows:
             if n.target == "default":
@@ -285,16 +294,22 @@ class FeishuOutboxSender:
                 # own receive_id_type in the payload; default to chat_id.
                 rid_type = str(n.payload.get("receive_id_type") or "chat_id")
             if not target:
-                n.status = "dead"
-                n.last_error = "Feishu receive_id is not configured (message the bot once to auto-bind, or set ONCALL_FEISHU_DEFAULT_RECEIVE_ID)"
-                # This branch used to skip the per-row commit below, leaving the
-                # notification stuck in ``sending`` until the stale-claim timeout.
+                # Keep alerts queued until the first inbound message binds a
+                # chat. Missing a target is setup state, not a delivery failure.
+                n.status = "pending"
+                n.attempts -= 1
+                n.available_at = datetime.now().astimezone() + timedelta(seconds=15)
+                n.last_error = "等待飞书会话绑定"
                 await self.session.commit()
                 continue
             kind = n.payload.get("kind")
             if kind in {"escalated", "reopened"} and n.incident_id:
                 incident = await self.session.get(Incident, n.incident_id)
-                if not incident or incident.status == "resolved" or incident.resolved_at is not None:
+                if (
+                    not incident
+                    or incident.status == "resolved"
+                    or incident.resolved_at is not None
+                ):
                     n.status = "suppressed"
                     n.last_error = "incident resolved before notification"
                     await self.session.commit()
@@ -331,8 +346,19 @@ class FeishuOutboxSender:
                 n.status = "sent"
                 n.sent_at = datetime.now().astimezone()
                 n.last_error = None
-                n.payload = {**n.payload, "message_id": message_id}
+                n.payload = {**n.payload, "message_id": message_id, "app_id": self.s.feishu_app_id}
                 sent += 1
+                # Trigger, diagnosis and recovery are recorded when queued.
+                # An escalation is conditional, so record it only after send.
+                if n.incident_id and kind == "escalated":
+                    incident = await self.session.get(Incident, n.incident_id)
+                    project = (
+                        await self.session.get(Project, incident.project_id) if incident else None
+                    )
+                    if project:
+                        await OpsConversationService(self.session).record_notification(
+                            project.user_id, n
+                        )
                 if message_id:
                     conv = None
                     conversation_id = n.payload.get("conversation_id")
@@ -357,33 +383,9 @@ class FeishuOutboxSender:
                                 root_id=n.payload.get("root_id"),
                                 chat_id=target,
                                 conversation_id=conv.id,
-                                incident_id=conv.incident_id,
+                                incident_id=n.incident_id,
                             )
                         )
-                    if conv and kind in {"escalated", "reopened"}:
-                        existing_message = await self.session.scalar(
-                            select(Message)
-                            .where(
-                                Message.conversation_id == conv.id,
-                                Message.metadata_json["notification_id"].astext == str(n.id),
-                            )
-                            .limit(1)
-                        )
-                        if existing_message is None:
-                            self.session.add(
-                                Message(
-                                    conversation_id=conv.id,
-                                    role="assistant",
-                                    content=text,
-                                    channel="monitor",
-                                    metadata_json={
-                                        "notification_id": str(n.id),
-                                        "kind": kind,
-                                        "stage": n.payload.get("stage"),
-                                    },
-                                )
-                            )
-                            conv.updated_at = datetime.now().astimezone()
             except Exception as exc:
                 n.last_error = str(exc)[:4000]
                 if n.attempts >= n.max_attempts:
@@ -399,49 +401,87 @@ class FeishuOutboxSender:
         return sent
 
 
-def start_ws_listener(on_message):
-    """Starts official lark-oapi websocket client in a daemon thread.
+class FeishuWsListener:
+    """Reconnectable Feishu listener that can be stopped when credentials change."""
 
-    The callback acknowledges quickly; application work is scheduled on the API loop.
+    def __init__(self, on_message):
+        import threading
 
-    Implementation note: lark_oapi.ws.client binds ``loop = asyncio.get_event_loop()``
-    at *import time* as a module-level global, and ``Client.__init__`` also creates
-    an ``asyncio.Lock()`` bound to the current loop. If lark_oapi is imported in
-    the main uvicorn thread (which already runs an asyncio loop), that module
-    global is the running main loop and ``client.start()`` raises
-    "This event loop is already running". We therefore do the lark_oapi import,
-    dispatcher build and Client construction *inside* the daemon thread so the
-    SDK binds to a fresh, non-running loop owned by that thread. Inbound
-    callbacks still cross-thread into the main API loop via
-    ``asyncio.run_coroutine_threadsafe`` (see ``build_lark_callback``).
-    """
-    s = get_settings()
-    if not s.feishu_enabled:
-        return None
-    import asyncio
-    import threading
+        self.on_message = on_message
+        self.stop_event = threading.Event()
+        self.connected = False
+        self.error: str | None = None
+        self.thread = threading.Thread(target=self._run, name="feishu-ws", daemon=True)
 
-    def _run():
+    def start(self):
+        self.thread.start()
+        return self
+
+    def stop(self) -> bool:
+        self.stop_event.set()
+        self.thread.join(timeout=8)
+        return not self.thread.is_alive()
+
+    def _run(self):
+        import asyncio
+
         import lark_oapi as lark
 
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        # Defensive: rebind the module-level loop in case lark_oapi was
-        # ever imported elsewhere in this process on a different loop.
-        lark.ws.client.loop = new_loop
+        settings = get_settings()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        # The SDK stores its loop at module level; only one listener may run
+        # in this API process. Stop the old listener before starting another.
+        lark.ws.client.loop = loop
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
-            .register_p2_im_message_receive_v1(on_message)
+            .register_p2_im_message_receive_v1(self.on_message)
             .build()
         )
         client = lark.ws.Client(
-            s.feishu_app_id,
-            s.feishu_app_secret,
+            settings.feishu_app_id,
+            settings.feishu_app_secret,
             event_handler=dispatcher,
-            log_level=lark.LogLevel.INFO,
+            # The SDK's INFO connection line contains a signed WS URL.
+            log_level=lark.LogLevel.WARNING,
+            auto_reconnect=False,
         )
-        client.start()
 
-    t = threading.Thread(target=_run, name="feishu-ws", daemon=True)
-    t.start()
-    return t
+        async def serve():
+            while not self.stop_event.is_set():
+                ping = None
+                try:
+                    await client._connect()
+                    self.connected = True
+                    self.error = None
+                    ping = asyncio.create_task(client._ping_loop())
+                    while not self.stop_event.is_set() and client._conn is not None:
+                        await asyncio.sleep(0.5)
+                except Exception as exc:
+                    self.error = str(exc)[:500]
+                finally:
+                    self.connected = False
+                    if ping:
+                        ping.cancel()
+                        await asyncio.gather(ping, return_exceptions=True)
+                    await client._disconnect()
+                if not self.stop_event.is_set():
+                    await asyncio.sleep(3)
+
+        try:
+            loop.run_until_complete(serve())
+        except Exception as exc:
+            self.error = str(exc)[:500]
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+
+
+def start_ws_listener(on_message):
+    if not get_settings().feishu_enabled:
+        return None
+    return FeishuWsListener(on_message).start()

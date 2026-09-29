@@ -1,4 +1,4 @@
-export type ConversationType = 'chat' | 'incident'
+export type ConversationType = 'chat' | 'incident' | 'ops'
 
 export interface Conversation {
   id: string
@@ -12,7 +12,7 @@ export interface Conversation {
 
 export interface ChatMessage {
   id?: string
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'event'
   content: string
   channel?: string
   created_at?: string
@@ -260,6 +260,9 @@ export interface Readiness {
   feishu: {
     enabled: boolean
     configured: boolean
+    connected: boolean
+    bound: boolean
+    error: string | null
     default_receive_id_configured: boolean
     auto_bind_supported: boolean
   }
@@ -275,7 +278,8 @@ export interface FeishuSettings {
   app_secret_configured: boolean
   default_receive_id: string
   default_receive_id_type: FeishuReceiveType
-  restart_required: boolean
+  connected: boolean
+  connection_error: string | null
 }
 
 export interface ModelSettings {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime
@@ -11,11 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.agent.context_builder import ContextBuilder
 from oncall.agent.model_gateway import ModelProvider, get_model_provider
+from oncall.agent.prompts import DECISION_SCHEMA, STREAM_ANSWER_PROMPT, SYSTEM_PROMPT
 from oncall.agent.router import classify_intent
 from oncall.agent.state import OncallState
 from oncall.agent.tool_contracts import ALLOWED_TOOLS, public_tool_specs
 from oncall.agent.tool_registry import ToolExecutionContext, ToolRegistry
+from oncall.application.alert_labels import localize_alert_answer, severity_label
 from oncall.application.conversation_service import ConversationService
+from oncall.application.memory_policy import count_tokens, trim_to_tokens
+from oncall.application.ops_conversation import OpsConversationService
+from oncall.bootstrap.config import get_settings
 from oncall.domain.schemas import DiagnosisReport, EvidenceItem, ToolResult
 from oncall.infrastructure.db.models import (
     AgentRun,
@@ -23,6 +29,7 @@ from oncall.infrastructure.db.models import (
     Incident,
     IncidentEvidence,
     Notification,
+    Project,
 )
 from oncall.security.redact import redact_text
 
@@ -149,9 +156,7 @@ def _citation_metadata(state: OncallState) -> dict:
         if isinstance(x, dict) and x.get("citation_id")
     }
     used_chunks = {
-        str(x.get("chunk_id"))
-        for x in used_items
-        if isinstance(x, dict) and x.get("chunk_id")
+        str(x.get("chunk_id")) for x in used_items if isinstance(x, dict) and x.get("chunk_id")
     }
     if not used_items:
         used_ids.update(re.findall(r"\bKB-\d+\b", str(state.get("final_response") or "")))
@@ -222,6 +227,7 @@ class OncallGraphRuntime:
                 "previous_diagnosis",
                 "conversation_summary",
                 "working_messages",
+                "long_term_facts",
                 "evidence",
                 "called_tools",
                 "tool_calls_used",
@@ -229,6 +235,7 @@ class OncallGraphRuntime:
                 "knowledge_refs",
                 "knowledge_hits",
                 "knowledge_status",
+                "knowledge_error",
                 "intent",
                 "route_reason",
                 "requires_realtime",
@@ -246,7 +253,48 @@ class OncallGraphRuntime:
         context["evidence"] = self._trim_for_context(
             state.get("evidence"), max_items=10, max_chars=500
         )
+        context["working_messages"] = [dict(m) for m in (context.get("working_messages") or [])]
+        # The current question is already a dedicated field in the prompt.
+        if (
+            context["working_messages"]
+            and context["working_messages"][-1].get("role") == "user"
+            and context["working_messages"][-1].get("content") == context.get("user_message")
+        ):
+            context["working_messages"].pop()
+        self._fit_context(context)
         return context
+
+    @staticmethod
+    def _fit_context(context: dict) -> None:
+        """Bound the payload before either decision or streaming model call."""
+        limit = get_settings().memory_input_hard_limit_tokens
+        prompt_tokens = max(
+            count_tokens(SYSTEM_PROMPT + DECISION_SCHEMA),
+            count_tokens(STREAM_ANSWER_PROMPT),
+        )
+
+        def size() -> int:
+            return prompt_tokens + count_tokens(
+                json.dumps(context, ensure_ascii=False, default=str)
+            )
+
+        while size() > limit:
+            if context.get("knowledge_hits"):
+                context["knowledge_hits"].pop()
+            elif len(context.get("evidence") or []) > 2:
+                context["evidence"].pop(0)
+            elif len(context.get("working_messages") or []) > 1:
+                context["working_messages"].pop(0)
+            elif (
+                context.get("conversation_summary")
+                and count_tokens(context["conversation_summary"]) > 256
+            ):
+                context["conversation_summary"] = trim_to_tokens(
+                    context["conversation_summary"],
+                    max(256, count_tokens(context["conversation_summary"]) - 1000),
+                )
+            else:
+                raise ValueError("当前问题及必要上下文超过模型输入预算，请缩短问题或拆分发送。")
 
     def build(self, checkpointer=None):
         g = StateGraph(OncallState)
@@ -284,6 +332,8 @@ class OncallGraphRuntime:
             UUID(state["conversation_id"]),
             UUID(state["project_id"]) if state.get("project_id") else None,
             UUID(state["incident_id"]) if state.get("incident_id") else None,
+            channel=state.get("channel", "web"),
+            user_message=state.get("user_message", ""),
         )
         tool_budget, loop_budget = BUDGETS.get(state.get("mode", "chat"), BUDGETS["chat"])
         # A LangGraph thread is durable across turns, but tool/loop budgets are
@@ -301,6 +351,7 @@ class OncallGraphRuntime:
             "used_citations": [],
             "citation_status": "none",
             "knowledge_status": "skipped",
+            "knowledge_error": None,
             "allowed_tools": [],
             "tool_plan": [],
             "answer_sources": [],
@@ -314,21 +365,15 @@ class OncallGraphRuntime:
 
     async def route_intent(self, state: OncallState) -> dict:
         current = str(state.get("user_message", ""))
-        previous = next(
-            (
-                m.get("content", "")
-                for m in reversed(state.get("working_messages") or [])
-                if m.get("role") == "user" and m.get("content") and m.get("content") != current
-            ),
-            "",
-        )
         route = classify_intent(
-            " ".join(x for x in (previous, current) if x),
+            current,
             project_id=state.get("project_id"),
             incident_id=state.get("incident_id"),
             mode=state.get("mode", "chat"),
         )
-        if route.get("requires_realtime"):
+        if route.get("intent") == "active_alerts":
+            route["allowed_tools"] = ["query_active_alerts"]
+        elif route.get("requires_realtime"):
             route["allowed_tools"] = [x["name"] for x in public_tool_specs()]
         elif route.get("requires_knowledge"):
             route["allowed_tools"] = ["search_knowledge"]
@@ -386,6 +431,9 @@ class OncallGraphRuntime:
                 "knowledge_status": "hit"
                 if hits
                 else ("unavailable" if not dumped.get("ok") else "empty"),
+                "knowledge_error": str(dumped.get("summary") or "知识库检索不可用")
+                if not dumped.get("ok")
+                else None,
                 "knowledge_hits": hits,
                 "knowledge_refs": refs,
                 "retrieved_citations": refs,
@@ -397,6 +445,7 @@ class OncallGraphRuntime:
             return {
                 "knowledge_query": query,
                 "knowledge_status": "unavailable",
+                "knowledge_error": "知识库检索不可用",
                 "knowledge_hits": [],
                 "knowledge_refs": [],
                 "answer_sources": [{"type": "knowledge", "count": 0, "error": str(exc)[:300]}],
@@ -412,6 +461,14 @@ class OncallGraphRuntime:
                 "exhausted": True,
                 "decision": {"action": "final", "rationale": "budget exhausted", "answer": None},
             }
+        if state.get("intent") == "active_alerts":
+            if not any(key.startswith("query_active_alerts:") for key in state.get("called_tools", [])):
+                return {
+                    "reason_loops": loops,
+                    "decision": {"action": "tool", "tool_name": "query_active_alerts", "tool_args": {},
+                                 "rationale": "先读取用户所有项目中未恢复的告警事件"},
+                }
+            return {"reason_loops": loops, "decision": {"action": "final", "answer": ""}}
         context = self._context(state)
         decision = await self.model.decide(context)
         return {"reason_loops": loops, "decision": decision.model_dump(mode="json")}
@@ -546,6 +603,7 @@ class OncallGraphRuntime:
             evidence.append(item)
             if (
                 state.get("incident_id")
+                and state.get("intent") != "active_alerts"
                 and r.get("ok")
                 and await self._incident_alive(state["incident_id"])
             ):
@@ -613,6 +671,8 @@ class OncallGraphRuntime:
                 ).model_dump(mode="json")
             report = DiagnosisReport.model_validate(diagnosis)
             text = self.render_diagnosis(report)
+            if state.get("knowledge_status") == "unavailable":
+                text += f"\n\n> ⚠️ {state.get('knowledge_error') or '知识库检索不可用'} 本报告未引用知识库。"
             self._emit(
                 "diagnosis_ready",
                 {
@@ -624,7 +684,9 @@ class OncallGraphRuntime:
             return {
                 "diagnosis": report.model_dump(mode="json"),
                 "final_response": text,
-                **_citation_metadata({**state, "diagnosis": report.model_dump(mode="json"), "final_response": text}),
+                **_citation_metadata(
+                    {**state, "diagnosis": report.model_dump(mode="json"), "final_response": text}
+                ),
             }
         answer = d.get("answer")
         if not answer:
@@ -632,6 +694,10 @@ class OncallGraphRuntime:
                 self._context(state), on_token=lambda t: self._emit("token", {"content": t})
             )
         answer = answer or self.fallback_chat(state)
+        if state.get("intent") == "active_alerts":
+            answer = localize_alert_answer(answer)
+        if state.get("knowledge_status") == "unavailable":
+            answer += f"\n\n> ⚠️ {state.get('knowledge_error') or '知识库检索不可用'} 本次回答未引用知识库。"
         return {
             "final_response": answer,
             **_citation_metadata({**state, "final_response": answer}),
@@ -654,7 +720,7 @@ class OncallGraphRuntime:
             for x in r.knowledge_refs
         ]
         service = r.affected_service or "未绑定服务名"
-        return f"""## Incident 监测报告\n\n**级别**：{r.severity.value}  \n**影响服务**：{service}\n\n### 故障概况\n{r.summary}\n\n### 症状\n{bullets(r.symptoms)}\n\n### 关键证据\n{bullets(r.evidence)}\n\n### 根因判断\n{r.root_cause}\n\n**置信度**：{r.confidence:.0%}\n\n### 建议处理步骤\n{bullets(r.remediation)}\n\n### 风险\n{bullets(r.risks)}\n\n### 处理后验证\n{bullets(r.verification)}\n\n### 知识库依据\n{bullets(refs)}\n\n### 尚不确定\n{bullets(r.unknowns)}"""
+        return f"""## Incident 监测报告\n\n**级别**：{severity_label(r.severity.value)}  \n**影响服务**：{service}\n\n### 故障概况\n{r.summary}\n\n### 症状\n{bullets(r.symptoms)}\n\n### 关键证据\n{bullets(r.evidence)}\n\n### 根因判断\n{r.root_cause}\n\n**置信度**：{r.confidence:.0%}\n\n### 建议处理步骤\n{bullets(r.remediation)}\n\n### 风险\n{bullets(r.risks)}\n\n### 处理后验证\n{bullets(r.verification)}\n\n### 知识库依据\n{bullets(refs)}\n\n### 尚不确定\n{bullets(r.unknowns)}"""
 
     async def persist_result(self, state: OncallState) -> dict:
         run = await self.session.get(AgentRun, UUID(state["run_id"]))
@@ -670,6 +736,7 @@ class OncallGraphRuntime:
                 channel="agent",
                 metadata={
                     "agent_run_id": state["run_id"],
+                    "incident_id": state.get("incident_id"),
                     "mode": state.get("mode"),
                     "intent": state.get("intent"),
                     "knowledge_status": state.get("knowledge_status"),
@@ -696,22 +763,27 @@ class OncallGraphRuntime:
                         confidence=rep.confidence,
                     )
                 )
-                self.session.add(
-                    Notification(
-                        incident_id=UUID(state["incident_id"]),
-                        channel="feishu",
-                        target="default",
-                        payload={
-                            "kind": "diagnosis",
-                            "incident_id": state["incident_id"],
-                            "severity": rep.severity.value,
-                            "text": state.get("final_response") or "",
-                        },
-                        status="pending",
-                        dedupe_key=f"incident:{state['incident_id']}:diagnosis:{state['run_id']}",
-                    )
+                notice = Notification(
+                    incident_id=UUID(state["incident_id"]),
+                    channel="feishu",
+                    target="default",
+                    payload={
+                        "kind": "diagnosis",
+                        "incident_id": state["incident_id"],
+                        "severity": rep.severity.value,
+                        "text": state.get("final_response") or "",
+                        "force_delivery": bool(state.get("force_notification")),
+                    },
+                    status="pending",
+                    dedupe_key=f"incident:{state['incident_id']}:diagnosis:{state['run_id']}",
                 )
+                self.session.add(notice)
                 inc = await self.session.get(Incident, UUID(state["incident_id"]))
+                project = await self.session.get(Project, inc.project_id) if inc else None
+                if project:
+                    await OpsConversationService(self.session).record_notification(
+                        project.user_id, notice
+                    )
                 if inc and inc.resolved_at is None:
                     inc.status = "diagnosed"
                     inc.last_investigated_at = datetime.now().astimezone()

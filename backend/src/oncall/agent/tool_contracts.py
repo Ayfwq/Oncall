@@ -23,6 +23,10 @@ DATABASE_CHECKS = [
 RUNTIME_CHECKS = ["status", "cpu", "memory", "restarts", "oom", "processes", "ports"]
 
 TOOL_SPECS: dict[str, dict[str, Any]] = {
+    "query_active_alerts": {
+        "description": "查询当前用户所有项目在 PulseOps 中已记录、尚未恢复的告警事件；返回项目、级别、状态和最近观测时间。只读。",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
     "query_incident_context": {
         "description": "读取当前 Alertmanager 告警、Prometheus 标签和已有证据。诊断应优先调用。只读。",
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},

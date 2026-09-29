@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
+import { ElMessage } from 'element-plus'
 import { api, streamChat } from '../api'
 import { useRoute } from 'vue-router'
 import type { ChatMessage, Conversation, KnowledgeCitation, KnowledgeCitationDetail, ProjectSummary } from '../types'
@@ -13,13 +14,69 @@ const busy = ref(false), newProject = ref(''), search = ref(''), showArchived = 
 const mobileListOpen = ref(false)
 const messagesEl = ref<HTMLElement | null>(null)
 const expandedCitation = ref<string | null>(null)
+const incidentFocus = ref<string | null>(String(route.query.incident || '') || null)
 const citationDetails = ref<Record<string, KnowledgeCitationDetail>>({})
 const citationLoading = ref<Record<string, boolean>>({})
 const citationErrors = ref<Record<string, string>>({})
+type ContextUsage = {
+  estimated_tokens: number
+  context_window_tokens: number
+  compact_at_tokens: number
+  can_compact: boolean
+  scope: string
+  compaction: { status: string; error: string | null } | null
+}
+const contextUsage = ref<ContextUsage | null>(null)
+const compacting = ref(false)
+const contextPercent = computed(() => Math.min(100, Math.round((contextUsage.value?.estimated_tokens || 0) / (contextUsage.value?.context_window_tokens || 64000) * 100)))
+const contextTitle = computed(() => contextUsage.value
+  ? `上下文约 ${contextUsage.value.estimated_tokens} / ${contextUsage.value.context_window_tokens} token；自动压缩阈值 ${contextUsage.value.compact_at_tokens} token`
+  : '正在读取上下文用量')
+async function refreshContextUsage(id: string) {
+  try {
+    const usage = await api<ContextUsage>(`/conversations/${id}/context-usage`)
+    if (active.value !== id) return
+    contextUsage.value = usage
+    if (compacting.value && usage.compaction?.status === 'done') {
+      compacting.value = false
+      ElMessage.success('上下文压缩完成')
+    } else if (compacting.value && usage.compaction?.status === 'dead') {
+      compacting.value = false
+      ElMessage.error(usage.compaction.error || '上下文压缩失败')
+    } else if (usage.compaction?.status === 'pending' || usage.compaction?.status === 'running') {
+      compacting.value = true
+    }
+  } catch { /* A later refresh can retry. The submit action reports its own errors. */ }
+}
+async function compactContext() {
+  const id = active.value
+  if (!id || compacting.value || busy.value) return
+  if (contextUsage.value && !contextUsage.value.can_compact) {
+    ElMessage.info('对话太短，暂时没有可压缩内容')
+    return
+  }
+  compacting.value = true
+  try {
+    await api(`/conversations/${id}/compact`, { method: 'POST' })
+    await refreshContextUsage(id)
+  } catch (e) {
+    compacting.value = false
+    ElMessage.error(e instanceof Error ? e.message : '压缩提交失败')
+  }
+}
 let scrollQueued = false
 
 const activeConversation = computed(() => convs.value.find(x => x.id === active.value))
 function render(text: string) { return DOMPurify.sanitize(md.render(text || '')) }
+function renderMessage(message: ChatMessage) {
+  if (message.metadata?.intent !== 'active_alerts') return render(message.content)
+  const labels: Record<string, string> = {
+    critical: '严重', warning: '警告', info: '提示', open: '待调查',
+    investigating: '调查中', diagnosed: '已诊断', resolved: '已恢复',
+    failed: '调查失败', firing: '触发中', pending: '待处理',
+  }
+  return render(message.content.replace(/\b(critical|warning|info|open|investigating|diagnosed|resolved|failed|firing|pending)\b/gi, word => labels[word.toLowerCase()] || word))
+}
 function citationsOf(message: ChatMessage): KnowledgeCitation[] {
   const value = message.metadata?.citations
   return Array.isArray(value) ? value as KnowledgeCitation[] : []
@@ -64,9 +121,10 @@ async function load() {
   if (showArchived.value) qs.set('include_archived', 'true')
   convs.value = await api('/conversations' + (qs.size ? '?' + qs.toString() : ''))
   projects.value = await api('/projects')
-  if (!active.value && convs.value[0]) await open(convs.value[0].id)
+  if (!active.value && convs.value[0]) await open(String(route.query.conversation || convs.value[0].id))
 }
 async function createConversation() {
+  incidentFocus.value = null
   const c = await api<Conversation>('/conversations', { method: 'POST', body: JSON.stringify({ title: '新对话', project_id: newProject.value || null }) })
   newProject.value = ''; search.value = ''; showArchived.value = false
   await load()
@@ -81,8 +139,11 @@ async function create() {
     error.value = e instanceof Error ? e.message : String(e)
   }
 }
-async function open(id: string) {
-  active.value = id; expandedCitation.value = null; messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
+async function open(id: string, clearFocus = false) {
+  if (clearFocus) incidentFocus.value = null
+  active.value = id; expandedCitation.value = null; contextUsage.value = null; compacting.value = false
+  void refreshContextUsage(id)
+  messages.value = await api<ChatMessage[]>(`/conversations/${id}/messages`); mobileListOpen.value = false
   await nextTick(); scrollToBottom()
 }
 async function rename() {
@@ -97,14 +158,14 @@ async function archive() {
 async function archiveConversation(c: Conversation) {
   const nextArchived = !c.archived
   await api(`/conversations/${c.id}`, { method: 'PATCH', body: JSON.stringify({ archived: nextArchived }) })
-  if (nextArchived && active.value === c.id) { active.value = ''; messages.value = [] }
+  if (nextArchived && active.value === c.id) { active.value = ''; messages.value = []; contextUsage.value = null }
   await load()
 }
 async function removeConversation(c: Conversation) {
   if (busy.value) return
   if (!confirm(`删除会话「${c.title}」？删除后消息和上下文将无法恢复。`)) return
   await api(`/conversations/${c.id}`, { method: 'DELETE' })
-  if (active.value === c.id) { active.value = ''; messages.value = [] }
+  if (active.value === c.id) { active.value = ''; messages.value = []; contextUsage.value = null }
   await load()
 }
 async function remove() {
@@ -145,7 +206,7 @@ async function send() {
       else if (e.type === 'final') streamingMsg.content = e.data.content
       else if (e.type === 'error') streamingMsg.content = '错误：' + e.data.message
       queueScroll()
-    })
+    }, incidentFocus.value)
     await load()
     // The streaming placeholder is local-only and does not contain the
     // persisted citation metadata. Reload the active conversation so the
@@ -165,7 +226,31 @@ function onEnterKey(e: KeyboardEvent) {
 let timer: ReturnType<typeof setTimeout> | undefined
 watch(search, () => { clearTimeout(timer); timer = setTimeout(load, 250) })
 watch(showArchived, load)
-onMounted(async () => { await load(); const q = String(route.query.conversation || ''); if (q) await open(q) })
+let opsTimer: ReturnType<typeof setInterval> | undefined
+let contextTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  load()
+  contextTimer = setInterval(() => {
+    if (active.value && compacting.value) void refreshContextUsage(active.value)
+  }, 3000)
+  opsTimer = setInterval(async () => {
+    if (busy.value) return
+    try {
+      const current = activeConversation.value
+      if (!current || current.type !== 'ops') return
+      const rows = await api<ChatMessage[]>(`/conversations/${current.id}/messages`)
+      if (active.value !== current.id || busy.value) return
+      const previousLast = messages.value[messages.value.length - 1]?.id
+      if (rows[rows.length - 1]?.id === previousLast && rows.length === messages.value.length) return
+      const el = messagesEl.value
+      const nearBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120
+      messages.value = rows
+      convs.value = await api<Conversation[]>('/conversations')
+      if (nearBottom) await nextTick().then(scrollToBottom)
+    } catch { /* The next refresh will retry. */ }
+  }, 5000)
+})
+onUnmounted(() => { if (opsTimer) clearInterval(opsTimer); if (contextTimer) clearInterval(contextTimer); clearTimeout(timer) })
 </script>
 
 <template>
@@ -183,13 +268,13 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
         <el-input v-model="search" clearable placeholder="搜索会话" size="small" class="conv-list-search" />
       </div>
       <div class="conv-scroll">
-        <div v-for="c in convs" :key="c.id" class="conv" :class="{ active: active === c.id }" @click="open(c.id)">
+        <div v-for="c in convs" :key="c.id" class="conv" :class="{ active: active === c.id }" @click="open(c.id, true)">
           <div class="conv-title">
-            <span v-if="c.type === 'incident'" class="badge warn" style="padding: 0 6px">告警</span>
+            <span v-if="c.type === 'ops'" class="badge warn" style="padding: 0 6px">飞书同步</span>
             <span class="conv-name">{{ c.title }}</span>
           </div>
           <div class="conv-meta">{{ c.incident_id ? 'Incident 会话' : timeAgo(c.updated_at) }}</div>
-          <div class="conv-actions" @click.stop>
+          <div v-if="c.type !== 'ops'" class="conv-actions" @click.stop>
             <button class="conv-icon archive" :title="c.archived ? '恢复会话' : '归档会话'" :aria-label="c.archived ? '恢复会话' : '归档会话'" @click="archiveConversation(c)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6" /></svg>
             </button>
@@ -212,19 +297,24 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
         <template v-if="activeConversation">
           <div class="t">
             <b>{{ activeConversation.title }}</b>
-            <span>{{ activeConversation.incident_id ? '围绕 Incident 持续追问' : activeConversation.project_id ? '已绑定监控项目' : '通用问答' }}</span>
+            <span>{{ activeConversation.type === 'ops' ? 'Web 与飞书共用 · 所有告警在此显示' : activeConversation.incident_id ? '围绕 Incident 持续追问' : activeConversation.project_id ? '已绑定监控项目' : '通用问答' }}</span>
           </div>
           <el-dropdown trigger="click" @command="onCmd">
             <button class="menu-btn" title="更多">⋯</button>
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item command="rename">重命名</el-dropdown-item>
-                <el-dropdown-item command="archive">{{ activeConversation.archived ? '恢复' : '归档' }}</el-dropdown-item>
-                <el-dropdown-item command="remove" divided>删除</el-dropdown-item>
+                <el-dropdown-item v-if="activeConversation.type !== 'ops'" command="archive">{{ activeConversation.archived ? '恢复' : '归档' }}</el-dropdown-item>
+                <el-dropdown-item v-if="activeConversation.type !== 'ops'" command="remove" divided>删除</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
         </template>
+      </div>
+
+      <div v-if="incidentFocus && activeConversation?.type === 'ops'" class="incident-focus">
+        正在追问事件 {{ incidentFocus.slice(0, 8) }}
+        <button type="button" @click="incidentFocus = null">退出事件追问</button>
       </div>
 
       <div ref="messagesEl" class="messages">
@@ -235,10 +325,17 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
             <p class="muted">普通运维问题可直接咨询；绑定项目后可进一步查询实时日志、指标和服务状态。</p>
         </div>
         <template v-else>
-          <div v-for="(m, i) in messages" :key="m.id || i" class="msg-row" :class="m.role === 'user' ? 'user' : 'assistant'">
+          <div v-for="(m, i) in messages" :key="m.id || i" class="msg-row" :class="[m.role === 'event' ? 'event' : m.role === 'user' ? 'user' : 'assistant', m.metadata?.intent === 'active_alerts' ? 'active-alerts' : '']">
             <img v-if="m.role === 'assistant'" class="msg-avatar ai" src="/pulseops-icon.png" alt="巡脉图标" />
             <div class="msg-bubble">
-              <div v-if="m.role === 'assistant'" class="markdown" v-html="render(m.content)"></div>
+              <div v-if="m.role === 'event'" class="event-content">
+                <div class="markdown" v-html="render(m.content)"></div>
+                <div v-if="m.metadata?.incident_id" class="event-actions">
+                  <a :href="'/incidents/' + m.metadata.incident_id">查看告警详情</a>
+                  <button v-if="activeConversation?.type === 'ops'" type="button" @click="incidentFocus = String(m.metadata.incident_id)">追问此告警</button>
+                </div>
+              </div>
+              <div v-else-if="m.role === 'assistant'" class="markdown" v-html="renderMessage(m)"></div>
               <div v-else>{{ m.content }}</div>
               <div v-if="m.role === 'assistant' && citationsOf(m).length" class="citation-panel">
                 <div class="citation-panel-head">
@@ -305,6 +402,10 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
       </div>
 
       <div class="composer">
+        <div v-if="active" class="context-toolbar">
+          <div class="context-meter" role="progressbar" :aria-label="contextTitle" :title="contextTitle" :aria-valuenow="contextPercent" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: contextPercent + '%' }"></span></div>
+          <button class="context-compact" :disabled="compacting || busy" title="将较早对话交给模型压缩；没有可压缩内容时会提示" @click="compactContext">{{ compacting ? '压缩中…' : '手动压缩' }}</button>
+        </div>
         <div class="composer-inner">
           <textarea v-model="input" placeholder="输入运维问题，Enter 发送 / Shift+Enter 换行" @input="autoresize" @keydown.enter.exact.prevent="onEnterKey" @keydown.ctrl.enter.prevent="onEnterKey"></textarea>
           <button class="send-btn" :disabled="busy || !input.trim()" @click="send" title="发送">
@@ -334,12 +435,32 @@ onMounted(async () => { await load(); const q = String(route.query.conversation 
 .empty-state h2 { font-size: 20px; }
 .empty-state > p { max-width: 510px; margin: 0 auto 24px; }
 .chat-error{margin:7px auto 0;color:#c0393f;font-size:12px;text-align:center;max-width:680px}
+.incident-focus{padding:8px 18px;background:#fff6e8;color:#8a5513;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:12px}.incident-focus button{border:0;background:none;color:#a86413;cursor:pointer;font-weight:600}
+.msg-row.event{justify-content:center;box-sizing:border-box;width:100%}
+.msg-row.event .msg-bubble{box-sizing:border-box;width:100%;max-width:700px;min-width:0;padding:18px 20px;background:#fff8ed;border:1px solid #edd7b5;border-radius:20px;color:#6d4a1f;box-shadow:0 5px 18px rgba(123,79,27,.035);overflow-wrap:anywhere}
+.msg-row.assistant.active-alerts .msg-bubble{box-sizing:border-box;max-width:700px;padding:18px 20px;border:1px solid #cce8db;border-radius:20px;background:#f5fbf7;box-shadow:0 5px 18px rgba(24,84,66,.045);overflow-wrap:anywhere}
+.event-content{min-width:0}.event-content a{display:inline-flex;margin-top:12px;color:#a86413;font-weight:600;text-decoration:none}.event-content a:hover{text-decoration:underline}
+.event-actions{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.event-actions button{margin-top:12px;padding:0;border:0;background:none;color:#a86413;font:inherit;font-weight:600;cursor:pointer}
+.event-actions button:hover{text-decoration:underline}
 .composer-hint{margin:7px auto 0;color:#9aa8a3;font-size:10px;text-align:center}
+.context-toolbar{box-sizing:border-box;max-width:780px;min-height:36px;margin:0 auto 10px;padding:0 4px;display:flex;align-items:center;gap:14px}
+.context-meter{box-sizing:border-box;width:174px;height:9px;flex:0 0 174px;overflow:hidden;border:1px solid #dceae2;border-radius:999px;background:#eaf2ed;box-shadow:inset 0 1px 2px rgba(32,91,65,.08)}
+.context-meter span{display:block;height:100%;min-width:3px;border-radius:inherit;background:linear-gradient(90deg,#27a977,#66c897);box-shadow:0 0 8px rgba(39,169,119,.18);transition:width .3s ease}
+.context-compact{min-height:32px;padding:6px 13px;border:1px solid #c8e7d6;border-radius:10px;background:#eef9f3;color:#17815a;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 5px rgba(31,112,76,.05);transition:background .16s,border-color .16s,box-shadow .16s,transform .16s}
+.context-compact:hover:not(:disabled){background:#def3e8;border-color:#8fd0ad;box-shadow:0 3px 10px rgba(31,112,76,.11)}
+.context-compact:active:not(:disabled){transform:translateY(1px)}
+.context-compact:focus-visible{outline:2px solid #2daa7a;outline-offset:2px}
+.context-compact:disabled{opacity:.6;cursor:default;box-shadow:none}
+.composer-inner{transition:border-color .18s,box-shadow .18s}
+.composer-inner:focus-within{border-color:#a5d6bf;box-shadow:0 12px 38px -20px rgba(24,84,66,.38),0 0 0 3px rgba(49,169,116,.08)}
 @media (max-width: 760px) { .empty-state { padding-top: 55px; } }
 
 .mobile-conv-toggle { display: none; }
 .conv-scrim { display: none; }
 @media (max-width: 680px) {
+  .context-toolbar{gap:10px;margin-bottom:8px}
+  .context-meter{width:min(38vw,150px);flex-basis:min(38vw,150px)}
   .mobile-conv-toggle { display: inline-flex; margin-left: -6px; flex-shrink: 0; }
   .conv-list { display: flex; position: fixed; z-index: 45; inset: 0 auto 0 0; width: 280px; max-width: 86vw; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow-lg); background: #fbfbfc; }
   .conv-list.open { transform: translateX(0); }
