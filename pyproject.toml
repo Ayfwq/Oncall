@@ -36,6 +36,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+evaluation = [
+  "ragas==0.4.3",
+  # Ragas 0.4.3 imports ChatVertexAI, removed by community 0.4.2.
+  "langchain-community==0.3.31",
+  "openai>=1.0,<3",
+]
 dev = [
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
@@ -51,6 +57,7 @@ oncall-notification-worker = "oncall.workers.notification_worker:run"
 oncall-rag-worker = "oncall.workers.rag_worker:run"
 oncall-doctor = "oncall.cli.doctor:run"
 oncall-collector = "oncall.collector.app:run"
+oncall-rag-eval = "oncall.evaluation.cli:run"
 
 [build-system]
 requires = ["hatchling"]
@@ -62,8 +69,7 @@ torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
-  url = "https://mirrors.aliyun.com/pytorch-wheels/cpu"
-  type = "find-links"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.hatch.build.targets.wheel]

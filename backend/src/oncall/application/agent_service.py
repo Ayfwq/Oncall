@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from oncall.agent.graph import OncallGraphRuntime
-from oncall.agent.model_gateway import ModelServiceError, get_model_provider
+from oncall.agent.model_gateway import ModelProvider, ModelServiceError, get_model_provider
 from oncall.agent.prompts import DECISION_SCHEMA, STREAM_ANSWER_PROMPT, SYSTEM_PROMPT
 from oncall.application.conversation_service import ConversationService
 from oncall.application.long_term_memory import LongTermMemoryService, explicit_fact
@@ -29,9 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 class AgentService:
-    def __init__(self, session: AsyncSession, checkpointer=None):
+    def __init__(self, session: AsyncSession, checkpointer=None, *, model: ModelProvider | None = None):
         self.session = session
         self.checkpointer = checkpointer
+        self.model = model
 
     async def run(
         self,
@@ -121,7 +122,7 @@ class AgentService:
         )
         config = {"configurable": {"thread_id": thread_id}}
         try:
-            model = get_model_provider()
+            model = self.model or get_model_provider()
             runtime = OncallGraphRuntime(self.session, model=model, emit=emit)
             graph = runtime.build(self.checkpointer)
             result = await graph.ainvoke(initial, config=config)

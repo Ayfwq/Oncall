@@ -109,6 +109,8 @@ async function load() {
   finally { loading.value = false }
 }
 
+defineExpose({ reload: load })
+
 function resetEditor() {
   editingId.value = null
   discoveredModels.value = []

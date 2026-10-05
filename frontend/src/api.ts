@@ -10,8 +10,19 @@ export class ApiError extends Error {
   }
 }
 
+async function fetchService(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new ApiError(0, '无法连接服务，请检查服务是否启动并刷新页面。')
+    }
+    throw error
+  }
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const r = await fetch('/api' + path, {
+  const r = await fetchService('/api' + path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
   })
@@ -27,7 +38,7 @@ export async function streamChat(
   onEvent: StreamEventHandler,
   incidentId?: string | null,
 ): Promise<void> {
-  const r = await fetch(`/api/conversations/${id}/messages:stream`, {
+  const r = await fetchService(`/api/conversations/${id}/messages:stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content, incident_id: incidentId || null }),

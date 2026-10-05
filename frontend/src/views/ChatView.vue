@@ -5,13 +5,26 @@ import DOMPurify from 'dompurify'
 import { ElMessage } from 'element-plus'
 import { api, streamChat } from '../api'
 import { useRoute } from 'vue-router'
+import { formatBeijingTime } from '../formatTime'
 import type { ChatMessage, Conversation, KnowledgeCitation, KnowledgeCitationDetail, ProjectSummary } from '../types'
+import WelcomePanel from '../components/WelcomePanel.vue'
 
 const route = useRoute()
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const convs = ref<Conversation[]>([]), projects = ref<ProjectSummary[]>([]), active = ref(''), messages = ref<ChatMessage[]>([]), input = ref('')
 const busy = ref(false), newProject = ref(''), search = ref(''), showArchived = ref(false), statusLine = ref(''), error = ref('')
 const mobileListOpen = ref(false)
+const initialLoading = ref(true)
+const composerEl = ref<HTMLTextAreaElement | null>(null)
+async function choosePrompt(text: string) {
+  input.value = text
+  await nextTick()
+  composerEl.value?.focus()
+  if (composerEl.value) {
+    composerEl.value.style.height = 'auto'
+    composerEl.value.style.height = Math.min(composerEl.value.scrollHeight, 200) + 'px'
+  }
+}
 const messagesEl = ref<HTMLElement | null>(null)
 const expandedCitation = ref<string | null>(null)
 const incidentFocus = ref<string | null>(String(route.query.incident || '') || null)
@@ -121,7 +134,7 @@ async function toggleCitation(citation: KnowledgeCitation) {
   }
 }
 function timeAgo(iso?: string) { if (!iso) return ''; const d = new Date(iso).getTime(); const s = Math.floor((Date.now() - d) / 1000); if (s < 60) return '刚刚'; if (s < 3600) return Math.floor(s / 60) + ' 分钟前'; if (s < 86400) return Math.floor(s / 3600) + ' 小时前'; return Math.floor(s / 86400) + ' 天前' }
-function scrollToBottom() { if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight }
+function scrollToBottom() { if (messagesEl.value) messagesEl.value.scrollTop = messages.value.length ? messagesEl.value.scrollHeight : 0 }
 function queueScroll() {
   if (scrollQueued) return
   scrollQueued = true
@@ -243,7 +256,7 @@ let opsTimer: ReturnType<typeof setInterval> | undefined
 let contextTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   document.addEventListener('pointerdown', closeContextMenuOnOutside)
-  load()
+  load().catch(e => { error.value = e instanceof Error ? e.message : '会话加载失败，请稍后重试' }).finally(() => { initialLoading.value = false })
   contextTimer = setInterval(() => {
     if (active.value && compacting.value) void refreshContextUsage(active.value)
   }, 3000)
@@ -273,13 +286,14 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
     <div v-if="mobileListOpen" class="conv-scrim" @click="mobileListOpen = false"></div>
     <section class="conv-list" :class="{ open: mobileListOpen }">
       <div class="conv-list-top">
+        <div class="conv-section-heading"><b>会话记录</b><span>{{ convs.length.toString().padStart(2, '0') }}</span></div>
         <el-select v-model="newProject" clearable placeholder="绑定项目（可选）" size="small" style="width: 100%; margin-bottom: 10px">
           <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
         </el-select>
         <el-button type="primary" class="new-btn" @click="create">
           <span style="font-size: 15px; line-height: 1">＋</span>&nbsp; 新建对话
         </el-button>
-        <el-input v-model="search" clearable placeholder="搜索会话" size="small" class="conv-list-search" />
+        <el-input v-model="search" clearable placeholder="搜索会话…" size="small" class="conv-list-search"><template #prefix><svg class="search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg></template></el-input>
       </div>
       <div class="conv-scroll">
         <div v-for="c in convs" :key="c.id" class="conv" :class="{ active: active === c.id }" @click="open(c.id, true)">
@@ -297,7 +311,7 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
             </button>
           </div>
         </div>
-        <div v-if="!convs.length" style="color: var(--text-3); text-align: center; padding: 30px 10px; font-size: 13px">暂无会话</div>
+        <div v-if="!convs.length" class="conversation-empty"><span>⌁</span><b>{{ initialLoading ? '正在加载会话…' : search ? '没有匹配的会话' : '新的灵感，从这里开始' }}</b><p>{{ search ? '试试其他搜索关键词' : '你的排查思路与对话，将保存在这里' }}</p></div>
       </div>
       <div style="padding: 8px 16px; border-top: 1px solid var(--border)">
         <el-checkbox v-model="showArchived" size="small">显示已归档</el-checkbox>
@@ -307,7 +321,8 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
     <!-- chat -->
     <section class="chat">
       <div class="chat-head">
-        <button class="menu-btn mobile-conv-toggle" @click="mobileListOpen = true" title="会话列表">☰</button>
+        <button class="menu-btn mobile-conv-toggle" @click="mobileListOpen = true" title="会话列表" aria-label="打开会话列表">☰</button>
+        <div v-if="!activeConversation" class="t chat-default-title"><b>巡脉助手 <span class="assistant-badge">AI</span></b><span>让每一个运维问题，都有迹可循</span></div>
         <template v-if="activeConversation">
           <div class="t">
             <b>{{ activeConversation.title }}</b>
@@ -331,19 +346,16 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
         <button type="button" @click="incidentFocus = null">退出事件追问</button>
       </div>
 
-      <div ref="messagesEl" class="messages">
-        <div v-if="!active" class="empty-state">
-          <img class="empty-icon" src="/pulseops-icon.png" alt="巡脉图标" />
-            <div class="welcome-kicker">PULSEOPS · 巡脉智能运维</div>
-            <h2>从一个运维问题开始</h2>
-            <p class="muted">普通运维问题可直接咨询；绑定项目后可进一步查询实时日志、指标和服务状态。</p>
-        </div>
+      <div ref="messagesEl" class="messages" :class="{ 'welcome-messages': !messages.length }" role="region" aria-label="对话内容" tabindex="0">
+        <div v-if="initialLoading" class="chat-loading" role="status"><span class="dot"></span>正在载入工作空间…</div>
+        <WelcomePanel v-else-if="!messages.length" @prompt="choosePrompt" />
         <template v-else>
           <div v-for="(m, i) in messages" :key="m.id || i" class="msg-row" :class="[m.role === 'event' ? 'event' : m.role === 'user' ? 'user' : 'assistant', m.metadata?.intent === 'active_alerts' ? 'active-alerts' : '']">
             <img v-if="m.role === 'assistant'" class="msg-avatar ai" src="/pulseops-icon.png" alt="巡脉图标" />
             <div class="msg-bubble">
               <div v-if="m.role === 'event'" class="event-content">
                 <div class="markdown" v-html="render(m.content)"></div>
+                <div v-if="m.created_at" class="event-time">通知时间 · {{ formatBeijingTime(m.created_at) }}（北京时间）</div>
                 <div v-if="m.metadata?.incident_id" class="event-actions">
                   <a :href="'/incidents/' + m.metadata.incident_id">查看告警详情</a>
                   <button v-if="activeConversation?.type === 'ops'" type="button" @click="incidentFocus = String(m.metadata.incident_id)">追问此告警</button>
@@ -416,8 +428,9 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
       </div>
 
       <div class="composer">
+        <div class="composer-label"><span><i></i> 和巡脉一起探索</span><span>Enter 发送 <kbd>↵</kbd></span></div>
         <div class="composer-inner">
-          <textarea v-model="input" placeholder="输入运维问题，Enter 发送 / Shift+Enter 换行" @input="autoresize" @keydown.enter.exact.prevent="onEnterKey" @keydown.ctrl.enter.prevent="onEnterKey"></textarea>
+          <textarea ref="composerEl" v-model="input" aria-label="运维问题" placeholder="描述你遇到的问题，剩下的我们一起解决…" @input="autoresize" @keydown.enter.exact.prevent="onEnterKey" @keydown.ctrl.enter.prevent="onEnterKey"></textarea>
           <div class="context-control">
             <button class="context-circle" type="button" :title="contextTitle" :aria-label="contextTitle + '；压缩上文'" :aria-expanded="contextMenuOpen" @click="contextMenuOpen = !contextMenuOpen">
               <svg class="context-ring" viewBox="0 0 20 20" aria-hidden="true"><circle class="context-ring-track" cx="10" cy="10" r="7.5"/><circle class="context-ring-used" cx="10" cy="10" r="7.5" :stroke-dashoffset="47.124 * (1 - contextPercent / 100)"/></svg>
@@ -428,8 +441,8 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
               </button>
             </div>
           </div>
-          <button class="send-btn" :disabled="busy || !input.trim()" @click="send" title="发送">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          <button class="send-btn" :disabled="busy || !input.trim()" @click="send" title="发送" aria-label="发送消息">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
           </button>
         </div>
         <p v-if="error" class="chat-error">{{ error }}</p>
@@ -449,17 +462,13 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
 .conv-icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .conv-icon:hover { background: #eaf6f1; border-color: #a9d9c7; color: var(--accent-strong); }
 .conv-icon.danger:hover { background: #fff1f0; border-color: #f2c5c2; color: #c0393f; }
-.empty-state { min-height: 100%; display:flex; flex-direction:column; justify-content:center; text-align: center; padding: 36px 20px; }
-.empty-icon { width: 58px; height: 58px; margin: 0 auto 17px; border-radius: 18px; object-fit: contain; display: block; box-shadow: 0 15px 36px -18px rgba(25,132,99,.7); }
-.welcome-kicker { color: var(--accent-strong); font-size: 11px; font-weight: 700; letter-spacing: .14em; margin-bottom: 7px; }
-.empty-state h2 { font-size: 20px; }
-.empty-state > p { max-width: 510px; margin: 0 auto 24px; }
 .chat-error{margin:7px auto 0;color:#c0393f;font-size:12px;text-align:center;max-width:980px}
 .incident-focus{padding:8px 18px;background:#fff6e8;color:#8a5513;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:12px}.incident-focus button{border:0;background:none;color:#a86413;cursor:pointer;font-weight:600}
 .msg-row.event{justify-content:center;box-sizing:border-box;width:100%}
 .msg-row.event .msg-bubble{box-sizing:border-box;width:100%;max-width:700px;min-width:0;padding:18px 20px;background:#fff8ed;border:1px solid #edd7b5;border-radius:20px;color:#6d4a1f;box-shadow:0 5px 18px rgba(123,79,27,.035);overflow-wrap:anywhere}
 .msg-row.assistant.active-alerts .msg-bubble{box-sizing:border-box;max-width:700px;padding:18px 20px;border:1px solid #cce8db;border-radius:20px;background:#f5fbf7;box-shadow:0 5px 18px rgba(24,84,66,.045);overflow-wrap:anywhere}
 .event-content{min-width:0}.event-content a{display:inline-flex;margin-top:12px;color:#a86413;font-weight:600;text-decoration:none}.event-content a:hover{text-decoration:underline}
+.event-time{margin-top:10px;color:#947a59;font-size:12px;line-height:1.5}
 .event-actions{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .event-actions button{margin-top:12px;padding:0;border:0;background:none;color:#a86413;font:inherit;font-weight:600;cursor:pointer}
 .event-actions button:hover{text-decoration:underline}
@@ -481,7 +490,6 @@ onUnmounted(() => { document.removeEventListener('pointerdown', closeContextMenu
 @keyframes context-menu-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 .composer-inner{transition:border-color .18s,box-shadow .18s}
 .composer-inner:focus-within{border-color:#a5d6bf;box-shadow:0 12px 38px -20px rgba(24,84,66,.38),0 0 0 3px rgba(49,169,116,.08)}
-@media (max-width: 760px) { .empty-state { padding-top: 55px; } }
 
 .mobile-conv-toggle { display: none; }
 .conv-scrim { display: none; }

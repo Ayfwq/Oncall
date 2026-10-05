@@ -104,6 +104,9 @@ cd ..
 .\scripts\start-all.ps1
 ```
 
+启动脚本会在后台运行 API、各类 Worker 和前端，关闭启动终端后服务仍会运行。
+重复执行会跳过已运行的进程；启动日志位于 `logs/local/`，重启电脑后需再次执行脚本。
+
 开发地址：
 
 ```text
@@ -177,6 +180,8 @@ ONCALL_FEISHU_DEFAULT_RECEIVE_ID=<chat-or-open-id>
 7. 真实 Release 必须通过 `docs/RELEASE_VALIDATION.md` 记录的验收门禁。
 
 ## 分层验证
+
+知识库质量评估使用 Ragas 0.4.3，提供 42 题草稿集、真实 Agent 上下文采集、五项标准指标与拒答指标、逐题报告和回归门禁。安装 `uv sync --extra dev --extra evaluation` 后执行 `uv run --no-sync python -m oncall.evaluation doctor`，再运行 `.\scripts\evaluate-rag.ps1`。完整流程与当前实测限制见 [Ragas 评估说明](docs/RAG_EVALUATION.md)。
 
 不要把缺少 PostgreSQL/Milvus/模型凭证的环境误判为代码失败。使用分层测试：
 

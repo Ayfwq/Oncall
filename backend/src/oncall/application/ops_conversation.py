@@ -91,6 +91,7 @@ class OpsConversationService:
                 "incident_id": str(notification.incident_id) if notification.incident_id else None,
                 "kind": notification.payload.get("kind"),
             },
+            created_at=notification.created_at,
         )
         self.session.add(message)
         conv.updated_at = datetime.now().astimezone()

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,7 @@ from oncall.jobs.queue import JobQueue
 
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 SEVERITY_LABEL = {"info": "提示", "warning": "警告", "critical": "严重"}
+BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -31,6 +33,14 @@ def _parse_time(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _format_beijing_time(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _value(value: object) -> float | None:
@@ -56,19 +66,32 @@ def _group_key(payload: dict, labels: dict) -> str:
     return repr(sorted(stable.items()))
 
 
-def _notification_text(project_name: str, alert: dict, incident_id: UUID) -> str:
+def _notification_text(
+    project_name: str,
+    alert: dict,
+    incident_id: UUID,
+    fallback_at: datetime | None = None,
+) -> str:
     labels = alert.get("labels") or {}
     annotations = alert.get("annotations") or {}
     severity = str(labels.get("severity") or "warning").lower()
     label = SEVERITY_LABEL.get(severity, severity)
     summary = annotations.get("summary") or labels.get("alertname") or "Prometheus 告警"
     description = annotations.get("description") or "Prometheus 检测到指标异常。"
+    starts_at = _parse_time(alert.get("startsAt"))
+    event_time = _format_beijing_time(starts_at or fallback_at)
+    event_time_label = "发生时间" if starts_at else "系统记录时间"
     return "\n".join(
         [
             f"🚨 **{summary}**",
             "",
             f"**级别**：{label}",
             f"**项目**：{project_name}",
+            *(
+                [f"**{event_time_label}**：{event_time}（北京时间）"]
+                if event_time
+                else []
+            ),
             f"**说明**：{description}",
             f"**告警名**：`{labels.get('alertname', 'unknown')}`",
             f"**当前值**：{alert.get('value', '暂无')}",
@@ -292,6 +315,7 @@ class IncidentService:
                     await self.session.flush()
                 generation = incident.escalation_generation
                 if is_reopened:
+                    reopened_at = _parse_time(representative["raw"].get("startsAt")) or now
                     notice = Notification(
                         incident_id=incident.id,
                         channel="feishu",
@@ -304,7 +328,8 @@ class IncidentService:
                             "text": (
                                 f"🔁 **告警再次触发**\n\n{incident.summary}\n"
                                 f"这是同一事件第 {incident.occurrence_count} 次发生，"
-                                "继续沿用原告警和对话。"
+                                "继续沿用原告警和对话。\n"
+                                f"本次发生时间：{_format_beijing_time(reopened_at)}（北京时间）"
                             ),
                         },
                         dedupe_key=f"incident:{incident.id}:reopened:{generation}",
@@ -320,7 +345,10 @@ class IncidentService:
                             "conversation_id": str(conversation.id),
                             "severity": severity,
                             "text": _notification_text(
-                                project.name, representative["raw"], incident.id
+                                project.name,
+                                representative["raw"],
+                                incident.id,
+                                incident.first_seen,
                             )
                             + (f"\n**合并实例数**：{len(active)}" if len(active) > 1 else ""),
                         },
@@ -410,7 +438,10 @@ class IncidentService:
                 "incident_id": str(incident.id),
                 "severity": "info",
                 "summary": reason,
-                "text": f"✅ **告警已恢复**\n\n{incident.anomaly_type}\n恢复原因：{reason}",
+                "text": (
+                    f"✅ **告警已恢复**\n\n{incident.anomaly_type}\n恢复原因：{reason}\n"
+                    f"恢复时间：{_format_beijing_time(incident.resolved_at)}（北京时间）"
+                ),
             },
             dedupe_key=f"incident:{incident.id}:resolved",
         )

@@ -20,6 +20,7 @@ interface MemoryFact {
 }
 
 const readiness = ref<Readiness | null>(null)
+const modelsView = ref<{ reload: () => Promise<void> } | null>(null)
 const feishu = ref<FeishuForm>({ enabled: false, app_id: '', app_secret: '', app_secret_configured: false, default_receive_id: '', default_receive_id_type: 'chat_id' })
 const error = ref('')
 const message = ref('')
@@ -38,9 +39,16 @@ async function load() {
       api<Readiness>('/settings/readiness'), api<FeishuSettings>('/settings/feishu'), api<MemoryFact[]>('/memories'),
     ])
     readiness.value = r
-    feishu.value = { ...f, app_secret: '' }
+    const enteredSecret = f.app_secret_configured && feishu.value.app_id === f.app_id
+      ? feishu.value.app_secret
+      : ''
+    feishu.value = { ...f, app_secret: enteredSecret }
     memories.value = m
   } catch (e) { error.value = errorText(e) }
+}
+
+async function refresh() {
+  await Promise.all([load(), modelsView.value?.reload()])
 }
 
 async function saveFeishu() {
@@ -56,7 +64,6 @@ async function saveFeishu() {
     }
     const result = await api<{ ok: boolean; message: string; restart_required: boolean }>('/settings/feishu', { method: 'PUT', body: JSON.stringify(payload) })
     message.value = result.message || '飞书配置已保存'
-    feishu.value.app_secret = ''
     feishu.value.app_secret_configured = Boolean(payload.app_secret || feishu.value.app_secret_configured)
     readiness.value = await api<Readiness>('/settings/readiness')
     setTimeout(() => { load() }, 2500)
@@ -111,7 +118,7 @@ onUnmounted(() => { if (statusTimer) clearInterval(statusTimer) })
   <div class="page settings-page">
     <div class="page-head">
       <div><h1>设置</h1><p class="sub">配置巡脉工作区、模型服务和飞书接入</p></div>
-      <el-button @click="load">刷新</el-button>
+      <el-button @click="refresh">刷新</el-button>
     </div>
     <p v-if="error" style="color: var(--danger)">{{ error }}</p>
     <p v-if="message" style="color: var(--success)">{{ message }}</p>
@@ -120,7 +127,7 @@ onUnmounted(() => { if (statusTimer) clearInterval(statusTimer) })
       <div class="card model-settings-card">
         <h3>模型接入</h3>
         <p class="muted">选择当前使用的三类模型，或添加新的模型服务配置。</p>
-        <ModelsView embedded />
+        <ModelsView ref="modelsView" embedded />
       </div>
 
       <div class="card">
@@ -137,12 +144,15 @@ onUnmounted(() => { if (statusTimer) clearInterval(statusTimer) })
       </div>
 
       <div class="card">
-        <h3>飞书接入</h3>
-        <p class="muted">填写应用凭证并保存，系统会验证并连接。随后在目标飞书会话中给机器人发送一条消息，即可绑定告警接收位置。所有告警会同步到 Web 的运维主会话。</p>
+        <div class="feishu-header">
+          <h3>飞书接入</h3>
+          <el-switch v-model="feishu.enabled" aria-label="启用飞书" />
+        </div>
         <el-form label-position="top">
-          <el-form-item label="启用飞书"><el-switch v-model="feishu.enabled" /></el-form-item>
           <el-form-item label="App ID"><el-input v-model="feishu.app_id" placeholder="cli_..." /></el-form-item>
-          <el-form-item label="App Secret"><el-input v-model="feishu.app_secret" type="password" show-password placeholder="App ID 不变时可留空" /><small v-if="feishu.app_secret_configured" class="muted">已有密钥已配置，页面不会回显；更换 App ID 时请填写新密钥。</small></el-form-item>
+          <el-form-item label="App Secret">
+            <el-input v-model="feishu.app_secret" type="password" show-password placeholder="App ID 不变时可留空" />
+          </el-form-item>
           <el-button type="primary" :loading="savingFeishu" @click="saveFeishu">验证凭证并保存</el-button>
           <el-button v-if="feishu.app_id || feishu.app_secret_configured" type="danger" plain :loading="deletingFeishu" @click="deleteFeishu">解绑并删除当前机器人</el-button>
         </el-form>
@@ -159,4 +169,5 @@ onUnmounted(() => { if (statusTimer) clearInterval(statusTimer) })
 <style scoped>
 .settings-page{max-width:1160px}.settings-stack{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}.settings-forms{margin-bottom:18px}.settings-stack>.card{width:100%;padding:24px 26px}.settings-stack>.card h3{margin-top:0}.model-settings-card>p{margin:0 0 18px}.settings-forms :deep(.el-form){max-width:680px}.status-stack>.card{padding-top:20px;padding-bottom:20px}@media(max-width:700px){.settings-stack>.card{padding:20px 18px}}
 .memory-list{margin-top:18px;border-top:1px solid #e5e7eb}.memory-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid #e5e7eb}.memory-row span{overflow-wrap:anywhere}
+.feishu-header{display:flex;align-items:center;justify-content:space-between;gap:16px;max-width:680px;margin-bottom:18px}.feishu-header h3{margin:0}
 </style>

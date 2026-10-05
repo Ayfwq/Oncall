@@ -11,6 +11,8 @@
 7. [RELEASE_VALIDATION.md](RELEASE_VALIDATION.md) —— 已实际执行的验收结果。
 8. [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) —— 当前模块状态和外部阻塞项。
 9. [FEISHU_SETUP.md](FEISHU_SETUP.md) —— 飞书应用配置。
+10. [RAG_EVALUATION.md](RAG_EVALUATION.md) —— Ragas 数据集、真实链路采集、评分、报告与回归门禁。
+11. [AGENT_RAG_MEMORY_CODE_WALKTHROUGH.md](AGENT_RAG_MEMORY_CODE_WALKTHROUGH.md) —— 结合具体代码文件和行号，系统讲解 Agent、状态、知识库、工具、记忆与 Ragas 评估。
 
 设计附件：
 
