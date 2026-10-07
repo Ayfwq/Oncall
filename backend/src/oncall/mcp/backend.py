@@ -12,7 +12,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, PendingRollbackError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from oncall.agent.tool_contracts import ALLOWED_TOOLS, validate_tool_args
 from oncall.application.alert_labels import severity_label, status_label
 from oncall.application.project_service import ProjectService
 from oncall.domain.schemas import ToolResult
@@ -28,6 +27,7 @@ from oncall.infrastructure.db.models import (
 )
 from oncall.integrations.observability import RemoteObservabilityIntegration
 from oncall.integrations.prometheus_api import PrometheusClient, project_metric_promql
+from oncall.mcp.contracts import ALLOWED_TOOLS, validate_tool_args
 from oncall.monitoring.signals import SUPPORTED_SIGNALS
 from oncall.rag.retrieval import KnowledgeRetriever
 from oncall.security.redact import redact_text
@@ -40,7 +40,7 @@ class ToolExecutionContext:
     agent_run_id: UUID
 
 
-class ToolRegistry:
+class DiagnosticTools:
     def __init__(self, session: AsyncSession):
         self.session = session
         self._retriever: KnowledgeRetriever | None = None

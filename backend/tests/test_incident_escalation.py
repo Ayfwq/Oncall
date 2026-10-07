@@ -4,9 +4,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
-import pytest
-
 import oncall.application.incident_service as incident_module
+import pytest
 from oncall.application.incident_service import IncidentService, _escalation_text
 from oncall.infrastructure.db.models import Conversation, Incident, Notification
 

@@ -15,8 +15,6 @@ from oncall.agent.model_gateway import ModelProvider, get_model_provider
 from oncall.agent.prompts import DECISION_SCHEMA, STREAM_ANSWER_PROMPT, SYSTEM_PROMPT
 from oncall.agent.router import classify_intent
 from oncall.agent.state import OncallState
-from oncall.agent.tool_contracts import ALLOWED_TOOLS, public_tool_specs
-from oncall.agent.tool_registry import ToolExecutionContext, ToolRegistry
 from oncall.application.alert_labels import localize_alert_answer, severity_label
 from oncall.application.conversation_service import ConversationService
 from oncall.application.memory_policy import count_tokens, trim_to_tokens
@@ -31,6 +29,9 @@ from oncall.infrastructure.db.models import (
     Notification,
     Project,
 )
+from oncall.mcp.backend import ToolExecutionContext
+from oncall.mcp.client import MCPToolClient
+from oncall.mcp.contracts import ALLOWED_TOOLS
 from oncall.security.redact import redact_text
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,8 @@ class OncallGraphRuntime:
     def __init__(self, session: AsyncSession, model: ModelProvider | None = None, emit=None):
         self.session = session
         self.model = model or get_model_provider()
-        self.tools = ToolRegistry(session)
+        self.tools = MCPToolClient(session)
+        self.tool_specs: list[dict] = []
         self.context = ContextBuilder(session)
         self.emit = emit  # optional sync callable emit(event_type:str, data:dict)
 
@@ -243,7 +245,7 @@ class OncallGraphRuntime:
             )
         }
         allowed = set(state.get("allowed_tools") or [])
-        context["available_tools"] = [x for x in public_tool_specs() if x["name"] in allowed]
+        context["available_tools"] = [x for x in self.tool_specs if x["name"] in allowed]
         context["knowledge_hits"] = self._trim_for_context(
             state.get("knowledge_hits"),
             max_items=8,
@@ -328,6 +330,7 @@ class OncallGraphRuntime:
         return g.compile(checkpointer=checkpointer)
 
     async def load_context(self, state: OncallState) -> dict:
+        self.tool_specs = await self.tools.list_tools()
         built = await self.context.build(
             UUID(state["conversation_id"]),
             UUID(state["project_id"]) if state.get("project_id") else None,
@@ -374,7 +377,7 @@ class OncallGraphRuntime:
         if route.get("intent") == "active_alerts":
             route["allowed_tools"] = ["query_active_alerts"]
         elif route.get("requires_realtime"):
-            route["allowed_tools"] = [x["name"] for x in public_tool_specs()]
+            route["allowed_tools"] = [x["name"] for x in self.tool_specs]
         elif route.get("requires_knowledge"):
             route["allowed_tools"] = ["search_knowledge"]
         else:

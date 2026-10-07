@@ -102,10 +102,11 @@ async def test_search_knowledge_tool_writes_retrieval_trace(rag_kb, db):
     await db.refresh(run)
     conv_id, run_id = conv.id, run.id
 
-    from oncall.agent.tool_registry import ToolExecutionContext, ToolRegistry
+    from oncall.mcp.backend import ToolExecutionContext
+    from oncall.mcp.client import MCPToolClient
 
     ctx = ToolExecutionContext(project_id=None, incident_id=None, agent_run_id=run_id)
-    result = await ToolRegistry(db).execute(
+    result = await MCPToolClient(db).execute(
         "search_knowledge", {"query": "PostgreSQL connection refused 怎么处理"}, ctx
     )
     assert result.ok, (result.error_code, result.data)

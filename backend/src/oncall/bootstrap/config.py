@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from dotenv import dotenv_values
 from pydantic import Field, model_validator
@@ -24,6 +25,11 @@ class Settings(BaseSettings):
     milvus_token: str = "root:Milvus"
     data_dir: Path = Path("./data")
     secret_master_key: str = ""
+    # External clients are bound to one configured conversation/project.
+    # Internal Agent calls use scoped in-memory MCP and need no credentials.
+    mcp_access_token: str = Field(default="", repr=False)
+    mcp_conversation_id: UUID | None = None
+    mcp_allowed_hosts: list[str] = ["127.0.0.1:*", "localhost:*", "127.0.0.1", "localhost"]
     model_provider: str = "openai-compatible"
     model_display_name: str = "大语言模型"
     model_base_url: str = "https://api.siliconflow.cn/v1"

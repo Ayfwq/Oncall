@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from oncall.application.incident_service import _notification_text
@@ -23,7 +23,7 @@ def test_alert_notification_marks_fallback_as_system_record_time():
         "测试项目",
         {"labels": {"alertname": "DiskHigh"}},
         uuid4(),
-        datetime(2026, 10, 1, 4, 30, tzinfo=timezone.utc),
+        datetime(2026, 10, 1, 4, 30, tzinfo=UTC),
     )
 
     assert "**系统记录时间**：2026-10-01 12:30:00（北京时间）" in text

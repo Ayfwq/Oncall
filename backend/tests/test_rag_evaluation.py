@@ -114,6 +114,7 @@ async def test_capture_production_trimming_and_citation_excerpts():
             return AgentDecision(action="final", answer="依据知识库回答")
 
     runtime = OncallGraphRuntime.__new__(OncallGraphRuntime)
+    runtime.tool_specs = []
     context = runtime._context(
         {
             "user_message": "如何排查采集异常？",

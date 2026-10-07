@@ -1,92 +1,45 @@
-# Feishu Bot Setup
+# 飞书接入
 
-Two-step setup. The first step is a one-time click-through in the Feishu
-developer console. The second step is one PowerShell command. After that,
-the bot can chat, and proactive push works automatically once you message
-the bot once.
+平台通过飞书 WebSocket 接收消息，Agent 经 MCP 查询证据，Notification Worker 发送回复和告警。
 
-## 1. Feishu developer console (one-time, ~3 minutes)
+## 配置应用
 
-Open **https://open.feishu.cn/app** and sign in.
+在[飞书开发平台](https://open.feishu.cn/app)创建企业自建应用并启用机器人，配置消息读取/发送权限与 `im.message.receive_v1` 事件，选择长连接接收事件并发布应用。用户须在应用可用范围内。
 
-1. **Create app** → **企业自建应用** → name it (e.g. "PulseOps") →
-   create.
-2. Open the app → **凭证与基础信息** → copy the **App ID** (`cli_xxx`)
-   and **App Secret** (you'll paste both into the script next).
-3. **添加应用能力** → **机器人** → enable.
-4. **权限管理** → add and request the following scopes (an admin may
-   need to approve):
-   - `im:message` (获取与发送单聊、群组消息)
-   - `im:message:send_as_bot` (以应用的身份发消息)
-   - `im:chat` (获取群组信息)
-5. **事件与回调** → **事件订阅** → **订阅方式** = **使用长连接接收事件**
-   (this project uses lark-oapi WebSocket, no public callback URL is
-   needed) → add event **`接收消息 v2 1.0`** (`im.message.receive_v1`).
-6. **版本管理与发布** → create a version → **申请发布**. For
-   self-built apps in the same tenant, the bot becomes usable once the
-   version is approved (often instant for the creator, otherwise after
-   an admin approves).
-
-You now have everything the script needs. Keep this tab open.
-
-## 2. Run the setup script
-
-From the repo root:
+在仓库根目录运行：
 
 ```powershell
 .\scripts\setup-feishu.ps1
 ```
 
-It will prompt for the App ID and App Secret (the secret input is
-masked), then:
+脚本提示输入 App ID/Secret，验证凭证、写入 `.env`，重启 API 和 Agent Worker，并等待 WebSocket 连接。通知发送还需要 Notification Worker；完整本地启动使用 `.\scripts\start-all.ps1`。
 
-- validates the credentials against the Feishu auth endpoint (immediate
-  feedback if anything is wrong),
-- writes the Feishu block into `.env`,
-- pre-warms `lark_oapi` (first Windows run can take 1-4 min while
-  Windows Defender scans the package; subsequent runs are seconds),
-- restarts `oncall-api` and `oncall-agent-worker`,
-- polls until the Feishu WebSocket reports `connected to wss://`.
+也可以直接配置 `.env`：
 
-The official Feishu SDK reconnects after a dropped WebSocket connection. Retry
-limits can be tuned with `ONCALL_FEISHU_WS_INITIAL_RETRY_SECONDS` and
-`ONCALL_FEISHU_WS_MAX_RETRY_SECONDS`. Outbox delivery uses a database lease;
-another agent worker can reclaim a stale notification after
-`ONCALL_FEISHU_OUTBOX_CLAIM_SECONDS`.
-
-If you want to pin proactive push to a specific group/user (instead of
-using auto-bind), pass `-DefaultReceiveId`:
-
-```powershell
-.\scripts\setup-feishu.ps1 -DefaultReceiveId oc_xxxxxxxxxxxxxxxxxxxx
+```dotenv
+ONCALL_FEISHU_ENABLED=true
+ONCALL_FEISHU_APP_ID=<App ID>
+ONCALL_FEISHU_APP_SECRET=<App Secret>
+ONCALL_FEISHU_DEFAULT_RECEIVE_ID=<可选 chat_id 或 open_id>
+ONCALL_FEISHU_DEFAULT_RECEIVE_ID_TYPE=chat_id
 ```
 
-## What you do next in Feishu
+指定用户 `open_id` 时将类型改为 `open_id`。生产部署修改环境后运行 `sudo bash deploy/update.sh`，见[部署说明](../deploy/README.md)。
 
-1. Search for the bot by the app name (in step 1.1) and open a private
-   chat.
-2. Send any message, e.g. `hello`. The bot replies through the Agent
-   (RAG / monitoring / etc.). This first message also **auto-binds
-   proactive push** to that chat — no chat_id hunting required.
-3. In a group, add the bot to the group, then **@-mention** it to
-   trigger it. (The bot only receives messages that @-mention it in
-   groups.)
-4. Commands in chat: `/new` (new session), `/help`.
+## 使用
 
-To switch the proactive push target later (e.g. you want cards in a
-specific ops group), re-run the script with `-DefaultReceiveId` and the
-group's `chat_id` (or a user's `open_id`).
+- 私聊机器人发送运维问题；群内将机器人加入群并 @ 它。
+- `/new` 新建会话，`/help` 查看帮助。
+- 回复告警消息继续调查同一事件。
+- 主动通知优先使用配置的接收目标；未配置时使用最早绑定的飞书聊天，后续聊天不会自动改换目标。
 
-## Troubleshooting
+## 排查
 
-- **Script says "timed out"** and the log shows no `connected to wss://`
-  line → the app is likely not yet published/visible. Re-check step 1.6
-  and the app's **可用范围** (availability). The bot must be visible to
-  at least the user who will message it.
-- **Script says "credential validation failed"** → the App ID or App
-  Secret is wrong. Re-copy from 凭证与基础信息.
-- **Bot does not reply in a group** → you must @-mention it; it
-  silently ignores other messages.
-- **Active push (Incident cards) never arrive** → message the bot at
-  least once first to trigger auto-bind, or set
-  `ONCALL_FEISHU_DEFAULT_RECEIVE_ID` in `.env` and restart.
+| 现象 | 检查 |
+| --- | --- |
+| WebSocket 未连接 | 应用发布、可用范围、长连接事件设置；查看 API 日志 |
+| 凭证校验失败 | App ID / Secret |
+| 群聊无回复 | 机器人是否入群、是否被 @ |
+| 告警未发送 | 接收目标、发送权限、Notification Worker 与通知 outbox |
+
+常规启动日志位于 `logs/local`；配置脚本连接检查使用 `logs/api.err.log`。WebSocket 重试由 `ONCALL_FEISHU_WS_INITIAL_RETRY_SECONDS` 和 `ONCALL_FEISHU_WS_MAX_RETRY_SECONDS` 控制；通知租约由 `ONCALL_FEISHU_OUTBOX_CLAIM_SECONDS` 控制。验证边界见 [VALIDATION.md](VALIDATION.md)。

@@ -1,20 +1,12 @@
 # 文档导航
 
-按“先理解、再运行、后验证”的顺序阅读：
-
-1. [ARCHITECTURE.md](ARCHITECTURE.md) —— 系统边界、数据源和进程职责。
-2. [MONITORING_DESIGN.md](MONITORING_DESIGN.md) —— Prometheus/Alertmanager 告警链路、统一规则与降噪。
-3. [AGENT_TOOL_FLOW.md](AGENT_TOOL_FLOW.md) —— 7 个只读工具和 Agent 诊断编排。
-4. [PULSEOPS_AGENT_GUIDE.md](PULSEOPS_AGENT_GUIDE.md) —— 逐节点解释 Agent 流程、记忆、工具和异步编排。
-5. [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) —— Windows 本地启动与配置。
-6. [PROJECT_CONFIGURATION_PLAN.md](PROJECT_CONFIGURATION_PLAN.md) —— 项目接入和配置校验。
-7. [RELEASE_VALIDATION.md](RELEASE_VALIDATION.md) —— 已实际执行的验收结果。
-8. [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) —— 当前模块状态和外部阻塞项。
-9. [FEISHU_SETUP.md](FEISHU_SETUP.md) —— 飞书应用配置。
-10. [RAG_EVALUATION.md](RAG_EVALUATION.md) —— Ragas 数据集、真实链路采集、评分、报告与回归门禁。
-11. [AGENT_RAG_MEMORY_CODE_WALKTHROUGH.md](AGENT_RAG_MEMORY_CODE_WALKTHROUGH.md) —— 结合具体代码文件和行号，系统讲解 Agent、状态、知识库、工具、记忆与 Ragas 评估。
-
-设计附件：
-
-- [TECHNICAL_SELECTION_REPORT.docx](TECHNICAL_SELECTION_REPORT.docx)
-- [DEVELOPMENT_DESIGN.docx](DEVELOPMENT_DESIGN.docx)
+| 文档 | 内容 |
+| --- | --- |
+| [TECH_STACK.md](TECH_STACK.md) | 技术栈与代码目录 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 数据流、进程与职责 |
+| [MCP.md](MCP.md) | 工具、认证与外部接入 |
+| [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) | 本地运行；生产部署见 [deploy/README.md](../deploy/README.md) |
+| [PROJECT_CONFIGURATION_PLAN.md](PROJECT_CONFIGURATION_PLAN.md) | 服务器与项目接入 |
+| [FEISHU_SETUP.md](FEISHU_SETUP.md) | 飞书配置 |
+| [RAG_EVALUATION.md](RAG_EVALUATION.md) | 正式 RAG 评估入口 |
+| [VALIDATION.md](VALIDATION.md) | 当前验证结果与服务限制 |

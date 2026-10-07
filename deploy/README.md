@@ -39,7 +39,7 @@ sudo journalctl -u oncall-pull.service -n 100 --no-pager
 | 更新内容 | 服务器动作 |
 | --- | --- |
 | `backend/` Python 代码 | 执行迁移并重启后端进程，复用依赖镜像 |
-| `pyproject.toml`、`uv.lock`、`Dockerfile.backend` | 重建后端镜像、迁移并重启 |
+| `pyproject.toml`、`uv.lock`、`Dockerfile.backend`、`.dockerignore` | 重建后端镜像、迁移并重启 |
 | 前端源码或依赖 | 重建前端镜像 |
 | `compose.server.yaml` 或 `.env` | 手动运行 `sudo bash deploy/update.sh`，由 Compose 协调变更 |
 
@@ -49,3 +49,9 @@ sudo journalctl -u oncall-pull.service -n 100 --no-pager
 docker compose -f compose.server.yaml ps
 docker compose -f compose.server.yaml logs --tail=100 api
 ```
+
+## MCP 接入
+
+内部 Agent 的 MCP 调用随平台启动。外部客户端连接平台的 `/api/mcp`，使用独立 Bearer Token；配置令牌、绑定会话和允许域名后运行 `sudo bash deploy/update.sh`，见 [MCP 接入说明](../docs/MCP.md)。Nginx 已转发 `/api/`，无须另开服务端口。
+
+Docker 镜像排除测试、文档、维护脚本和本地输出；生产不安装 `dev` 或 `evaluation` extra。数据库迁移保留完整链。当前检查结果见 [验证记录](../docs/VALIDATION.md)。

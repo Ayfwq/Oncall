@@ -15,7 +15,7 @@ REQUIRED_IMPORTS = (
     "langgraph",
     "docling",
     "pymilvus",
-    "psutil",
+    "mcp",
     "httpx",
 )
 OPTIONAL_IMPORTS = ("docker", "lark_oapi")

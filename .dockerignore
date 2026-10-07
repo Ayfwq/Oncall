@@ -8,6 +8,10 @@
 !.env.example
 !.env.server.example
 __pycache__
+backend/tests
+scripts
+docs
+evaluation
 *.py[cod]
 .pytest_cache
 .mypy_cache
@@ -16,6 +20,7 @@ data
 logs
 work
 outputs
+output
 deploy/*
 !deploy/nginx.conf
 frontend/node_modules

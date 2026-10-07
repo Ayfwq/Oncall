@@ -272,7 +272,7 @@ class KnowledgeIngestor:
             if not meta:
                 return None, []
             for raw in list(getattr(meta, "doc_items", []) or []):
-                item = raw[0] if isinstance(raw, (tuple, list)) and raw else raw
+                item = raw[0] if isinstance(raw, tuple | list) and raw else raw
                 for prov in list(getattr(item, "prov", []) or []):
                     page = getattr(prov, "page_no", None)
                     if isinstance(page, int):

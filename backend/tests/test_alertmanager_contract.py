@@ -11,7 +11,7 @@ def _routes() -> set[tuple[str, str]]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     actual: set[tuple[str, str]] = set()
     for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         for decorator in node.decorator_list:
             if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):

@@ -18,7 +18,7 @@ rag:
 notification:
 	uv run oncall-notification-worker
 test:
-	uv run pytest -q
+	uv run pytest -m offline -q
 lint:
 	uv run ruff check backend/src backend/tests
 frontend:

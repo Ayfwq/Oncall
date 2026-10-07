@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.routing import Route
 
 from oncall.agent.model_gateway import get_model_provider
 from oncall.api.deps import current_user
@@ -77,6 +78,7 @@ from oncall.infrastructure.db.models import (
     User,
 )
 from oncall.infrastructure.db.session import SessionFactory, get_session
+from oncall.mcp.http import mcp_http
 from oncall.security.crypto import SecretBox
 
 logger = logging.getLogger(__name__)
@@ -110,7 +112,7 @@ async def _collector_check(server: MonitoredServerDTO) -> dict:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def api_lifespan(app: FastAPI):
     import os
 
     if s.langgraph_strict_msgpack:
@@ -165,7 +167,14 @@ async def lifespan(app: FastAPI):
         await app.state.checkpointer_cm.__aexit__(None, None, None)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with mcp_http.lifespan(), api_lifespan(app):
+        yield
+
+
 app = FastAPI(title="PulseOps · 巡脉智能运维平台", version="1.0.0", lifespan=lifespan)
+app.router.routes.append(Route("/api/mcp", mcp_http, methods=["GET", "POST", "DELETE"]))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[s.web_origin],
@@ -2464,8 +2473,8 @@ async def delete_feishu_settings(
 
 
 @app.get("/api/settings/tool-contracts")
-async def settings_tool_contracts(user=Depends(current_user)):
-    from oncall.agent.tool_contracts import public_tool_specs
+async def settings_mcp_tools(user=Depends(current_user)):
+    from oncall.mcp.contracts import public_tool_specs
 
     return {"tools": public_tool_specs()}
 

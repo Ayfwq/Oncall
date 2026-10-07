@@ -7,7 +7,7 @@ $venv = Join-Path $root '.venv\Scripts'
 $services = @('oncall-api', 'oncall-agent-worker', 'oncall-notification-worker', 'oncall-rag-worker')
 foreach ($service in $services) {
   if (!(Test-Path (Join-Path $venv "$service.exe"))) {
-    throw 'Missing .venv console scripts. Run first: uv sync --all-extras'
+    throw 'Missing .venv console scripts. Run first: uv sync --locked --extra dev'
   }
 }
 $viteCli = Join-Path $root 'frontend\node_modules\vite\bin\vite.js'

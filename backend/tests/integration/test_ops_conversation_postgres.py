@@ -1,8 +1,9 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from oncall.agent.context_builder import ContextBuilder
-from oncall.agent.tool_registry import ToolExecutionContext, ToolRegistry
 from oncall.application.conversation_service import ConversationService
 from oncall.application.ops_conversation import OpsConversationService
 from oncall.channels.feishu_events import FeishuInboundMessage
@@ -13,10 +14,14 @@ from oncall.infrastructure.db.models import (
     Incident,
     Notification,
     Project,
+    ToolRun,
     User,
 )
 from oncall.infrastructure.db.session import SessionFactory
-from sqlalchemy import delete
+from oncall.mcp.backend import ToolExecutionContext
+from oncall.mcp.client import MCPToolClient
+from oncall.mcp.http import execute_external
+from sqlalchemy import delete, select
 
 
 @pytest.mark.integration
@@ -112,7 +117,7 @@ async def test_alerts_share_one_visible_chat_and_followups_stay_scoped():
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_active_alert_query_is_scoped_to_current_user():
+async def test_active_alert_query_is_scoped_to_current_user(monkeypatch):
     own_id, other_id = uuid4(), uuid4()
     async with SessionFactory() as db:
         db.add_all([
@@ -135,7 +140,7 @@ async def test_active_alert_query_is_scoped_to_current_user():
             db.add(run)
             await db.commit()
 
-            result = await ToolRegistry(db).execute(
+            result = await MCPToolClient(db).execute(
                 "query_active_alerts", {},
                 ToolExecutionContext(project_id=None, incident_id=None, agent_run_id=run.id),
             )
@@ -143,6 +148,22 @@ async def test_active_alert_query_is_scoped_to_current_user():
             assert [row["alertname"] for row in result.data["alerts"]] == ["own-open"]
             assert result.data["alerts"][0]["severity"] == "警告"
             assert result.data["alerts"][0]["status"] == "待调查"
+            monkeypatch.setattr("oncall.mcp.http.get_settings", lambda: SimpleNamespace(
+                mcp_conversation_id=conv.id
+            ))
+            monkeypatch.setattr("oncall.application.workspace_service.ensure_local_user", AsyncMock(
+                return_value=SimpleNamespace(id=own_id)
+            ))
+            external = await execute_external("query_active_alerts", {})
+            assert external.ok
+            assert [row["alertname"] for row in external.data["alerts"]] == ["own-open"]
+            audit = await db.scalar(
+                select(ToolRun).join(AgentRun).where(
+                    AgentRun.conversation_id == conv.id, AgentRun.mode == "mcp"
+                )
+            )
+            assert audit is not None and audit.tool_name == "query_active_alerts"
+            assert audit.status == "ok"
         finally:
             await db.rollback()
             await db.execute(delete(User).where(User.id.in_([own_id, other_id])))

@@ -82,7 +82,7 @@ def test_fastapi_route_surface_matches_release_contract():
     tree = ast.parse(path.read_text(encoding="utf-8"))
     actual = set()
     for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         for dec in node.decorator_list:
             if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Attribute):

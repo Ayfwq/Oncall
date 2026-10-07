@@ -27,7 +27,7 @@ DEFAULT_DATASET = ROOT / "evaluation" / "datasets" / "knowledge.jsonl"
 
 def pipeline_hash() -> str:
     paths = []
-    for folder in ("agent", "rag", "evaluation"):
+    for folder in ("agent", "mcp", "rag", "evaluation"):
         paths.extend((ROOT / "backend/src/oncall" / folder).rglob("*.py"))
     paths.extend(
         ROOT / f"backend/src/oncall/application/{name}.py"
